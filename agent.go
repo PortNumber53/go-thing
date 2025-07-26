@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/slack-go/slack"
 	genai "google.golang.org/genai"
 )
 
@@ -58,6 +59,121 @@ func geminiAPIHandler(ctx context.Context, query string) (string, error) {
 		return "", err
 	}
 	return resp.Text(), nil
+}
+
+// Slack webhook handler
+func handleSlackWebhook(c *gin.Context) {
+	// Read the request body
+	body, err := ioutil.ReadAll(c.Request.Body)
+	if err != nil {
+		log.Printf("[Slack Webhook] Error reading body: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
+		return
+	}
+
+	// Parse the Slack event
+	var event slack.Event
+	if err := json.Unmarshal(body, &event); err != nil {
+		log.Printf("[Slack Webhook] Error parsing event: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event format"})
+		return
+	}
+
+	// Handle URL verification challenge
+	if event.Type == "url_verification" {
+		var challenge struct {
+			Challenge string `json:"challenge"`
+		}
+		if err := json.Unmarshal(body, &challenge); err != nil {
+			log.Printf("[Slack Webhook] Error parsing challenge: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid challenge format"})
+			return
+		}
+		log.Printf("[Slack Webhook] URL verification challenge received: %s", challenge.Challenge)
+		c.JSON(http.StatusOK, gin.H{"challenge": challenge.Challenge})
+		return
+	}
+
+	// Handle events
+	if event.Type == "event_callback" {
+		var callback struct {
+			Event slack.MessageEvent `json:"event"`
+		}
+		if err := json.Unmarshal(body, &callback); err != nil {
+			log.Printf("[Slack Webhook] Error parsing callback: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid callback format"})
+			return
+		}
+
+		// Handle message events
+		handleSlackMessage(c, &callback.Event)
+	} else {
+		log.Printf("[Slack Webhook] Unhandled event type: %s", event.Type)
+		c.JSON(http.StatusOK, gin.H{"status": "event received"})
+	}
+}
+
+// Handle regular message events
+func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
+	// Ignore bot messages to prevent loops
+	if event.BotID != "" {
+		log.Printf("[Slack Message] Ignoring bot message from bot ID: %s", event.BotID)
+		c.JSON(http.StatusOK, gin.H{"status": "bot message ignored"})
+		return
+	}
+
+	// Check if this is a direct message or the bot was mentioned
+	// For now, we'll process all messages in direct messages
+	// In a real implementation, you'd check the channel type and bot mentions
+
+	// Process the message with Gemini
+	reply, err := geminiAPIHandler(context.Background(), event.Text)
+	if err != nil {
+		log.Printf("[Slack Message] Gemini error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process message"})
+		return
+	}
+
+	// Try to send response back to Slack using the Slack API
+	if err := sendSlackResponse(event.Channel, reply); err != nil {
+		log.Printf("[Slack Message] Failed to send response to Slack: %v", err)
+		// Still return success to Slack to avoid retries
+	}
+
+	log.Printf("[Slack Message] Channel: %s, User: %s, Text: %s", event.Channel, event.User, event.Text)
+	log.Printf("[Slack Message] Response: %s", reply)
+	c.JSON(http.StatusOK, gin.H{"status": "message processed", "reply": reply})
+}
+
+// Send response back to Slack
+func sendSlackResponse(channel, message string) error {
+	// Load config to get Slack bot token
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %v", err)
+	}
+
+	botToken := cfg["SLACK_BOT_TOKEN"]
+	if botToken == "" {
+		return fmt.Errorf("SLACK_BOT_TOKEN missing in config")
+	}
+
+	// Create Slack client
+	api := slack.New(botToken)
+
+	// Send message
+	_, _, err = api.PostMessage(
+		channel,
+		slack.MsgOptionText(message, false),
+		slack.MsgOptionAsUser(true),
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to post message: %v", err)
+	}
+
+	log.Printf("[Slack API] Message sent to channel %s", channel)
+	return nil
 }
 
 func main() {
@@ -150,6 +266,9 @@ window.sendMsg = sendMsg;
 		c.JSON(http.StatusOK, gin.H{"reply": reply})
 	})
 
+	r.POST("/webhook/slack", handleSlackWebhook)
+
+	// Keep the existing generic webhook for backward compatibility
 	r.POST("/webhook", func(c *gin.Context) {
 		// Placeholder for Slack webhook integration
 		c.JSON(http.StatusOK, gin.H{"status": "webhook received"})

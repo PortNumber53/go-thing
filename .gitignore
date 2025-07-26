@@ -1,6 +1,7 @@
 # Project specific
 tmp/
 .env
+test_webhook.sh
 .env.local
 .env.development.local
 .env.test.local

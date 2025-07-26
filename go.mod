@@ -4,6 +4,7 @@ go 1.24.5
 
 require (
 	github.com/gin-gonic/gin v1.10.1
+	github.com/slack-go/slack v0.17.3
 	google.golang.org/genai v1.16.0
 )
 
