@@ -368,7 +368,9 @@ func listAvailableTools() (string, error) {
 }
 
 // Enhanced Gemini API call with tool awareness
-func geminiAPIHandler(ctx context.Context, query string) (string, error) {
+func geminiAPIHandler(ctx context.Context, task string) (string, error) {
+	// Debug log to confirm handler entry
+	log.Printf("[Gemini API] Handler invoked for task: %s", task)
 	cfg, err := loadConfig()
 	if err != nil {
 		return "", err
@@ -382,39 +384,43 @@ func geminiAPIHandler(ctx context.Context, query string) (string, error) {
 		return "", err
 	}
 
-	// Enhanced system prompt requiring JSON output for tool calls
-	systemPrompt := `You are an AI assistant with access to system tools. Output tool calls in JSON format like this: {"tool": "tool_name", "args": {"arg1": "value1", "arg2": "value2"}} when you need to use a tool. Do not output anything else.
-
-Available tools:
-- disk_space: Get disk space information. Args: path (string)
-- write_file: Write content to a file. Args: path (string), content (string)
-
-Always use tools for appropriate tasks.`
-	fullPrompt := systemPrompt + "\n\nUser query: " + query
-	resp, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(fullPrompt), nil)
-	if err != nil {
-		return "", err
-	}
-	responseText := resp.Text()
-	// Parse response for tool call
-	var toolCall struct {
-		Tool string                 `json:"tool"`
-		Args map[string]interface{} `json:"args"`
-	}
-	err = json.Unmarshal([]byte(responseText), &toolCall)
-	if err == nil && toolCall.Tool != "" {
-		toolResp, err := executeTool(toolCall.Tool, toolCall.Args)
+	var finalResponse string
+	maxIterations := 5  // Safety limit to avoid loops
+	for i := 0; i < maxIterations; i++ {
+		// Clear, iterative system prompt with task and context
+		systemPrompt := `STRICT MODE: Output ABSOLUTELY NOTHING BUT a JSON object for tool calls {"tool": "tool_name", "args": {"arg1": "value1"}} or Markdown for final responses. No explanatory text. Task: ` + task + `. Context: ` + finalResponse + ` Available tools: - disk_space: Get disk space. Args: path (string). - write_file: Write file. Args: path (string), content (string).`
+		log.Printf("[Gemini API] Sending prompt: %s", systemPrompt)
+		resp, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(systemPrompt), nil)
 		if err != nil {
-			return fmt.Sprintf("Tool execution failed: %v", err), nil
+			return "", err
 		}
-		if toolResp.Success {
-			return fmt.Sprintf("Tool %s executed successfully: %v", toolCall.Tool, toolResp.Data), nil
+		responseText := resp.Text()
+		log.Printf("[Gemini API] Received response: %s", responseText)
+
+		// Parse for JSON tool call
+		var toolCall struct {
+			Tool string                 `json:"tool"`
+			Args map[string]interface{} `json:"args"`
+		}
+		err = json.Unmarshal([]byte(responseText), &toolCall)
+		if err == nil && toolCall.Tool != "" {
+			// Execute the tool and append result to context
+			toolResp, err := executeTool(toolCall.Tool, toolCall.Args)
+			if err != nil {
+				return fmt.Sprintf("Tool execution failed: %v", err), nil
+			}
+			if toolResp.Success {
+				finalResponse += fmt.Sprintf("Executed %s: %v\n", toolCall.Tool, toolResp.Data)
+			} else {
+				return fmt.Sprintf("Tool %s failed: %s", toolCall.Tool, toolResp.Error), nil
+			}
 		} else {
-			return fmt.Sprintf("Tool %s failed: %s", toolCall.Tool, toolResp.Error), nil
+			// No tool call, add response and exit if it's the final output
+			finalResponse += responseText
+			break
 		}
 	}
-	// If not a tool call, return response directly
-	return responseText, nil
+	return finalResponse, nil
 }
 
 // Process user message with tool support
@@ -574,6 +580,7 @@ func sendSlackResponse(channel, message string) error {
 }
 
 func main() {
+	log.Printf("[Startup] Starting go-thing agent")
 	r := gin.Default()
 
 	r.GET("/", func(c *gin.Context) {
@@ -648,19 +655,17 @@ window.sendMsg = sendMsg;
 			Message string `json:"message"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "bad request"})
+			c.JSON(400, gin.H{"error": "Invalid request"})
 			return
 		}
-		log.Printf("[POST /chat] Received: %q", req.Message)
-		// Call Gemini API
-		reply, err := processUserMessage(req.Message)
+		log.Printf("[Chat Handler] Received task: %s", req.Message)
+		response, err := geminiAPIHandler(c.Request.Context(), req.Message)
 		if err != nil {
-			log.Printf("[POST /chat] Error processing message: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"reply": "[Error] " + err.Error()})
+			log.Printf("[Chat Handler] Error in geminiAPIHandler: %v", err)
+			c.JSON(500, gin.H{"error": err.Error()})
 			return
 		}
-		log.Printf("[POST /chat] Gemini reply: %q", reply)
-		c.JSON(http.StatusOK, gin.H{"reply": reply})
+		c.JSON(200, gin.H{"response": response})
 	})
 
 	r.POST("/webhook/slack", handleSlackWebhook)
