@@ -1,73 +1,179 @@
-# Go Thing
+# Go-Thing AI Agent
 
-A Go-based AI agent with web interface and Slack integration.
+An AI agent with tool calling capabilities, built with Go and Gemini API.
 
 ## Features
 
-- Web-based chat interface using Gemini AI
-- Slack webhook integration for bot responses
-- RESTful API endpoints
+- **AI Chat Interface**: Web-based chat interface with Markdown support
+- **Slack Integration**: Webhook support for Slack integration
+- **Tool System**: Extensible tool calling system with JSON-based communication
+- **Available Tools**:
+  - `disk_space`: Get disk space information for any path
+  - `write_file`: Write files to configured directory
 
-## Setup
+## Tool System
 
-### Configuration
+The agent has access to a powerful tool system that allows it to interact with the host system safely.
 
-Create a config file at `$HOME/.config/go-thing/config` with the following JSON structure:
+### Tool Commands
 
+- `/tools` - List all available tools
+- `/tool <tool_name> --help` - Get help for a specific tool
+- `/tool <tool_name> [--param value]` - Execute a tool with parameters
+
+### Available Tools
+
+#### disk_space
+Get disk space information for a specified path.
+
+**Usage:**
+```
+/tool disk_space                    # Check current directory
+/tool disk_space --path /home       # Check /home directory
+/tool disk_space --help             # Show help
+```
+
+**Output:**
 ```json
 {
-  "GEMINI_API_KEY": "your-gemini-api-key",
-  "SLACK_BOT_TOKEN": "xoxb-your-slack-bot-token"
+  "path": "/home",
+  "total_bytes": 107374182400,
+  "free_bytes": 53687091200,
+  "used_bytes": 53687091200,
+  "total_gb": 100.0,
+  "free_gb": 50.0,
+  "used_gb": 50.0,
+  "usage_percent": 50.0
 }
 ```
 
-### Slack Integration
+#### write_file
+Write content to a file in the configured write directory.
 
-To set up Slack integration:
+**Usage:**
+```
+/tool write_file --path test.txt --content "Hello World"
+/tool write_file --help
+```
 
-1. Create a Slack app at https://api.slack.com/apps
-2. Add the following bot token scopes:
-   - `chat:write` - To send messages
-   - `channels:read` - To read channel information
-   - `im:read` - To read direct messages
-   - `mpim:read` - To read group direct messages
+**Requirements:**
+- Must be configured with `write_dir` in config file
+- File path must be within the configured write directory
 
-3. Subscribe to bot events:
-   - `message.im` - Direct messages to the bot
-   - `message.mpim` - Group direct messages to the bot
-   - `app_mention` - When the bot is mentioned in channels
+## Setup
 
-4. Set the Request URL to: `https://your-domain.com/webhook/slack`
+1. **Configuration**: Create `~/.config/go-thing/config` with:
+   ```json
+   {
+     "GEMINI_API_KEY": "your_gemini_api_key_here",
+     "SLACK_BOT_TOKEN": "xoxb-your_slack_bot_token_here",
+     "write_dir": "/home/username/writable_directory"
+   }
+   ```
 
-5. Install the app to your workspace and copy the Bot User OAuth Token to your config file.
+2. **Quick Start** (Recommended):
+   ```bash
+   ./start.sh
+   ```
+
+3. **Manual Start**:
+   ```bash
+   go run agent.go
+   ```
+
+## Architecture
+
+- **Agent Server** (`agent.go`): Main web server with integrated tool system, chat interface, and Slack integration
+- **Integrated Tools**: All tools run directly within the agent process
+- **JSON Communication**: All tool communication uses JSON format
+- **Security**: File operations restricted to configured directories
 
 ## API Endpoints
 
+### Agent Server (Port 7865)
 - `GET /` - Web chat interface
-- `POST /chat` - Send message to AI agent
+- `POST /chat` - Chat API endpoint
 - `POST /webhook/slack` - Slack webhook endpoint
-- `POST /webhook` - Generic webhook endpoint (legacy)
+- **Integrated Tool System**: All tools run directly within the agent process
 
-## Running
+## Example Usage
+
+The agent is proactive and will automatically execute tools when you ask for information they can provide:
+
+1. **Check disk space**:
+   ```
+   User: How much disk space do I have?
+   Agent: Let me check your disk space for you.
+   
+   Tool disk_space executed successfully:
+   ```json
+   {
+     "path": "/home/username",
+     "total_bytes": 107374182400,
+     "free_bytes": 53687091200,
+     "used_bytes": 53687091200,
+     "total_gb": 100.0,
+     "free_gb": 50.0,
+     "used_gb": 50.0,
+     "usage_percent": 50.0
+   }
+   ```
+   ```
+
+2. **List available tools**:
+   ```
+   User: What tools do you have?
+   Agent: Here are the tools I have available:
+   
+   Available tools:
+   
+   **disk_space** - Get disk space information for a specified path
+     Parameters:
+       - path: Path to check disk space for (optional, defaults to current directory)
+   
+   **write_file** - Write content to a file in the configured write directory
+     Parameters:
+       - path: Path to the file to write
+       - content: Content to write to the file
+   ```
+
+3. **Natural language queries**:
+   ```
+   User: Check my disk usage
+   User: Show me available tools
+   User: What can you do?
+   ```
+   The agent will automatically execute the appropriate tools and show results.
+
+## Security Considerations
+
+- File operations are restricted to configured directories
+- Tool server runs on localhost only
+- All tool inputs are validated and sanitized
+- JSON communication prevents command injection
+
+## Testing
+
+Test the tool system:
 
 ```bash
-go run agent.go
+# Start the agent
+./start.sh
+
+# Then test the tools through the web interface
+# Visit http://localhost:7865 and try:
+# - "How much disk space do I have?"
+# - "What tools do you have?"
+# - "Check disk usage"
 ```
 
-The server will start on `0.0.0.0:7865`.
+## Development
 
-## Usage
+To add new tools:
 
-### Web Interface
+1. Add tool definition to `tools` map in `toolserver.go`
+2. Implement tool execution function
+3. Add case to tool execution switch statement
+4. Update documentation
 
-Visit `http://localhost:7865` to use the web chat interface.
-
-### Slack Bot
-
-Once configured, the bot will:
-- Respond to direct messages
-- Process messages sent to it
-- Use Gemini AI to generate responses
-- Send responses back to the original channel
-
-The bot automatically ignores its own messages to prevent infinite loops.
+The tool system is designed to be easily extensible while maintaining security and consistency.
