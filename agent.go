@@ -369,99 +369,63 @@ func listAvailableTools() (string, error) {
 
 // Enhanced Gemini API call with tool awareness
 func geminiAPIHandler(ctx context.Context, task string) (string, error) {
-	// Debug log to confirm handler entry
 	log.Printf("[Gemini API] Handler invoked for task: %s", task)
 	cfg, err := loadConfig()
 	if err != nil {
-		return "", err
+		return "Error loading config", nil
 	}
 	apiKey := cfg["GEMINI_API_KEY"]
 	if apiKey == "" {
-		return "", fmt.Errorf("GEMINI_API_KEY missing in config")
+		return "GEMINI_API_KEY missing", nil
 	}
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{APIKey: apiKey})
 	if err != nil {
-		return "", err
+		return "Error initializing Gemini client", nil
 	}
 
-	var finalResponse string
-	maxIterations := 5  // Safety limit to avoid loops
-	for i := 0; i < maxIterations; i++ {
-		// Clear, iterative system prompt with task and context
-		systemPrompt := `STRICT MODE: Output ABSOLUTELY NOTHING BUT a JSON object for tool calls {"tool": "tool_name", "args": {"arg1": "value1"}} or Markdown for final responses. No explanatory text. Task: ` + task + `. Context: ` + finalResponse + ` Available tools: - disk_space: Get disk space. Args: path (string). - write_file: Write file. Args: path (string), content (string).`
-		log.Printf("[Gemini API] Sending prompt: %s", systemPrompt)
-		resp, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(systemPrompt), nil)
-		if err != nil {
-			return "", err
-		}
-		responseText := resp.Text()
-		log.Printf("[Gemini API] Received response: %s", responseText)
+	maxIterations := 5
+	originalTask := task
+	var history []string
 
-		// Parse for JSON tool call
-		var toolCall struct {
-			Tool string                 `json:"tool"`
-			Args map[string]interface{} `json:"args"`
+	for i := 0; i < maxIterations; i++ {
+		currentPrompt := originalTask
+		if len(history) > 0 {
+			currentPrompt = fmt.Sprintf("Original Task: %s\n\nHistory of actions:\n%s", originalTask, strings.Join(history, "\n"))
 		}
-		err = json.Unmarshal([]byte(responseText), &toolCall)
-		if err == nil && toolCall.Tool != "" {
-			// Execute the tool and append result to context
+
+		responseText, toolCall, err := callGeminiAPI(client, currentPrompt)
+		if err != nil {
+			log.Printf("[Gemini API] Error in API call: %v", err)
+			return "Gemini API error occurred", nil
+		}
+
+		if toolCall.Tool != "" {
 			toolResp, err := executeTool(toolCall.Tool, toolCall.Args)
 			if err != nil {
-				return fmt.Sprintf("Tool execution failed: %v", err), nil
+				return fmt.Sprintf("Tool %s failed: %v", toolCall.Tool, err), nil
 			}
-			if toolResp.Success {
-				finalResponse += fmt.Sprintf("Executed %s: %v\n", toolCall.Tool, toolResp.Data)
-			} else {
-				return fmt.Sprintf("Tool %s failed: %s", toolCall.Tool, toolResp.Error), nil
-			}
+
+			// Add tool call and result to history
+			history = append(history, fmt.Sprintf("- Tool call: %s with args %v", toolCall.Tool, toolCall.Args))
+			history = append(history, fmt.Sprintf("- Tool result: %s", summarizeToolResponse(toolResp)))
 		} else {
-			// No tool call, add response and exit if it's the final output
-			finalResponse += responseText
-			break
+			// No tool call, assume this is the final response
+			if strings.TrimSpace(responseText) == "" {
+				return "**No response from Gemini.**", nil
+			}
+			return responseText, nil // Return immediately with Gemini's response
 		}
 	}
-	return finalResponse, nil
+	return "**Max iterations reached or no final response.** Please refine your query.", nil
 }
 
-// Process user message with tool support
-func processUserMessage(message string) (string, error) {
-	// Check for explicit tool commands first
-	if strings.HasPrefix(message, "/tools") {
-		return listAvailableTools()
+// Helper to summarize tool response concisely
+func summarizeToolResponse(resp *ToolResponse) string {
+	if resp.Success {
+		return fmt.Sprint(resp.Data)
+	} else {
+		return fmt.Sprintf("Failed: %s", resp.Error)
 	}
-
-	if strings.HasPrefix(message, "/tool ") {
-		return parseAndExecuteTool(message)
-	}
-
-	// Analyze message for implicit tool requests
-	lowerMessage := strings.ToLower(message)
-
-	// Check for disk space related queries
-	if strings.Contains(lowerMessage, "disk") ||
-		strings.Contains(lowerMessage, "space") ||
-		strings.Contains(lowerMessage, "storage") ||
-		strings.Contains(lowerMessage, "how much space") ||
-		strings.Contains(lowerMessage, "disk usage") ||
-		strings.Contains(lowerMessage, "free space") {
-		// Execute disk space tool
-		result, err := parseAndExecuteTool("/tool disk_space")
-		if err != nil {
-			return "", err
-		}
-		return result, nil
-	}
-
-	// Check for tool listing requests
-	if strings.Contains(lowerMessage, "tools") ||
-		strings.Contains(lowerMessage, "what can you do") ||
-		strings.Contains(lowerMessage, "capabilities") ||
-		strings.Contains(lowerMessage, "available") {
-		return listAvailableTools()
-	}
-
-	// For other messages, use Gemini with tool awareness
-	return geminiAPIHandler(context.Background(), message)
 }
 
 // Slack webhook handler
@@ -614,8 +578,16 @@ if (!chat) return;
 const div = document.createElement('div');
 if (who === 'Agent') {
   div.className = 'agent-msg';
-  // Render Markdown to HTML
-  div.innerHTML = marked.parse(msg);
+  // Render Markdown to HTML with robust error handling
+  if (typeof msg === 'string' && msg !== '') {
+    try {
+      div.innerHTML = marked.parse(msg);
+    } catch (e) {
+      div.textContent = 'Error rendering response: ' + e.message;
+    }
+  } else {
+    div.textContent = 'No or invalid response from server.';
+  }
 } else if (who === 'You') {
   div.className = 'user-msg';
   div.textContent = who + ': ' + msg;
@@ -636,8 +608,20 @@ method: 'POST',
 headers: { 'Content-Type': 'application/json' },
 body: JSON.stringify({ message: msg })
 })
-.then(r => r.json())
-.then(data => append(data.reply, 'Agent'));
+.then(r => {
+  if (!r.ok) throw new Error('Network response was not ok');
+  return r.json();
+})
+.then(data => {
+  if (data.response !== undefined && typeof data.response === 'string') {
+    append(data.response, 'Agent');
+  } else {
+    append('Error: Invalid or missing response from server.', 'System');
+  }
+})
+.catch(error => {
+  append('Error: Failed to communicate with server. ' + error.message, 'System');
+});
 }
 if (input) {
 input.addEventListener('keydown', e => { if (e.key === 'Enter') sendMsg(); });
@@ -655,16 +639,21 @@ window.sendMsg = sendMsg;
 			Message string `json:"message"`
 		}
 		if err := c.BindJSON(&req); err != nil {
-			c.JSON(400, gin.H{"error": "Invalid request"})
+			log.Printf("[Chat Handler] Error binding JSON: %v", err)
+			c.JSON(400, gin.H{"response": "Invalid request format"})
 			return
 		}
-		log.Printf("[Chat Handler] Received task: %s", req.Message)
+		log.Printf("[Chat Handler] Received message: %s", req.Message)
 		response, err := geminiAPIHandler(c.Request.Context(), req.Message)
 		if err != nil {
-			log.Printf("[Chat Handler] Error in geminiAPIHandler: %v", err)
-			c.JSON(500, gin.H{"error": err.Error()})
+			log.Printf("[Chat Handler] Error from geminiAPIHandler: %v", err)
+			c.JSON(500, gin.H{"response": "Internal server error"})
 			return
 		}
+		if strings.TrimSpace(response) == "" {
+			response = "**No response available. Please try again.**"
+		}
+		log.Printf("[Chat Handler] Sending response: %s", response)
 		c.JSON(200, gin.H{"response": response})
 	})
 
@@ -677,4 +666,104 @@ window.sendMsg = sendMsg;
 	})
 
 	r.Run("0.0.0.0:7865")
+}
+
+func callGeminiAPI(client *genai.Client, task string) (string, ToolCall, error) {
+	systemPrompt := `You are a helpful assistant that executes tasks by calling tools.
+
+**Instructions:**
+1. **Analyze the Request:** Review the 'Original Task' and the 'History of actions' to understand what has been done and what is left to do.
+2. **Decide the Next Step:**
+    *   If the task is not yet complete, determine the next tool to call. Output a JSON object for the tool call.
+    *   If the task is complete, provide a final, user-facing response in Markdown.
+3.  **Strict Output Formatting:**
+    *   For tool calls, output **ONLY** a JSON object like: '{"tool": "tool_name", "args": {"arg1": "value1"}}'.
+    *   For final answers, output **ONLY** Markdown-formatted text.
+    *   Do not include any other text, explanations, or conversational filler.
+
+**Available Tools:**
+- disk_space: Get disk space. Args: path (string).
+- write_file: Write file. Args: path (string), content (string).
+
+---
+
+**Current Request:**
+` + task
+	log.Printf("[Gemini API] Sending prompt: %s", systemPrompt)
+	resp, err := client.Models.GenerateContent(context.Background(), "gemini-2.5-flash", genai.Text(systemPrompt), nil)
+	if err != nil {
+		log.Printf("[Gemini API] Error generating content: %v", err)
+		return "", ToolCall{}, err
+	}
+	responseText := resp.Text()
+	log.Printf("[Gemini API] Received response: %s", responseText)
+
+	// Clean the response to extract raw JSON if it's in a markdown block
+	cleanedResponse := strings.TrimSpace(responseText)
+	if strings.HasPrefix(cleanedResponse, "```json") {
+		cleanedResponse = strings.TrimPrefix(cleanedResponse, "```json")
+		cleanedResponse = strings.TrimSuffix(cleanedResponse, "```")
+		cleanedResponse = strings.TrimSpace(cleanedResponse)
+	} else if strings.HasPrefix(cleanedResponse, "```") {
+		cleanedResponse = strings.TrimPrefix(cleanedResponse, "```")
+		cleanedResponse = strings.TrimSuffix(cleanedResponse, "```")
+		cleanedResponse = strings.TrimSpace(cleanedResponse)
+	}
+
+	// Parse for JSON tool call
+	var toolCall ToolCall
+	err = json.Unmarshal([]byte(cleanedResponse), &toolCall)
+	if err == nil && toolCall.Tool != "" {
+		log.Printf("[Gemini API] Tool call detected: %v", toolCall)
+		return responseText, toolCall, nil
+	} else {
+		log.Printf("[Gemini API] No tool call, assuming final response: %s", responseText)
+		return responseText, ToolCall{}, nil
+	}
+}
+
+type ToolCall struct {
+	Tool string                 `json:"tool"`
+	Args map[string]interface{} `json:"args"`
+}
+
+// Process user message with tool support
+func processUserMessage(message string) (string, error) {
+	// Check for explicit tool commands first
+	if strings.HasPrefix(message, "/tools") {
+		return listAvailableTools()
+	}
+
+	if strings.HasPrefix(message, "/tool ") {
+		return parseAndExecuteTool(message)
+	}
+
+	// Analyze message for implicit tool requests
+	lowerMessage := strings.ToLower(message)
+
+	// Check for disk space related queries
+	if strings.Contains(lowerMessage, "disk") ||
+		strings.Contains(lowerMessage, "space") ||
+		strings.Contains(lowerMessage, "storage") ||
+		strings.Contains(lowerMessage, "how much space") ||
+		strings.Contains(lowerMessage, "disk usage") ||
+		strings.Contains(lowerMessage, "free space") {
+		// Execute disk space tool
+		result, err := parseAndExecuteTool("/tool disk_space")
+		if err != nil {
+			return "", err
+		}
+		return result, nil
+	}
+
+	// Check for tool listing requests
+	if strings.Contains(lowerMessage, "tools") ||
+		strings.Contains(lowerMessage, "what can you do") ||
+		strings.Contains(lowerMessage, "capabilities") ||
+		strings.Contains(lowerMessage, "available") {
+		return listAvailableTools()
+	}
+
+	// For other messages, use Gemini with tool awareness
+	return geminiAPIHandler(context.Background(), message)
 }
