@@ -16,7 +16,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/slack-go/slack"
-	genai "google.golang.org/genai"
+	"google.golang.org/genai"
+	"gopkg.in/ini.v1"
+)
+
+import (
+	"go-thing/internal/config"
 )
 
 var (
@@ -72,11 +77,11 @@ Examples:
 	},
 	"write_file": {
 		Name:        "write_file",
-		Description: "Write content to a file in the configured write directory",
+		Description: "Write content to a file in the configured chroot directory",
 		Help: `Usage: /tool write_file --path <filepath> --content <content>
 
 Parameters:
-  --path <filepath>    Path to the file to write (must be within configured write_dir)
+  --path <filepath>    Path to the file to write (must be within configured CHROOT_DIR)
   --content <content>  Content to write to the file
 
 Examples:
@@ -91,15 +96,18 @@ Examples:
 
 func loadConfig() (map[string]string, error) {
 	configOnce.Do(func() {
-		path := os.ExpandEnv("$HOME/.config/go-thing/config")
-		b, err := ioutil.ReadFile(path)
+		path := os.ExpandEnv(config.ConfigFilePath)
+		cfg, err := ini.Load(path)
 		if err != nil {
 			configErr = err
 			return
 		}
-		err = json.Unmarshal(b, &configData)
-		if err != nil {
-			configErr = err
+
+		// Load from [default] section
+		defaultSection := cfg.Section("default")
+		configData = make(map[string]string)
+		for _, key := range defaultSection.Keys() {
+			configData[key.Name()] = key.String()
 		}
 	})
 	return configData, configErr
@@ -198,7 +206,7 @@ func executeWriteFileTool(args map[string]interface{}) (*ToolResponse, error) {
 	}
 
 	// Read config
-	configData, err := ioutil.ReadFile(os.ExpandEnv("$HOME/.config/go-thing/config"))
+	cfg, err := loadConfig()
 	if err != nil {
 		return &ToolResponse{
 			Success: false,
@@ -206,24 +214,15 @@ func executeWriteFileTool(args map[string]interface{}) (*ToolResponse, error) {
 		}, nil
 	}
 
-	var config map[string]string
-	err = json.Unmarshal(configData, &config)
-	if err != nil {
+	writeDir := cfg["CHROOT_DIR"]
+	if writeDir == "" {
 		return &ToolResponse{
 			Success: false,
-			Error:   fmt.Sprintf("Config parse error: %v", err),
+			Error:   "CHROOT_DIR not configured in [default] section",
 		}, nil
 	}
 
-	writeDir, ok := config["write_dir"]
-	if !ok {
-		return &ToolResponse{
-			Success: false,
-			Error:   "write_dir not configured",
-		}, nil
-	}
-
-	// Construct full path relative to write_dir
+	// Construct full path relative to CHROOT_DIR
 	fullPath := filepath.Join(writeDir, path)
 
 	// Create directory if it doesn't exist

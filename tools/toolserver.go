@@ -9,6 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"gopkg.in/ini.v1"
+
+	"go-thing/internal/config"
 )
 
 // Tool represents a tool definition
@@ -65,11 +69,11 @@ Examples:
 	},
 	"write_file": {
 		Name:        "write_file",
-		Description: "Write content to a file in the configured write directory",
+		Description: "Write content to a file in the configured chroot directory",
 		Help: `Usage: /tool write_file --path <filepath> --content <content>
 
 Parameters:
-  --path <filepath>    Path to the file to write (must be within configured write_dir)
+  --path <filepath>    Path to the file to write (must be within configured CHROOT_DIR)
   --content <content>  Content to write to the file
 
 Examples:
@@ -172,7 +176,7 @@ func executeWriteFileTool(args map[string]interface{}) (*ToolResponse, error) {
 	}
 
 	// Read config
-	configData, err := os.ReadFile(os.ExpandEnv("$HOME/.config/go-thing/config"))
+	cfg, err := ini.Load(os.ExpandEnv(config.ConfigFilePath))
 	if err != nil {
 		return &ToolResponse{
 			Success: false,
@@ -180,20 +184,13 @@ func executeWriteFileTool(args map[string]interface{}) (*ToolResponse, error) {
 		}, nil
 	}
 
-	var config map[string]string
-	err = json.Unmarshal(configData, &config)
-	if err != nil {
+	// Load from [default] section
+	defaultSection := cfg.Section("default")
+	writeDir := defaultSection.Key("CHROOT_DIR").String()
+	if writeDir == "" {
 		return &ToolResponse{
 			Success: false,
-			Error:   fmt.Sprintf("Config parse error: %v", err),
-		}, nil
-	}
-
-	writeDir, ok := config["write_dir"]
-	if !ok {
-		return &ToolResponse{
-			Success: false,
-			Error:   "write_dir not configured",
+			Error:   "CHROOT_DIR not configured in [default] section",
 		}, nil
 	}
 

@@ -4,8 +4,8 @@ echo "Starting Go-Thing AI Agent with Integrated Tool System"
 echo "====================================================="
 
 # Check if config file exists
-if [ ! -f "$HOME/.config/go-thing/config" ]; then
-    echo "Error: Config file not found at $HOME/.config/go-thing/config"
+if [ ! -f "$HOME/.config/go-thing/config.ini" ]; then
+    echo "Error: Config file not found at $HOME/.config/go-thing/config.ini"
     echo "Please create the config file with your API keys and settings."
     exit 1
 fi
@@ -45,4 +45,4 @@ echo ""
 echo "Press Ctrl+C to stop the server"
 
 # Wait for user to stop
-wait 
+wait

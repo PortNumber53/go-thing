@@ -57,18 +57,17 @@ Write content to a file in the configured write directory.
 ```
 
 **Requirements:**
-- Must be configured with `write_dir` in config file
-- File path must be within the configured write directory
+- Must be configured with `CHROOT_DIR` in config file
+- File path must be within the configured chroot directory
 
 ## Setup
 
 1. **Configuration**: Create `~/.config/go-thing/config` with:
-   ```json
-   {
-     "GEMINI_API_KEY": "your_gemini_api_key_here",
-     "SLACK_BOT_TOKEN": "xoxb-your_slack_bot_token_here",
-     "write_dir": "/home/username/writable_directory"
-   }
+   ```ini
+   [default]
+   GEMINI_API_KEY=your_gemini_api_key_here
+   SLACK_BOT_TOKEN=xoxb-your_slack_bot_token_here
+   CHROOT_DIR=/home/username/writable_directory
    ```
 
 2. **Quick Start** (Recommended):
