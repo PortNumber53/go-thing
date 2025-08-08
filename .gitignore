@@ -10,6 +10,10 @@ test_webhook.sh
 .env.test
 .env.production
 
+# Logs
+debug.log
+*.log
+
 
 
 
