@@ -4,15 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/gin-gonic/gin"
 	"github.com/slack-go/slack"
@@ -23,6 +22,7 @@ import (
 import (
 	"go-thing/internal/config"
 )
+import toolsrv "go-thing/tools"
 
 var (
 	configOnce sync.Once
@@ -35,6 +35,60 @@ type ToolResponse struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data,omitempty"`
 	Error   string      `json:"error,omitempty"`
+}
+
+// Parse tool command and execute it via tool server
+func parseAndExecuteTool(command string) (string, error) {
+    // Parse /tool command
+    toolRegex := regexp.MustCompile(`^/tool\s+(\w+)(?:\s+(.+))?$`)
+    matches := toolRegex.FindStringSubmatch(command)
+    if len(matches) < 2 {
+        return "", fmt.Errorf("invalid tool command format")
+    }
+
+    toolName := matches[1]
+    argsString := ""
+    if len(matches) > 2 {
+        argsString = matches[2]
+    }
+
+    // Check for help flag
+    if strings.Contains(argsString, "--help") {
+        tool, err := getToolHelp(toolName)
+        if err != nil {
+            return fmt.Sprintf("Error getting help for %s: %v", toolName, err), nil
+        }
+        return fmt.Sprintf("Help for %s:\n%s", toolName, tool.Help), nil
+    }
+
+    // Parse arguments: --key value
+    args := make(map[string]interface{})
+    if argsString != "" {
+        argRegex := regexp.MustCompile(`--(\w+)\s+([^\s]+(?:\s+[^\s]+)*)`)
+        argMatches := argRegex.FindAllStringSubmatch(argsString, -1)
+        for _, m := range argMatches {
+            if len(m) >= 3 {
+                key := m[1]
+                value := strings.Trim(m[2], `"'`)
+                args[key] = value
+            }
+        }
+    }
+
+    // Execute via tool server
+    resp, err := executeTool(toolName, args)
+    if err != nil {
+        return fmt.Sprintf("Error executing tool %s: %v", toolName, err), nil
+    }
+    if !resp.Success {
+        return fmt.Sprintf("Tool %s failed: %s", toolName, resp.Error), nil
+    }
+    // Pretty print result
+    resultBytes, err := json.MarshalIndent(resp.Data, "", "  ")
+    if err != nil {
+        return fmt.Sprintf("Tool %s executed successfully, but failed to format result", toolName), nil
+    }
+    return fmt.Sprintf("Tool %s executed successfully:\n```json\n%s\n```", toolName, string(resultBytes)), nil
 }
 
 // Tool represents a tool definition
@@ -57,42 +111,8 @@ type DiskSpaceInfo struct {
 	UsagePercent float64 `json:"usage_percent"`
 }
 
-// Available tools registry
-var tools = map[string]Tool{
-	"disk_space": {
-		Name:        "disk_space",
-		Description: "Get disk space information for a specified path",
-		Help: `Usage: /tool disk_space [--path <path>]
-
-Parameters:
-  --path <path>    Path to check disk space for (default: current directory)
-
-Examples:
-  /tool disk_space                    # Check current directory
-  /tool disk_space --path /home       # Check /home directory
-  /tool disk_space --help             # Show this help`,
-		Parameters: map[string]string{
-			"path": "Path to check disk space for (optional, defaults to current directory)",
-		},
-	},
-	"write_file": {
-		Name:        "write_file",
-		Description: "Write content to a file in the configured chroot directory",
-		Help: `Usage: /tool write_file --path <filepath> --content <content>
-
-Parameters:
-  --path <filepath>    Path to the file to write (must be within configured CHROOT_DIR)
-  --content <content>  Content to write to the file
-
-Examples:
-  /tool write_file --path test.txt --content "Hello World"
-  /tool write_file --help`,
-		Parameters: map[string]string{
-			"path":    "Path to the file to write",
-			"content": "Content to write to the file",
-		},
-	},
-}
+// Deprecated local tools registry; tools are discovered dynamically from the tool server
+var tools = map[string]Tool{}
 
 func loadConfig() (map[string]string, error) {
 	configOnce.Do(func() {
@@ -113,234 +133,89 @@ func loadConfig() (map[string]string, error) {
 	return configData, configErr
 }
 
-// Get disk space information
-func getDiskSpace(path string) (*DiskSpaceInfo, error) {
-	var stat syscall.Statfs_t
-	err := syscall.Statfs(path, &stat)
-	if err != nil {
-		return nil, err
-	}
-
-	// Calculate sizes
-	totalBytes := stat.Blocks * uint64(stat.Bsize)
-	freeBytes := stat.Bfree * uint64(stat.Bsize)
-	usedBytes := totalBytes - freeBytes
-
-	// Convert to GB
-	totalGB := float64(totalBytes) / (1024 * 1024 * 1024)
-	freeGB := float64(freeBytes) / (1024 * 1024 * 1024)
-	usedGB := float64(usedBytes) / (1024 * 1024 * 1024)
-
-	// Calculate usage percentage
-	usagePercent := 0.0
-	if totalBytes > 0 {
-		usagePercent = (float64(usedBytes) / float64(totalBytes)) * 100
-	}
-
-	return &DiskSpaceInfo{
-		Path:         path,
-		TotalBytes:   totalBytes,
-		FreeBytes:    freeBytes,
-		UsedBytes:    usedBytes,
-		TotalGB:      totalGB,
-		FreeGB:       freeGB,
-		UsedGB:       usedGB,
-		UsagePercent: usagePercent,
-	}, nil
+// getToolsAddr returns the address for the embedded tool server from config or a default
+func getToolsAddr() string {
+    cfg, err := loadConfig()
+    if err != nil {
+        return ":8080"
+    }
+    if v, ok := cfg["TOOLS_ADDR"]; ok && strings.TrimSpace(v) != "" {
+        return strings.TrimSpace(v)
+    }
+    return ":8080"
 }
 
-// Execute disk space tool
-func executeDiskSpaceTool(args map[string]interface{}) (*ToolResponse, error) {
-	path := "."
-	if pathArg, ok := args["path"].(string); ok && pathArg != "" {
-		path = pathArg
-	}
-
-	// Resolve absolute path
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return &ToolResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Invalid path: %v", err),
-		}, nil
-	}
-
-	// Check if path exists
-	if _, err := os.Stat(absPath); os.IsNotExist(err) {
-		return &ToolResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Path does not exist: %s", absPath),
-		}, nil
-	}
-
-	diskInfo, err := getDiskSpace(absPath)
-	if err != nil {
-		return &ToolResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to get disk space: %v", err),
-		}, nil
-	}
-
-	return &ToolResponse{
-		Success: true,
-		Data:    diskInfo,
-	}, nil
-}
-
-// Execute write file tool
-func executeWriteFileTool(args map[string]interface{}) (*ToolResponse, error) {
-	path, ok := args["path"].(string)
-	if !ok || path == "" {
-		return &ToolResponse{
-			Success: false,
-			Error:   "path parameter is required",
-		}, nil
-	}
-
-	content, ok := args["content"].(string)
-	if !ok {
-		return &ToolResponse{
-			Success: false,
-			Error:   "content parameter is required",
-		}, nil
-	}
-
-	// Read config
-	cfg, err := loadConfig()
-	if err != nil {
-		return &ToolResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Config file error: %v", err),
-		}, nil
-	}
-
-	writeDir := cfg["CHROOT_DIR"]
-	if writeDir == "" {
-		return &ToolResponse{
-			Success: false,
-			Error:   "CHROOT_DIR not configured in [default] section",
-		}, nil
-	}
-
-	// Construct full path relative to CHROOT_DIR
-	fullPath := filepath.Join(writeDir, path)
-
-	// Create directory if it doesn't exist
-	dir := filepath.Dir(fullPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return &ToolResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to create directory: %v", err),
-		}, nil
-	}
-
-	// Write the file
-	err = os.WriteFile(fullPath, []byte(content), 0644)
-	if err != nil {
-		return &ToolResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to write file: %v", err),
-		}, nil
-	}
-
-	return &ToolResponse{
-		Success: true,
-		Data: map[string]string{
-			"message": "File written successfully",
-			"path":    fullPath,
-		},
-	}, nil
-}
-
-// Get available tools directly
+// Get available tools from the tool server
 func getAvailableTools() ([]Tool, error) {
-	toolList := make([]Tool, 0, len(tools))
-	for _, tool := range tools {
-		toolList = append(toolList, tool)
-	}
-	return toolList, nil
+    addr := getToolsAddr()
+    url := "http://127.0.0.1" + addr + "/api/tools"
+    log.Printf("[Agent->Tools] GET %s", url)
+    resp, err := http.Get(url)
+    if err != nil {
+        return nil, err
+    }
+    defer resp.Body.Close()
+    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+        return nil, fmt.Errorf("tool server returned %s", resp.Status)
+    }
+    var tr ToolResponse
+    if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
+        return nil, err
+    }
+    if !tr.Success {
+        return nil, fmt.Errorf("tool server error: %s", tr.Error)
+    }
+    b, err := json.Marshal(tr.Data)
+    if err != nil {
+        return nil, err
+    }
+    var list []Tool
+    if err := json.Unmarshal(b, &list); err != nil {
+        return nil, err
+    }
+    return list, nil
 }
 
-// Execute a tool directly
+// Execute a tool by delegating to the tool server
 func executeTool(toolName string, args map[string]interface{}) (*ToolResponse, error) {
-	switch toolName {
-	case "disk_space":
-		return executeDiskSpaceTool(args)
-	case "write_file":
-		return executeWriteFileTool(args)
-	default:
-		return &ToolResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Unknown tool: %s", toolName),
-		}, nil
-	}
+    addr := getToolsAddr()
+    url := "http://127.0.0.1" + addr + "/api/tools"
+    payload := map[string]interface{}{"tool": toolName, "args": args}
+    body, _ := json.Marshal(payload)
+    log.Printf("[Agent->Tools] POST %s body=%s", url, string(body))
+    req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
+    if err != nil {
+        return nil, err
+    }
+    req.Header.Set("Content-Type", "application/json")
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        return nil, err
+    }
+    defer resp.Body.Close()
+    rb, _ := ioutil.ReadAll(resp.Body)
+    log.Printf("[Agent->Tools] Response %s body=%s", resp.Status, string(rb))
+    var tr ToolResponse
+    if err := json.Unmarshal(rb, &tr); err != nil {
+        return nil, err
+    }
+    return &tr, nil
 }
 
 // Get tool help information directly
 func getToolHelp(toolName string) (*Tool, error) {
-	tool, exists := tools[toolName]
-	if !exists {
-		return nil, fmt.Errorf("Tool not found: %s", toolName)
+	list, err := getAvailableTools()
+	if err != nil {
+		return nil, err
 	}
-	return &tool, nil
-}
-
-// Parse tool command and execute it
-func parseAndExecuteTool(command string) (string, error) {
-	// Parse /tool command
-	toolRegex := regexp.MustCompile(`^/tool\s+(\w+)(?:\s+(.+))?$`)
-	matches := toolRegex.FindStringSubmatch(command)
-	if len(matches) < 2 {
-		return "", fmt.Errorf("invalid tool command format")
-	}
-
-	toolName := matches[1]
-	argsString := ""
-	if len(matches) > 2 {
-		argsString = matches[2]
-	}
-
-	// Check for help flag
-	if strings.Contains(argsString, "--help") {
-		tool, err := getToolHelp(toolName)
-		if err != nil {
-			return fmt.Sprintf("Error getting help for %s: %v", toolName, err), nil
-		}
-		return fmt.Sprintf("Help for %s:\n%s", toolName, tool.Help), nil
-	}
-
-	// Parse arguments
-	args := make(map[string]interface{})
-	if argsString != "" {
-		// Simple argument parsing for --key value format
-		argRegex := regexp.MustCompile(`--(\w+)\s+([^\s]+(?:\s+[^\s]+)*)`)
-		argMatches := argRegex.FindAllStringSubmatch(argsString, -1)
-		for _, match := range argMatches {
-			if len(match) >= 3 {
-				key := match[1]
-				value := strings.Trim(match[2], `"'`)
-				args[key] = value
-			}
+	for _, t := range list {
+		if t.Name == toolName {
+			// cache into local map for quick lookup later
+			tools[t.Name] = t
+			return &t, nil
 		}
 	}
-
-	// Execute the tool
-	resp, err := executeTool(toolName, args)
-	if err != nil {
-		return fmt.Sprintf("Error executing tool %s: %v", toolName, err), nil
-	}
-
-	if !resp.Success {
-		return fmt.Sprintf("Tool %s failed: %s", toolName, resp.Error), nil
-	}
-
-	// Format the response
-	resultBytes, err := json.MarshalIndent(resp.Data, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("Tool %s executed successfully, but failed to format result", toolName), nil
-	}
-
-	return fmt.Sprintf("Tool %s executed successfully:\n```json\n%s\n```", toolName, string(resultBytes)), nil
+	return nil, fmt.Errorf("Tool not found: %s", toolName)
 }
 
 // Parse /tools command to list available tools
@@ -543,8 +418,22 @@ func sendSlackResponse(channel, message string) error {
 }
 
 func main() {
-	log.Printf("[Startup] Starting go-thing agent")
-	r := gin.Default()
+    // Setup logging to both stdout and debug.log
+    setupLogFile, err := setupLogging()
+    if err != nil {
+        log.Printf("[Startup] Failed to set up file logging: %v", err)
+    } else if setupLogFile != nil {
+        defer setupLogFile.Close()
+    }
+    log.Printf("[Startup] Starting go-thing agent")
+    // Start embedded tool server so the agent and tools run in the same process
+    go func() {
+        addr := getToolsAddr()
+        if err := toolsrv.Start(addr); err != nil {
+            log.Printf("[Tools] Tool server exited: %v", err)
+        }
+    }()
+    r := gin.Default()
 
 	r.GET("/", func(c *gin.Context) {
 		c.Header("Content-Type", "text/html")
@@ -667,27 +556,59 @@ window.sendMsg = sendMsg;
 	r.Run("0.0.0.0:7865")
 }
 
+// setupLogging configures the global logger and Gin to write to both stdout and a debug.log file.
+// Returns the opened file so caller can defer Close().
+func setupLogging() (*os.File, error) {
+    // Default log file path in current working directory
+    logPath := "debug.log"
+
+    // Try to open in append mode, create if not exists
+    f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+    if err != nil {
+        return nil, err
+    }
+
+    // Write to both stdout and file
+    mw := io.MultiWriter(os.Stdout, f)
+    log.SetOutput(mw)
+    log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
+    // Route Gin logs to the same writer
+    gin.DefaultWriter = mw
+    gin.DefaultErrorWriter = mw
+
+    return f, nil
+}
+
 func callGeminiAPI(client *genai.Client, task string) (string, ToolCall, error) {
-	systemPrompt := `You are a helpful assistant that executes tasks by calling tools.
+	// Build Available Tools section dynamically
+	available, err := getAvailableTools()
+	var toolsSection strings.Builder
+	toolsSection.WriteString("**Available Tools:**\n")
+	if err == nil {
+		for _, t := range available {
+			// Build args signature from Parameters map
+			var params []string
+			for k := range t.Parameters {
+				params = append(params, k)
+			}
+			argSig := ""
+			if len(params) > 0 {
+				argSig = " Args: " + strings.Join(params, ", ") + "."
+			}
+			toolsSection.WriteString(fmt.Sprintf("- %s: %s.%s\n", t.Name, t.Description, argSig))
+		}
+	} else {
+		toolsSection.WriteString("- (failed to load tools)\n")
+	}
 
-**Instructions:**
-1. **Analyze the Request:** Review the 'Original Task' and the 'History of actions' to understand what has been done and what is left to do.
-2. **Decide the Next Step:**
-    *   If the task is not yet complete, determine the next tool to call. Output a JSON object for the tool call.
-    *   If the task is complete, provide a final, user-facing response in Markdown.
-3.  **Strict Output Formatting:**
-    *   For tool calls, output **ONLY** a JSON object like: '{"tool": "tool_name", "args": {"arg1": "value1"}}'.
-    *   For final answers, output **ONLY** Markdown-formatted text.
-    *   Do not include any other text, explanations, or conversational filler.
-
-**Available Tools:**
-- disk_space: Get disk space. Args: path (string).
-- write_file: Write file. Args: path (string), content (string).
-
----
-
-**Current Request:**
-` + task
+	systemPrompt := "You are a helpful assistant that executes tasks by calling tools.\n\n" +
+		"**Instructions:**\n" +
+		"1. **Analyze the Request:** Review the 'Original Task' and the 'History of actions' to understand what has been done and what is left to do.\n" +
+		"2. **Decide the Next Step:**\n    *   If the task is not yet complete, determine the next tool to call. Output a JSON object for the tool call.\n    *   If the task is complete, provide a final, user-facing response in Markdown.\n" +
+		"3.  **Strict Output Formatting:**\n    *   For tool calls, output **ONLY** a JSON object like: '{\"tool\": \"tool_name\", \"args\": {\"arg1\": \"value1\"}}'.\n    *   For final answers, output **ONLY** Markdown-formatted text.\n    *   Do not include any other text, explanations, or conversational filler.\n\n" +
+		toolsSection.String() +
+		"\n---\n\n**Current Request:**\n" + task
 	log.Printf("[Gemini API] Sending prompt: %s", systemPrompt)
 	resp, err := client.Models.GenerateContent(context.Background(), "gemini-2.5-flash", genai.Text(systemPrompt), nil)
 	if err != nil {
