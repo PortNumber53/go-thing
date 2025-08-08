@@ -137,10 +137,18 @@ func toolHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// Start launches the tools HTTP server on the provided address (e.g., ":8080").
-// It blocks the current goroutine.
+// NewServer constructs an *http.Server configured for the tools handler.
+// Call srv.ListenAndServe() to run it, and srv.Shutdown(ctx) to stop gracefully.
+func NewServer(addr string) *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/tools", toolHandler)
+	return &http.Server{Addr: addr, Handler: mux}
+}
+
+// Start is preserved for backward compatibility. It builds a server and blocks.
+// Prefer using NewServer + ListenAndServe/Shutdown for graceful control.
 func Start(addr string) error {
-	http.HandleFunc("/api/tools", toolHandler)
+	srv := NewServer(addr)
 	log.Printf("Starting tool server on %s", addr)
-	return http.ListenAndServe(addr, nil)
+	return srv.ListenAndServe()
 }

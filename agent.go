@@ -9,9 +9,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/slack-go/slack"
@@ -39,56 +42,56 @@ type ToolResponse struct {
 
 // Parse tool command and execute it via tool server
 func parseAndExecuteTool(command string) (string, error) {
-    // Parse /tool command
-    toolRegex := regexp.MustCompile(`^/tool\s+(\w+)(?:\s+(.+))?$`)
-    matches := toolRegex.FindStringSubmatch(command)
-    if len(matches) < 2 {
-        return "", fmt.Errorf("invalid tool command format")
-    }
+	// Parse /tool command
+	toolRegex := regexp.MustCompile(`^/tool\s+(\w+)(?:\s+(.+))?$`)
+	matches := toolRegex.FindStringSubmatch(command)
+	if len(matches) < 2 {
+		return "", fmt.Errorf("invalid tool command format")
+	}
 
-    toolName := matches[1]
-    argsString := ""
-    if len(matches) > 2 {
-        argsString = matches[2]
-    }
+	toolName := matches[1]
+	argsString := ""
+	if len(matches) > 2 {
+		argsString = matches[2]
+	}
 
-    // Check for help flag
-    if strings.Contains(argsString, "--help") {
-        tool, err := getToolHelp(toolName)
-        if err != nil {
-            return fmt.Sprintf("Error getting help for %s: %v", toolName, err), nil
-        }
-        return fmt.Sprintf("Help for %s:\n%s", toolName, tool.Help), nil
-    }
+	// Check for help flag
+	if strings.Contains(argsString, "--help") {
+		tool, err := getToolHelp(toolName)
+		if err != nil {
+			return fmt.Sprintf("Error getting help for %s: %v", toolName, err), nil
+		}
+		return fmt.Sprintf("Help for %s:\n%s", toolName, tool.Help), nil
+	}
 
-    // Parse arguments: --key value
-    args := make(map[string]interface{})
-    if argsString != "" {
-        argRegex := regexp.MustCompile(`--(\w+)\s+([^\s]+(?:\s+[^\s]+)*)`)
-        argMatches := argRegex.FindAllStringSubmatch(argsString, -1)
-        for _, m := range argMatches {
-            if len(m) >= 3 {
-                key := m[1]
-                value := strings.Trim(m[2], `"'`)
-                args[key] = value
-            }
-        }
-    }
+	// Parse arguments: --key value
+	args := make(map[string]interface{})
+	if argsString != "" {
+		argRegex := regexp.MustCompile(`--(\w+)\s+([^\s]+(?:\s+[^\s]+)*)`)
+		argMatches := argRegex.FindAllStringSubmatch(argsString, -1)
+		for _, m := range argMatches {
+			if len(m) >= 3 {
+				key := m[1]
+				value := strings.Trim(m[2], `"'`)
+				args[key] = value
+			}
+		}
+	}
 
-    // Execute via tool server
-    resp, err := executeTool(toolName, args)
-    if err != nil {
-        return fmt.Sprintf("Error executing tool %s: %v", toolName, err), nil
-    }
-    if !resp.Success {
-        return fmt.Sprintf("Tool %s failed: %s", toolName, resp.Error), nil
-    }
-    // Pretty print result
-    resultBytes, err := json.MarshalIndent(resp.Data, "", "  ")
-    if err != nil {
-        return fmt.Sprintf("Tool %s executed successfully, but failed to format result", toolName), nil
-    }
-    return fmt.Sprintf("Tool %s executed successfully:\n```json\n%s\n```", toolName, string(resultBytes)), nil
+	// Execute via tool server
+	resp, err := executeTool(toolName, args)
+	if err != nil {
+		return fmt.Sprintf("Error executing tool %s: %v", toolName, err), nil
+	}
+	if !resp.Success {
+		return fmt.Sprintf("Tool %s failed: %s", toolName, resp.Error), nil
+	}
+	// Pretty print result
+	resultBytes, err := json.MarshalIndent(resp.Data, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("Tool %s executed successfully, but failed to format result", toolName), nil
+	}
+	return fmt.Sprintf("Tool %s executed successfully:\n```json\n%s\n```", toolName, string(resultBytes)), nil
 }
 
 // Tool represents a tool definition
@@ -135,71 +138,71 @@ func loadConfig() (map[string]string, error) {
 
 // getToolsAddr returns the address for the embedded tool server from config or a default
 func getToolsAddr() string {
-    cfg, err := loadConfig()
-    if err != nil {
-        return ":8080"
-    }
-    if v, ok := cfg["TOOLS_ADDR"]; ok && strings.TrimSpace(v) != "" {
-        return strings.TrimSpace(v)
-    }
-    return ":8080"
+	cfg, err := loadConfig()
+	if err != nil {
+		return ":8080"
+	}
+	if v, ok := cfg["TOOLS_ADDR"]; ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return ":8080"
 }
 
 // Get available tools from the tool server
 func getAvailableTools() ([]Tool, error) {
-    addr := getToolsAddr()
-    url := "http://127.0.0.1" + addr + "/api/tools"
-    log.Printf("[Agent->Tools] GET %s", url)
-    resp, err := http.Get(url)
-    if err != nil {
-        return nil, err
-    }
-    defer resp.Body.Close()
-    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-        return nil, fmt.Errorf("tool server returned %s", resp.Status)
-    }
-    var tr ToolResponse
-    if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
-        return nil, err
-    }
-    if !tr.Success {
-        return nil, fmt.Errorf("tool server error: %s", tr.Error)
-    }
-    b, err := json.Marshal(tr.Data)
-    if err != nil {
-        return nil, err
-    }
-    var list []Tool
-    if err := json.Unmarshal(b, &list); err != nil {
-        return nil, err
-    }
-    return list, nil
+	addr := getToolsAddr()
+	url := "http://127.0.0.1" + addr + "/api/tools"
+	log.Printf("[Agent->Tools] GET %s", url)
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("tool server returned %s", resp.Status)
+	}
+	var tr ToolResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
+		return nil, err
+	}
+	if !tr.Success {
+		return nil, fmt.Errorf("tool server error: %s", tr.Error)
+	}
+	b, err := json.Marshal(tr.Data)
+	if err != nil {
+		return nil, err
+	}
+	var list []Tool
+	if err := json.Unmarshal(b, &list); err != nil {
+		return nil, err
+	}
+	return list, nil
 }
 
 // Execute a tool by delegating to the tool server
 func executeTool(toolName string, args map[string]interface{}) (*ToolResponse, error) {
-    addr := getToolsAddr()
-    url := "http://127.0.0.1" + addr + "/api/tools"
-    payload := map[string]interface{}{"tool": toolName, "args": args}
-    body, _ := json.Marshal(payload)
-    log.Printf("[Agent->Tools] POST %s body=%s", url, string(body))
-    req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
-    if err != nil {
-        return nil, err
-    }
-    req.Header.Set("Content-Type", "application/json")
-    resp, err := http.DefaultClient.Do(req)
-    if err != nil {
-        return nil, err
-    }
-    defer resp.Body.Close()
-    rb, _ := ioutil.ReadAll(resp.Body)
-    log.Printf("[Agent->Tools] Response %s body=%s", resp.Status, string(rb))
-    var tr ToolResponse
-    if err := json.Unmarshal(rb, &tr); err != nil {
-        return nil, err
-    }
-    return &tr, nil
+	addr := getToolsAddr()
+	url := "http://127.0.0.1" + addr + "/api/tools"
+	payload := map[string]interface{}{"tool": toolName, "args": args}
+	body, _ := json.Marshal(payload)
+	log.Printf("[Agent->Tools] POST %s body=%s", url, string(body))
+	req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	rb, _ := ioutil.ReadAll(resp.Body)
+	log.Printf("[Agent->Tools] Response %s body=%s", resp.Status, string(rb))
+	var tr ToolResponse
+	if err := json.Unmarshal(rb, &tr); err != nil {
+		return nil, err
+	}
+	return &tr, nil
 }
 
 // Get tool help information directly
@@ -418,22 +421,25 @@ func sendSlackResponse(channel, message string) error {
 }
 
 func main() {
-    // Setup logging to both stdout and debug.log
-    setupLogFile, err := setupLogging()
-    if err != nil {
-        log.Printf("[Startup] Failed to set up file logging: %v", err)
-    } else if setupLogFile != nil {
-        defer setupLogFile.Close()
-    }
-    log.Printf("[Startup] Starting go-thing agent")
-    // Start embedded tool server so the agent and tools run in the same process
-    go func() {
-        addr := getToolsAddr()
-        if err := toolsrv.Start(addr); err != nil {
-            log.Printf("[Tools] Tool server exited: %v", err)
-        }
-    }()
-    r := gin.Default()
+	// Setup logging to both stdout and debug.log
+	setupLogFile, err := setupLogging()
+	if err != nil {
+		log.Printf("[Startup] Failed to set up file logging: %v", err)
+	} else if setupLogFile != nil {
+		defer setupLogFile.Close()
+	}
+	log.Printf("[Startup] Starting go-thing agent")
+	// Start embedded tool server with graceful shutdown support
+	toolsAddr := getToolsAddr()
+	toolServer := toolsrv.NewServer(toolsAddr)
+	go func() {
+		log.Printf("[Tools] Starting tool server on %s", toolsAddr)
+		if err := toolServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("[Tools] Tool server exited with error: %v", err)
+		}
+	}()
+
+	r := gin.Default()
 
 	r.GET("/", func(c *gin.Context) {
 		c.Header("Content-Type", "text/html")
@@ -441,79 +447,183 @@ func main() {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>AI Agent Chat</title>
 <style>
-body { font-family: sans-serif; margin: 2em; }
-#chat { border: 1px solid #ccc; padding: 1em; height: 300px; overflow-y: auto; margin-bottom: 1em; }
-#input { width: 80%; }
-.agent-msg { background: #f6f8fa; padding: 0.5em; border-radius: 4px; margin: 0.5em 0; }
-.user-msg { background: #e6f7ff; padding: 0.5em; border-radius: 4px; margin: 0.5em 0; text-align: right; }
+  :root {
+    --bg: #0b0c0f;
+    --panel: #111318;
+    --border: #2a2f3a;
+    --text: #e6e9ef;
+    --muted: #9aa4b2;
+    --agent: #0f172a;
+    --user: #083344;
+    --primary: #4f46e5;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+  }
+  .chat-container {
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+    z-index: 2;
+  }
+  header h2 { margin: 0; font-size: 1.25rem; }
+  #chat {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding: 16px;
+  }
+  .bubble { padding: 10px 12px; border-radius: 10px; margin: 8px 0; line-height: 1.4; }
+  .agent-msg { background: var(--agent); border: 1px solid var(--border); }
+  .user-msg { background: var(--user); border: 1px solid var(--border); text-align: right; }
+  .system-msg { color: var(--muted); font-size: 0.95em; }
+  .composer {
+    position: sticky;
+    bottom: 0;
+    background: linear-gradient(180deg, rgba(11,12,15,0.6), var(--bg));
+    border-top: 1px solid var(--border);
+    padding: env(safe-area-inset-bottom) 12px 12px 12px;
+  }
+  .row { display: grid; grid-template-columns: 1fr auto; gap: 8px; max-width: 1100px; margin: 0 auto; }
+  textarea#input {
+    width: 100%;
+    min-height: 42px;
+    max-height: 35vh;
+    resize: none;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    background: var(--panel);
+    color: var(--text);
+  }
+  button#sendBtn {
+    align-self: end;
+    height: 42px;
+    padding: 0 16px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--primary);
+    color: white;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button#sendBtn:disabled { opacity: 0.6; cursor: not-allowed; }
+  @media (max-width: 640px) {
+    header h2 { font-size: 1.1rem; }
+    .row { grid-template-columns: 1fr auto; gap: 6px; }
+    button#sendBtn { height: 40px; padding: 0 14px; }
+  }
 </style>
 <!-- Marked.js for Markdown rendering -->
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
-<h2>AI Agent Chat</h2>
-<div id="chat"></div>
-<input id="input" type="text" placeholder="Type a message..." autofocus />
-<button onclick="sendMsg()">Send</button>
+  <div class="chat-container">
+    <header><h2>AI Agent Chat</h2></header>
+    <main id="chat" aria-live="polite" aria-atomic="false"></main>
+    <div class="composer">
+      <div class="row">
+        <textarea id="input" placeholder="Type a message..." rows="1" autofocus aria-label="Message input"></textarea>
+        <button id="sendBtn" type="button" onclick="sendMsg()" aria-label="Send message">Send</button>
+      </div>
+      <div class="system-msg" id="hint">Press Enter to send, Shift+Enter for new line</div>
+    </div>
+  </div>
 <script>
 document.addEventListener('DOMContentLoaded', function() {
 const chat = document.getElementById('chat');
 const input = document.getElementById('input');
+const sendBtn = document.getElementById('sendBtn');
+
+function autoResize(el){
+  if(!el) return;
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.35) + 'px';
+}
+
 function append(msg, who) {
-if (!chat) return;
-const div = document.createElement('div');
-if (who === 'Agent') {
-  div.className = 'agent-msg';
-  // Render Markdown to HTML with robust error handling
-  if (typeof msg === 'string' && msg !== '') {
-    try {
-      div.innerHTML = marked.parse(msg);
-    } catch (e) {
-      div.textContent = 'Error rendering response: ' + e.message;
-    }
+  if (!chat) return;
+  const div = document.createElement('div');
+  div.classList.add('bubble');
+  if (who === 'Agent') {
+    div.classList.add('agent-msg');
+    if (typeof msg === 'string' && msg !== '') {
+      try { div.innerHTML = marked.parse(msg); }
+      catch (e) { div.textContent = 'Error rendering response: ' + e.message; }
+    } else { div.textContent = 'No or invalid response from server.'; }
+  } else if (who === 'You') {
+    div.classList.add('user-msg');
+    div.textContent = msg;
   } else {
-    div.textContent = 'No or invalid response from server.';
+    div.classList.add('system-msg');
+    div.textContent = (who ? who+': ' : '') + msg;
   }
-} else if (who === 'You') {
-  div.className = 'user-msg';
-  div.textContent = who + ': ' + msg;
-} else {
-  div.textContent = (who ? who+': ' : '') + msg;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
 }
-chat.appendChild(div);
-chat.scrollTop = chat.scrollHeight;
+
+function setSending(state){
+  sendBtn.disabled = state;
 }
+
 function sendMsg() {
-if (!input) return;
-const msg = input.value.trim();
-if (!msg) return;
-append(msg, 'You');
-input.value = '';
-fetch('/chat', {
-method: 'POST',
-headers: { 'Content-Type': 'application/json' },
-body: JSON.stringify({ message: msg })
-})
-.then(r => {
-  if (!r.ok) throw new Error('Network response was not ok');
-  return r.json();
-})
-.then(data => {
-  if (data.response !== undefined && typeof data.response === 'string') {
-    append(data.response, 'Agent');
-  } else {
-    append('Error: Invalid or missing response from server.', 'System');
-  }
-})
-.catch(error => {
-  append('Error: Failed to communicate with server. ' + error.message, 'System');
-});
+  if (!input) return;
+  const msg = input.value.trim();
+  if (!msg) return;
+  append(msg, 'You');
+  input.value = '';
+  autoResize(input);
+  setSending(true);
+  const thinking = document.createElement('div');
+  thinking.className = 'bubble system-msg';
+  thinking.textContent = 'Thinking…';
+  chat.appendChild(thinking);
+  chat.scrollTop = chat.scrollHeight;
+
+  fetch('/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: msg })
+  })
+  .then(r => { if (!r.ok) throw new Error('Network response was not ok'); return r.json(); })
+  .then(data => {
+    thinking.remove();
+    if (data.response !== undefined && typeof data.response === 'string') {
+      append(data.response, 'Agent');
+    } else {
+      append('Error: Invalid or missing response from server.', 'System');
+    }
+  })
+  .catch(error => {
+    thinking.remove();
+    append('Error: Failed to communicate with server. ' + error.message, 'System');
+  })
+  .finally(() => setSending(false));
 }
+
 if (input) {
-input.addEventListener('keydown', e => { if (e.key === 'Enter') sendMsg(); });
-window.sendMsg = sendMsg;
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); }
+  });
+  input.addEventListener('input', () => autoResize(input));
+  window.addEventListener('resize', () => autoResize(input));
+  autoResize(input);
+  window.sendMsg = sendMsg;
 }
 });
 </script>
@@ -553,7 +663,43 @@ window.sendMsg = sendMsg;
 		c.JSON(http.StatusOK, gin.H{"status": "webhook received"})
 	})
 
-	r.Run("0.0.0.0:7865")
+	// Run Gin HTTP server with graceful shutdown
+	apiAddr := "0.0.0.0:7865"
+	apiServer := &http.Server{Addr: apiAddr, Handler: r}
+
+	// OS signal handling (SIGINT/SIGTERM) for Air restarts
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		log.Printf("[API] Starting HTTP server on %s", apiAddr)
+		if err := apiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("[API] HTTP server exited with error: %v", err)
+		}
+	}()
+
+	// Wait for termination signal
+	sig := <-quit
+	log.Printf("[Shutdown] Caught signal: %v. Shutting down servers...", sig)
+
+	// Graceful shutdown context
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Shutdown API server first to stop accepting new requests
+	if err := apiServer.Shutdown(ctx); err != nil {
+		log.Printf("[Shutdown] API server shutdown error: %v", err)
+	} else {
+		log.Printf("[Shutdown] API server stopped")
+	}
+
+	// Shutdown tool server
+	if err := toolServer.Shutdown(ctx); err != nil {
+		log.Printf("[Shutdown] Tool server shutdown error: %v", err)
+	} else {
+		log.Printf("[Shutdown] Tool server stopped")
+	}
+	log.Printf("[Shutdown] Done")
 }
 
 // setupLogging configures the global logger and Gin to write to both stdout and a debug.log file.
