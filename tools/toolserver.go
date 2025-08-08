@@ -5,14 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
-	"syscall"
-
-	"gopkg.in/ini.v1"
-
-	"go-thing/internal/config"
 )
 
 // Tool represents a tool definition
@@ -37,199 +29,14 @@ type ToolResponse struct {
 	Error   string      `json:"error,omitempty"`
 }
 
-// DiskSpaceInfo represents disk space information
-type DiskSpaceInfo struct {
-	Path         string  `json:"path"`
-	TotalBytes   uint64  `json:"total_bytes"`
-	FreeBytes    uint64  `json:"free_bytes"`
-	UsedBytes    uint64  `json:"used_bytes"`
-	TotalGB      float64 `json:"total_gb"`
-	FreeGB       float64 `json:"free_gb"`
-	UsedGB       float64 `json:"used_gb"`
-	UsagePercent float64 `json:"usage_percent"`
-}
+// ToolExecutor is a function that executes a tool by name
+type ToolExecutor func(args map[string]interface{}) (*ToolResponse, error)
+
+// Registry mapping tool name to executor implementation
+var toolExecutors = map[string]ToolExecutor{}
 
 // Available tools registry
-var tools = map[string]Tool{
-	"disk_space": {
-		Name:        "disk_space",
-		Description: "Get disk space information for a specified path",
-		Help: `Usage: /tool disk_space [--path <path>]
-
-Parameters:
-  --path <path>    Path to check disk space for (default: current directory)
-
-Examples:
-  /tool disk_space                    # Check current directory
-  /tool disk_space --path /home       # Check /home directory
-  /tool disk_space --help             # Show this help`,
-		Parameters: map[string]string{
-			"path": "Path to check disk space for (optional, defaults to current directory)",
-		},
-	},
-	"write_file": {
-		Name:        "write_file",
-		Description: "Write content to a file in the configured chroot directory",
-		Help: `Usage: /tool write_file --path <filepath> --content <content>
-
-Parameters:
-  --path <filepath>    Path to the file to write (must be within configured CHROOT_DIR)
-  --content <content>  Content to write to the file
-
-Examples:
-  /tool write_file --path test.txt --content "Hello World"
-  /tool write_file --help`,
-		Parameters: map[string]string{
-			"path":    "Path to the file to write",
-			"content": "Content to write to the file",
-		},
-	},
-}
-
-func getDiskSpace(path string) (*DiskSpaceInfo, error) {
-	var stat syscall.Statfs_t
-	err := syscall.Statfs(path, &stat)
-	if err != nil {
-		return nil, err
-	}
-
-	// Calculate sizes
-	totalBytes := stat.Blocks * uint64(stat.Bsize)
-	freeBytes := stat.Bfree * uint64(stat.Bsize)
-	usedBytes := totalBytes - freeBytes
-
-	// Convert to GB
-	totalGB := float64(totalBytes) / (1024 * 1024 * 1024)
-	freeGB := float64(freeBytes) / (1024 * 1024 * 1024)
-	usedGB := float64(usedBytes) / (1024 * 1024 * 1024)
-
-	// Calculate usage percentage
-	usagePercent := 0.0
-	if totalBytes > 0 {
-		usagePercent = (float64(usedBytes) / float64(totalBytes)) * 100
-	}
-
-	return &DiskSpaceInfo{
-		Path:         path,
-		TotalBytes:   totalBytes,
-		FreeBytes:    freeBytes,
-		UsedBytes:    usedBytes,
-		TotalGB:      totalGB,
-		FreeGB:       freeGB,
-		UsedGB:       usedGB,
-		UsagePercent: usagePercent,
-	}, nil
-}
-
-func executeDiskSpaceTool(args map[string]interface{}) (*ToolResponse, error) {
-	path := "."
-	if pathArg, ok := args["path"].(string); ok && pathArg != "" {
-		path = pathArg
-	}
-
-	// Resolve absolute path
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return &ToolResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Invalid path: %v", err),
-		}, nil
-	}
-
-	// Check if path exists
-	if _, err := os.Stat(absPath); os.IsNotExist(err) {
-		return &ToolResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Path does not exist: %s", absPath),
-		}, nil
-	}
-
-	diskInfo, err := getDiskSpace(absPath)
-	if err != nil {
-		return &ToolResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to get disk space: %v", err),
-		}, nil
-	}
-
-	return &ToolResponse{
-		Success: true,
-		Data:    diskInfo,
-	}, nil
-}
-
-func executeWriteFileTool(args map[string]interface{}) (*ToolResponse, error) {
-	path, ok := args["path"].(string)
-	if !ok || path == "" {
-		return &ToolResponse{
-			Success: false,
-			Error:   "path parameter is required",
-		}, nil
-	}
-
-	content, ok := args["content"].(string)
-	if !ok {
-		return &ToolResponse{
-			Success: false,
-			Error:   "content parameter is required",
-		}, nil
-	}
-
-	// Read config
-	cfg, err := ini.Load(os.ExpandEnv(config.ConfigFilePath))
-	if err != nil {
-		return &ToolResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Config file error: %v", err),
-		}, nil
-	}
-
-	// Load from [default] section
-	defaultSection := cfg.Section("default")
-	writeDir := defaultSection.Key("CHROOT_DIR").String()
-	if writeDir == "" {
-		return &ToolResponse{
-			Success: false,
-			Error:   "CHROOT_DIR not configured in [default] section",
-		}, nil
-	}
-
-	// Check if filePath is within writeDir
-	absWriteDir, _ := filepath.Abs(writeDir)
-	absFilePath, _ := filepath.Abs(path)
-	if !strings.HasPrefix(absFilePath, absWriteDir) {
-		return &ToolResponse{
-			Success: false,
-			Error:   "Write denied: path outside allowed directory",
-		}, nil
-	}
-
-	// Create directory if it doesn't exist
-	dir := filepath.Dir(absFilePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return &ToolResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to create directory: %v", err),
-		}, nil
-	}
-
-	// Write the file
-	err = os.WriteFile(absFilePath, []byte(content), 0644)
-	if err != nil {
-		return &ToolResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to write file: %v", err),
-		}, nil
-	}
-
-	return &ToolResponse{
-		Success: true,
-		Data: map[string]string{
-			"message": "File written successfully",
-			"path":    absFilePath,
-		},
-	}, nil
-}
+var tools = map[string]Tool{}
 
 func toolHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -282,16 +89,13 @@ func toolHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Execute tool
+		// Execute tool via registry dispatcher
 		var response *ToolResponse
 		var err error
 
-		switch req.Tool {
-		case "disk_space":
-			response, err = executeDiskSpaceTool(req.Args)
-		case "write_file":
-			response, err = executeWriteFileTool(req.Args)
-		default:
+		if exec, ok := toolExecutors[req.Tool]; ok {
+			response, err = exec(req.Args)
+		} else {
 			response = &ToolResponse{
 				Success: false,
 				Error:   fmt.Sprintf("Unknown tool: %s", req.Tool),
