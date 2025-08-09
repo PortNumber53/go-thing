@@ -7,12 +7,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"gopkg.in/ini.v1"
 
 	"go-thing/internal/config"
+)
+
+const (
+	// defaultTimeoutSec is the default execution timeout in seconds for shell_exec commands.
+	defaultTimeoutSec = 60
+	// maxTimeoutSec is the maximum allowed timeout in seconds to prevent runaway executions.
+	maxTimeoutSec = 600
 )
 
 // executeShellExecTool runs a shell command with the working directory constrained to CHROOT_DIR (or a subdirectory of it)
@@ -26,7 +34,7 @@ func executeShellExecTool(args map[string]interface{}) (*ToolResponse, error) {
 	workdirArg, _ := args["workdir"].(string)
 
 	// Optional timeout seconds
-	var timeoutSec int = 60
+	var timeoutSec int = defaultTimeoutSec
 	if v, ok := args["timeout_sec"]; ok {
 		switch tv := v.(type) {
 		case float64:
@@ -35,16 +43,14 @@ func executeShellExecTool(args map[string]interface{}) (*ToolResponse, error) {
 		case int:
 			timeoutSec = tv
 		case string:
-			if s := strings.TrimSpace(tv); s != "" {
-				if n, err := fmt.Sscanf(s, "%d", &timeoutSec); n == 1 && err == nil {
-					// parsed
-				}
+			if n, err := strconv.Atoi(strings.TrimSpace(tv)); err == nil {
+				timeoutSec = n
 			}
 		}
 	}
-	if timeoutSec <= 0 || timeoutSec > 600 {
-		// clamp to sane range [1, 600]
-		timeoutSec = 60
+	if timeoutSec <= 0 || timeoutSec > maxTimeoutSec {
+		// clamp to sane range [1, maxTimeoutSec]
+		timeoutSec = defaultTimeoutSec
 	}
 
 	// Read config for chroot
@@ -58,7 +64,10 @@ func executeShellExecTool(args map[string]interface{}) (*ToolResponse, error) {
 		return &ToolResponse{Success: false, Error: "CHROOT_DIR not configured in [default] section"}, nil
 	}
 
-	absChroot, _ := filepath.Abs(chroot)
+	absChroot, err := filepath.Abs(chroot)
+	if err != nil {
+		return &ToolResponse{Success: false, Error: fmt.Sprintf("Could not determine absolute path for CHROOT_DIR: %v", err)}, nil
+	}
 	absChroot = filepath.Clean(absChroot)
 
 	// Resolve working directory within chroot
@@ -68,17 +77,21 @@ func executeShellExecTool(args map[string]interface{}) (*ToolResponse, error) {
 		if !filepath.IsAbs(candidate) {
 			candidate = filepath.Join(absChroot, candidate)
 		}
-		absCandidate, _ := filepath.Abs(candidate)
+		absCandidate, err := filepath.Abs(candidate)
+		if err != nil {
+			return &ToolResponse{Success: false, Error: fmt.Sprintf("Could not determine absolute path for workdir: %v", err)}, nil
+		}
 		absCandidate = filepath.Clean(absCandidate)
-		if rel, err := filepath.Rel(absChroot, absCandidate); err != nil || strings.HasPrefix(rel, "..") || (rel == "." && absCandidate == absChroot) {
+		// Allow CHROOT_DIR itself as a valid working directory. Only deny if outside CHROOT.
+		if rel, err := filepath.Rel(absChroot, absCandidate); err != nil || strings.HasPrefix(rel, "..") {
 			return &ToolResponse{Success: false, Error: "Execution denied: workdir outside allowed directory"}, nil
 		}
-		// ensure exists, else use chroot (or we can create); we will ensure it exists and is dir
-		if fi, err := os.Stat(absCandidate); err == nil && fi.IsDir() {
-			targetDir = absCandidate
-		} else if err != nil {
-			return &ToolResponse{Success: false, Error: fmt.Sprintf("Invalid workdir: %v", err)}, nil
-		} else {
+		        // ensure the resolved working directory exists and is a directory
+        if fi, err := os.Stat(absCandidate); err == nil && fi.IsDir() {
+            targetDir = absCandidate
+        } else if err != nil {
+            return &ToolResponse{Success: false, Error: fmt.Sprintf("Invalid workdir: %v", err)}, nil
+        } else {
 			return &ToolResponse{Success: false, Error: "Invalid workdir: not a directory"}, nil
 		}
 	}
