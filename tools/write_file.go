@@ -35,10 +35,15 @@ func executeWriteFileTool(args map[string]interface{}) (*ToolResponse, error) {
 		return &ToolResponse{Success: false, Error: "CHROOT_DIR not configured in [default] section"}, nil
 	}
 
-	// Check if filePath is within writeDir
+	// Resolve path relative to CHROOT and ensure it stays within
 	absWriteDir, _ := filepath.Abs(writeDir)
-	absFilePath, _ := filepath.Abs(path)
-	if !strings.HasPrefix(absFilePath, absWriteDir) {
+	candidate := path
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(absWriteDir, candidate)
+	}
+	absFilePath, _ := filepath.Abs(candidate)
+	absFilePath = filepath.Clean(absFilePath)
+	if rel, err := filepath.Rel(absWriteDir, absFilePath); err != nil || strings.HasPrefix(rel, "..") || rel == "." && absFilePath == absWriteDir {
 		return &ToolResponse{Success: false, Error: "Write denied: path outside allowed directory"}, nil
 	}
 
