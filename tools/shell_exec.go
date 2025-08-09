@@ -48,11 +48,11 @@ func executeShellExecTool(args map[string]interface{}) (*ToolResponse, error) {
 			}
 		}
 	}
-if timeoutSec <= 0 {
-	timeoutSec = 1
-} else if timeoutSec > maxTimeoutSec {
-	timeoutSec = maxTimeoutSec
-}
+	if timeoutSec <= 0 {
+		timeoutSec = 1
+	} else if timeoutSec > maxTimeoutSec {
+		timeoutSec = maxTimeoutSec
+	}
 
 	// Read config for chroot
 	cfg, err := ini.Load(os.ExpandEnv(config.ConfigFilePath))
@@ -97,14 +97,29 @@ if timeoutSec <= 0 {
 		}
 	}
 
-	// Build command using shell for simplicity of pipelines
+	// Ensure the Docker container is running and compute container workdir mapping
+	containerName, derr := EnsureDockerContainer()
+	if derr != nil {
+		return &ToolResponse{Success: false, Error: fmt.Sprintf("Container setup error: %v", derr)}, nil
+	}
+
+	// Map targetDir within CHROOT to /app path in container
+	relPath, _ := filepath.Rel(absChroot, targetDir)
+	containerWorkdir := "/app"
+	if relPath != "." && strings.TrimSpace(relPath) != "" {
+		// Use forward slashes for docker exec path
+		containerWorkdir = "/app/" + filepath.ToSlash(relPath)
+	}
+
+	// Build docker exec command executing shell inside the container with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
-cmd := exec.CommandContext(ctx, "/bin/sh", "-c", cmdStr)
-	cmd.Dir = targetDir
-	// Inherit environment, but we could restrict if needed
-cmd.Env = []string{}
+	// We avoid -t to keep non-interactive; use -i for stdin-less execution is fine to omit
+	execArgs := []string{"exec", "-w", containerWorkdir, containerName, "/bin/sh", "-lc", cmdStr}
+	cmd := exec.CommandContext(ctx, "docker", execArgs...)
+	// Clear environment for safety
+	cmd.Env = []string{}
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
