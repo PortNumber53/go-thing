@@ -30,6 +30,7 @@ var (
 	configOnce sync.Once
 	configData map[string]string
 	configErr  error
+	dockerAutoRemove bool
 )
 
 // ToolResponse represents a response from tool execution
@@ -131,6 +132,7 @@ func loadConfig() (map[string]string, error) {
 		for _, key := range defaultSection.Keys() {
 			configData[key.Name()] = key.String()
 		}
+		dockerAutoRemove = strings.EqualFold(cfg.Section("default").Key("DOCKER_AUTO_REMOVE").String(), "true")
 	})
 	return configData, configErr
 }
@@ -428,15 +430,27 @@ func main() {
 		defer setupLogFile.Close()
 	}
 	log.Printf("[Startup] Starting go-thing agent")
-	// Start embedded tool server with graceful shutdown support
-	toolsAddr := getToolsAddr()
-	toolServer := toolsrv.NewServer(toolsAddr)
-	go func() {
-		log.Printf("[Tools] Starting tool server on %s", toolsAddr)
-		if err := toolServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("[Tools] Tool server exited with error: %v", err)
-		}
-	}()
+	    // Start embedded tool server with graceful shutdown support
+    toolsAddr := getToolsAddr()
+    toolServer := toolsrv.NewServer(toolsAddr)
+    go func() {
+        log.Printf("[Tools] Starting tool server on %s", toolsAddr)
+        if err := toolServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+            log.Printf("[Tools] Tool server exited with error: %v", err)
+        }
+    }()
+
+    // Best-effort: ensure the Docker container used for sandboxed execution is available
+    if name, err := toolsrv.EnsureDockerContainer(); err != nil {
+        log.Printf("[Docker] Ensure container failed (continuing without sandbox): %v", err)
+    } else {
+        log.Printf("[Docker] Container ready: %s", name)
+    }
+
+    // Load DOCKER_AUTO_REMOVE once at startup to avoid repeated config reads on shutdown
+    if cfg, cerr := ini.Load(os.ExpandEnv(config.ConfigFilePath)); cerr == nil {
+        dockerAutoRemove = strings.EqualFold(cfg.Section("default").Key("DOCKER_AUTO_REMOVE").String(), "true")
+    }
 
 	r := gin.Default()
 
@@ -516,6 +530,21 @@ func main() {
 		log.Printf("[Shutdown] Tool server shutdown error: %v", err)
 	} else {
 		log.Printf("[Shutdown] Tool server stopped")
+	}
+
+	// Best-effort: stop and optionally remove the Docker sandbox container
+	if err := toolsrv.StopDockerContainer(); err != nil {
+		log.Printf("[Shutdown] Docker stop error: %v", err)
+	} else {
+		log.Printf("[Shutdown] Docker container stopped")
+	}
+	// Use cached flag for auto-remove to avoid re-reading config on shutdown path
+	if dockerAutoRemove {
+		if err := toolsrv.RemoveDockerContainer(true); err != nil {
+			log.Printf("[Shutdown] Docker remove error: %v", err)
+		} else {
+			log.Printf("[Shutdown] Docker container removed")
+		}
 	}
 	log.Printf("[Shutdown] Done")
 }
