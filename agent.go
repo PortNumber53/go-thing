@@ -30,6 +30,7 @@ var (
 	configOnce sync.Once
 	configData map[string]string
 	configErr  error
+	dockerAutoRemove bool
 )
 
 // ToolResponse represents a response from tool execution
@@ -131,6 +132,7 @@ func loadConfig() (map[string]string, error) {
 		for _, key := range defaultSection.Keys() {
 			configData[key.Name()] = key.String()
 		}
+		dockerAutoRemove = strings.EqualFold(cfg.Section("default").Key("DOCKER_AUTO_REMOVE").String(), "true")
 	})
 	return configData, configErr
 }
@@ -445,6 +447,11 @@ func main() {
         log.Printf("[Docker] Container ready: %s", name)
     }
 
+    // Load DOCKER_AUTO_REMOVE once at startup to avoid repeated config reads on shutdown
+    if cfg, cerr := ini.Load(os.ExpandEnv(config.ConfigFilePath)); cerr == nil {
+        dockerAutoRemove = strings.EqualFold(cfg.Section("default").Key("DOCKER_AUTO_REMOVE").String(), "true")
+    }
+
 	r := gin.Default()
 
 	r.GET("/", func(c *gin.Context) {
@@ -531,15 +538,12 @@ func main() {
 	} else {
 		log.Printf("[Shutdown] Docker container stopped")
 	}
-	// Check config for auto-remove
-	cfg, cerr := ini.Load(os.ExpandEnv(config.ConfigFilePath))
-	if cerr == nil {
-		if strings.EqualFold(cfg.Section("default").Key("DOCKER_AUTO_REMOVE").String(), "true") {
-			if err := toolsrv.RemoveDockerContainer(true); err != nil {
-				log.Printf("[Shutdown] Docker remove error: %v", err)
-			} else {
-				log.Printf("[Shutdown] Docker container removed")
-			}
+	// Use cached flag for auto-remove to avoid re-reading config on shutdown path
+	if dockerAutoRemove {
+		if err := toolsrv.RemoveDockerContainer(true); err != nil {
+			log.Printf("[Shutdown] Docker remove error: %v", err)
+		} else {
+			log.Printf("[Shutdown] Docker container removed")
 		}
 	}
 	log.Printf("[Shutdown] Done")

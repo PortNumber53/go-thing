@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"gopkg.in/ini.v1"
 
@@ -28,7 +29,6 @@ func EnsureDockerContainer() (string, error) {
 	if err != nil {
 		return "", err
 	}
-
 
 	// If container exists and running -> OK
 	running, exists, err := inspectContainerRunning(name)
@@ -52,56 +52,87 @@ func EnsureDockerContainer() (string, error) {
 	return name, nil
 }
 
-// resolveDockerSettings reads INI config and returns (name, image, extraArgs, absChroot)
-func resolveDockerSettings() (string, string, string, string, error) {
-	cfg, err := ini.Load(os.ExpandEnv(config.ConfigFilePath))
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("config file error: %v", err)
-	}
-	s := cfg.Section("default")
-	chroot := strings.TrimSpace(s.Key("CHROOT_DIR").String())
-	if chroot == "" {
-		return "", "", "", "", fmt.Errorf("CHROOT_DIR not configured in [default] section")
-	}
-	absChroot, err := filepath.Abs(chroot)
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("could not resolve CHROOT_DIR: %v", err)
-	}
-	if fi, err := os.Stat(absChroot); err != nil || !fi.IsDir() {
-		return "", "", "", "", fmt.Errorf("CHROOT_DIR does not exist or is not a directory: %s", absChroot)
-	}
+// Cached settings to avoid repeated config reads
+var (
+	settingsOnce              sync.Once
+	cachedName                string
+	cachedImage               string
+	cachedExtra               string
+	cachedAbsChroot           string
+	cachedSettingsLoadErr     error
+)
 
-	name := strings.TrimSpace(s.Key("DOCKER_CONTAINER_NAME").String())
-	if name == "" {
-		name = defaultDockerName
-	}
-	image := strings.TrimSpace(s.Key("DOCKER_IMAGE").String())
-	if image == "" {
-		image = defaultDockerImage
-	}
-	extra := strings.TrimSpace(s.Key("DOCKER_EXTRA_ARGS").String())
-	return name, image, extra, absChroot, nil
+// resolveDockerSettings reads INI config once and returns (name, image, extraArgs, absChroot)
+func resolveDockerSettings() (string, string, string, string, error) {
+	settingsOnce.Do(func() {
+		cfg, err := ini.Load(os.ExpandEnv(config.ConfigFilePath))
+		if err != nil {
+			cachedSettingsLoadErr = fmt.Errorf("config file error: %v", err)
+			return
+		}
+		s := cfg.Section("default")
+		chroot := strings.TrimSpace(s.Key("CHROOT_DIR").String())
+		if chroot == "" {
+			cachedSettingsLoadErr = fmt.Errorf("CHROOT_DIR not configured in [default] section")
+			return
+		}
+		absChroot, err := filepath.Abs(chroot)
+		if err != nil {
+			cachedSettingsLoadErr = fmt.Errorf("could not resolve CHROOT_DIR: %v", err)
+			return
+		}
+		if fi, err := os.Stat(absChroot); err != nil || !fi.IsDir() {
+			cachedSettingsLoadErr = fmt.Errorf("CHROOT_DIR does not exist or is not a directory: %s", absChroot)
+			return
+		}
+
+		name := strings.TrimSpace(s.Key("DOCKER_CONTAINER_NAME").String())
+		if name == "" {
+			name = defaultDockerName
+		}
+		image := strings.TrimSpace(s.Key("DOCKER_IMAGE").String())
+		if image == "" {
+			image = defaultDockerImage
+		}
+		extra := strings.TrimSpace(s.Key("DOCKER_EXTRA_ARGS").String())
+
+		cachedName = name
+		cachedImage = image
+		cachedExtra = extra
+		cachedAbsChroot = absChroot
+	})
+	return cachedName, cachedImage, cachedExtra, cachedAbsChroot, cachedSettingsLoadErr
 }
 
 func dockerRunDetached(name, image, extra, absChroot string) error {
-	// Build docker run command: detached container that stays up
-	// Mount CHROOT_DIR at /app, set workdir to /app
-	cmdStr := fmt.Sprintf("docker run -d --name %s -v %q:/app -w /app %s %s sleep infinity", name, absChroot, extra, image)
-	var stdout, stderr bytes.Buffer
-	cmd := exec.Command("/bin/sh", "-c", cmdStr)
-	cmd.Stdout = &stdout
+	// Build docker run args: detached container that stays up, CHROOT_DIR mounted at /app, workdir /app
+	args := []string{
+		"run", "-d", "--name", name,
+		"-v", fmt.Sprintf("%s:/app", absChroot),
+		"-w", "/app",
+	}
+	if extra != "" {
+		// Split on whitespace to get individual flags; if advanced quoting is required later,
+		// we can swap to a shellwords parser. For now this mitigates injection via /bin/sh -c.
+		args = append(args, strings.Fields(extra)...)
+	}
+	args = append(args, image, "sleep", "infinity")
+
+	var stderr bytes.Buffer
+	cmd := exec.Command("docker", args...)
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		if strings.Contains(stderr.String(), "pull access denied") || strings.Contains(stderr.String(), "not found") {
-			// Attempt a pull then retry once
-			_ = exec.Command("docker", "pull", image).Run()
-			stdout.Reset()
+		errStr := stderr.String()
+		if strings.Contains(errStr, "pull access denied") || strings.Contains(errStr, "not found") {
+			// Attempt a pull then retry once, surfacing pull error if it fails
+			if pullErr := exec.Command("docker", "pull", image).Run(); pullErr != nil {
+				return fmt.Errorf("docker pull for %q failed: %w; original run error: %v", image, pullErr, err)
+			}
 			stderr.Reset()
-			cmd = exec.Command("/bin/sh", "-c", cmdStr)
-			cmd.Stdout = &stdout
-			cmd.Stderr = &stderr
-			if err2 := cmd.Run(); err2 != nil {
-				return fmt.Errorf("docker run failed: %v; stderr: %s", err2, strings.TrimSpace(stderr.String()))
+			cmdRetry := exec.Command("docker", args...)
+			cmdRetry.Stderr = &stderr
+			if err2 := cmdRetry.Run(); err2 != nil {
+				return fmt.Errorf("docker run failed after pull: %v; stderr: %s", err2, strings.TrimSpace(stderr.String()))
 			}
 		} else {
 			return fmt.Errorf("docker run failed: %v; stderr: %s", err, strings.TrimSpace(stderr.String()))
