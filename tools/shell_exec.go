@@ -100,7 +100,7 @@ func executeShellExecTool(args map[string]interface{}) (*ToolResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-lc", cmdStr)
+cmd := exec.CommandContext(ctx, "/bin/sh", "-c", cmdStr)
 	cmd.Dir = targetDir
 	// Inherit environment, but we could restrict if needed
 	cmd.Env = os.Environ()
