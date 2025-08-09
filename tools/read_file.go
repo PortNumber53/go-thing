@@ -28,14 +28,20 @@ func executeReadFileTool(args map[string]interface{}) (*ToolResponse, error) {
 		return &ToolResponse{Success: false, Error: "CHROOT_DIR not configured in [default] section"}, nil
 	}
 
-	absChroot, _ := filepath.Abs(chroot)
-	// Build absolute path anchored in chroot if relative was provided
-	candidate := path
-	if !filepath.IsAbs(candidate) {
-		candidate = filepath.Join(absChroot, candidate)
-	}
-	absPath, _ := filepath.Abs(candidate)
-	absPath = filepath.Clean(absPath)
+absChroot, err := filepath.Abs(chroot)
+if err != nil {
+	return &ToolResponse{Success: false, Error: fmt.Sprintf("Failed to resolve chroot directory: %v", err)}, nil
+}
+// Build absolute path anchored in chroot if relative was provided
+candidate := path
+if !filepath.IsAbs(candidate) {
+	candidate = filepath.Join(absChroot, candidate)
+}
+absPath, err := filepath.Abs(candidate)
+if err != nil {
+	return &ToolResponse{Success: false, Error: fmt.Sprintf("Failed to resolve file path: %v", err)}, nil
+}
+absPath = filepath.Clean(absPath)
 	// Ensure the target stays within chroot using Rel to avoid prefix tricks
 	rel, err := filepath.Rel(absChroot, absPath)
 	if err != nil || strings.HasPrefix(rel, "..") || rel == "." && absPath == absChroot {
