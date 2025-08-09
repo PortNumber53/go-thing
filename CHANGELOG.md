@@ -4,7 +4,7 @@
 
 ### Changed
 - **Consolidated Architecture**: Moved tool system from separate server to integrated within main agent
-- **Single Port**: Agent now only uses port 7865 (removed dependency on port 8080)
+- **Single Port**: Agent now only uses port 7866 (removed dependency on port 8080)
 - **Simplified Deployment**: Only one server process needed instead of two
 
 ### Added
@@ -30,4 +30,4 @@
 - Update startup scripts to use `./start.sh` (single server)
 - Remove any references to port 8080
 - Tool functionality remains the same from user perspective
-- Configuration file format unchanged 
+- Configuration file format unchanged

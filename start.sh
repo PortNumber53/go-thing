@@ -21,7 +21,7 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # Start main agent server in background
-echo "Starting agent server on port 7865..."
+echo "Starting agent server on port 7866..."
 go run agent.go &
 AGENT_PID=$!
 
@@ -29,7 +29,7 @@ AGENT_PID=$!
 sleep 2
 
 # Check if agent server is running
-if ! curl -s http://localhost:7865/ >/dev/null 2>&1; then
+if ! curl -s http://localhost:7866/ >/dev/null 2>&1; then
     echo "Error: Agent server failed to start"
     kill $AGENT_PID 2>/dev/null
     exit 1
@@ -38,8 +38,8 @@ fi
 echo "✓ Agent server started successfully"
 echo ""
 echo "Services are running:"
-echo "  - Agent Server: http://localhost:7865"
-echo "  - Web Chat Interface: http://localhost:7865"
+echo "  - Agent Server: http://localhost:7866"
+echo "  - Web Chat Interface: http://localhost:7866"
 echo "  - Tool System: Integrated (no separate server needed)"
 echo ""
 echo "Press Ctrl+C to stop the server"

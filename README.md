@@ -89,8 +89,8 @@ Write content to a file in the configured write directory.
 
 ## API Endpoints
 
-### Agent Server (Port 7865)
-- `GET /` - Web chat interface
+### Agent Server (Port 7866)
+- `GET /` - JSON health/info endpoint (the chat UI is now a separate React/Vite SPA under `web/`)
 - `POST /chat` - Chat API endpoint
 - `POST /webhook/slack` - Slack webhook endpoint
 - **Integrated Tool System**: All tools run directly within the agent process
@@ -103,7 +103,7 @@ The agent is proactive and will automatically execute tools when you ask for inf
    ```
    User: How much disk space do I have?
    Agent: Let me check your disk space for you.
-   
+
    Tool disk_space executed successfully:
    ```json
    {
@@ -123,13 +123,13 @@ The agent is proactive and will automatically execute tools when you ask for inf
    ```
    User: What tools do you have?
    Agent: Here are the tools I have available:
-   
+
    Available tools:
-   
+
    **disk_space** - Get disk space information for a specified path
      Parameters:
        - path: Path to check disk space for (optional, defaults to current directory)
-   
+
    **write_file** - Write content to a file in the configured write directory
      Parameters:
        - path: Path to the file to write
@@ -160,7 +160,7 @@ Test the tool system:
 ./start.sh
 
 # Then test the tools through the web interface
-# Visit http://localhost:7865 and try:
+# Visit http://localhost:7866 and try:
 # - "How much disk space do I have?"
 # - "What tools do you have?"
 # - "Check disk usage"
