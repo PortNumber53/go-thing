@@ -15,6 +15,12 @@ debug.log
 *.log
 
 
+# Frontend build artifacts
+web/.vite/
+web/dist/
+dist/
+
+
 
 
 
