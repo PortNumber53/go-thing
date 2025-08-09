@@ -1,0 +1,10 @@
+name = "go-thing-frontend"
+compatibility_date = "2025-08-01"
+
+[assets]
+# Vite builds into this directory
+# This is relative to this wrangler.toml file
+# We’ll deploy a SPA, so enable SPA fallback routing
+
+directory = "./web/dist"
+not_found_handling = "single-page-application"
