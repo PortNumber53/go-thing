@@ -87,12 +87,12 @@ if timeoutSec <= 0 {
 		if rel, err := filepath.Rel(absChroot, absCandidate); err != nil || strings.HasPrefix(rel, "..") {
 			return &ToolResponse{Success: false, Error: "Execution denied: workdir outside allowed directory"}, nil
 		}
-		        // ensure the resolved working directory exists and is a directory
-        if fi, err := os.Stat(absCandidate); err == nil && fi.IsDir() {
-            targetDir = absCandidate
-        } else if err != nil {
-            return &ToolResponse{Success: false, Error: fmt.Sprintf("Invalid workdir: %v", err)}, nil
-        } else {
+		// ensure the resolved working directory exists and is a directory
+		if fi, err := os.Stat(absCandidate); err == nil && fi.IsDir() {
+			targetDir = absCandidate
+		} else if err != nil {
+			return &ToolResponse{Success: false, Error: fmt.Sprintf("Invalid workdir: %v", err)}, nil
+		} else {
 			return &ToolResponse{Success: false, Error: "Invalid workdir: not a directory"}, nil
 		}
 	}
