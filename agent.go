@@ -259,7 +259,7 @@ func geminiAPIHandler(ctx context.Context, task string) (string, error) {
 		return "Error initializing Gemini client", nil
 	}
 
-	maxIterations := 5
+	maxIterations := 30
 	originalTask := task
 	var history []string
 
