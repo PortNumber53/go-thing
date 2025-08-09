@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.1.0] - 2025-08-09
+
+### Added
+- shell_exec tool to execute shell commands within the configured CHROOT_DIR, with:
+  - CHROOT confinement identical to read_file/write_file (path resolution with filepath.Rel checks)
+  - Optional workdir (must be inside CHROOT)
+  - Timeout control via --timeout_sec (default 60s, max 600s)
+  - Returns stdout, stderr, and exit_code for robust scripting
+
+### Notes
+- Tool is auto-discovered via the embedded tool server and available to the agent’s tool loop and /tool endpoint.
+- Command is executed using /bin/sh -lc to support pipelines and shell features.
+
 ## [2.0.0] - 2025-07-27
 
 ### Changed
