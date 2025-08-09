@@ -48,10 +48,11 @@ func executeShellExecTool(args map[string]interface{}) (*ToolResponse, error) {
 			}
 		}
 	}
-	if timeoutSec <= 0 || timeoutSec > maxTimeoutSec {
-		// clamp to sane range [1, maxTimeoutSec]
-		timeoutSec = defaultTimeoutSec
-	}
+if timeoutSec <= 0 {
+	timeoutSec = 1
+} else if timeoutSec > maxTimeoutSec {
+	timeoutSec = maxTimeoutSec
+}
 
 	// Read config for chroot
 	cfg, err := ini.Load(os.ExpandEnv(config.ConfigFilePath))
