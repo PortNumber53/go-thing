@@ -103,7 +103,7 @@ func executeShellExecTool(args map[string]interface{}) (*ToolResponse, error) {
 cmd := exec.CommandContext(ctx, "/bin/sh", "-c", cmdStr)
 	cmd.Dir = targetDir
 	// Inherit environment, but we could restrict if needed
-	cmd.Env = os.Environ()
+cmd.Env = []string{}
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
