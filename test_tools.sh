@@ -5,7 +5,7 @@ echo "======================================="
 
 # Test 1: Check if agent is running
 echo -e "\n1. Testing agent server..."
-response=$(curl -s http://localhost:7865/)
+response=$(curl -s http://localhost:7866/)
 if [ $? -eq 0 ]; then
     echo "✓ Agent server is running"
 else
@@ -16,7 +16,7 @@ fi
 
 # Test 2: Test tool execution through chat API
 echo -e "\n2. Testing tool execution through chat API..."
-chat_response=$(curl -s -X POST http://localhost:7865/chat \
+chat_response=$(curl -s -X POST http://localhost:7866/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "How much disk space do I have?"}')
 if [ $? -eq 0 ]; then
@@ -28,7 +28,7 @@ fi
 
 # Test 3: Test tool listing through chat API
 echo -e "\n3. Testing tool listing through chat API..."
-tools_response=$(curl -s -X POST http://localhost:7865/chat \
+tools_response=$(curl -s -X POST http://localhost:7866/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "What tools do you have?"}')
 if [ $? -eq 0 ]; then
@@ -39,5 +39,5 @@ else
 fi
 
 echo -e "\nIntegrated tool system test completed!"
-echo "Note: Make sure the agent is running on port 7865 before running this test."
-echo "Start with: ./start.sh" 
+echo "Note: Make sure the agent is running on port 7866 before running this test."
+echo "Start with: ./start.sh"

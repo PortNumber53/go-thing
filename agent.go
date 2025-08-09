@@ -16,16 +16,15 @@ import (
 	"syscall"
 	"time"
 
+	"go-thing/internal/config"
+
 	"github.com/gin-gonic/gin"
 	"github.com/slack-go/slack"
 	"google.golang.org/genai"
 	"gopkg.in/ini.v1"
-)
 
-import (
-	"go-thing/internal/config"
+	toolsrv "go-thing/tools"
 )
-import toolsrv "go-thing/tools"
 
 var (
 	configOnce sync.Once
@@ -442,194 +441,13 @@ func main() {
 	r := gin.Default()
 
 	r.GET("/", func(c *gin.Context) {
-		c.Header("Content-Type", "text/html")
-		c.String(http.StatusOK, `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>AI Agent Chat</title>
-<style>
-  :root {
-    --bg: #0b0c0f;
-    --panel: #111318;
-    --border: #2a2f3a;
-    --text: #e6e9ef;
-    --muted: #9aa4b2;
-    --agent: #0f172a;
-    --user: #083344;
-    --primary: #4f46e5;
-  }
-  * { box-sizing: border-box; }
-  html, body { height: 100%; }
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
-  }
-  .chat-container {
-    height: 100dvh;
-    display: flex;
-    flex-direction: column;
-  }
-  header {
-    position: sticky;
-    top: 0;
-    background: var(--bg);
-    border-bottom: 1px solid var(--border);
-    padding: 12px 16px;
-    z-index: 2;
-  }
-  header h2 { margin: 0; font-size: 1.25rem; }
-  #chat {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow: auto;
-    padding: 16px;
-  }
-  .bubble { padding: 10px 12px; border-radius: 10px; margin: 8px 0; line-height: 1.4; }
-  .agent-msg { background: var(--agent); border: 1px solid var(--border); }
-  .user-msg { background: var(--user); border: 1px solid var(--border); text-align: right; }
-  .system-msg { color: var(--muted); font-size: 0.95em; }
-  .composer {
-    position: sticky;
-    bottom: 0;
-    background: linear-gradient(180deg, rgba(11,12,15,0.6), var(--bg));
-    border-top: 1px solid var(--border);
-    padding: env(safe-area-inset-bottom) 12px 12px 12px;
-  }
-  .row { display: grid; grid-template-columns: 1fr auto; gap: 8px; max-width: 1100px; margin: 0 auto; }
-  textarea#input {
-    width: 100%;
-    min-height: 42px;
-    max-height: 35vh;
-    resize: none;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 10px 12px;
-    background: var(--panel);
-    color: var(--text);
-  }
-  button#sendBtn {
-    align-self: end;
-    height: 42px;
-    padding: 0 16px;
-    border-radius: 10px;
-    border: 1px solid var(--border);
-    background: var(--primary);
-    color: white;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  button#sendBtn:disabled { opacity: 0.6; cursor: not-allowed; }
-  @media (max-width: 640px) {
-    header h2 { font-size: 1.1rem; }
-    .row { grid-template-columns: 1fr auto; gap: 6px; }
-    button#sendBtn { height: 40px; padding: 0 14px; }
-  }
-</style>
-<!-- Marked.js for Markdown rendering -->
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-</head>
-<body>
-  <div class="chat-container">
-    <header><h2>AI Agent Chat</h2></header>
-    <main id="chat" aria-live="polite" aria-atomic="false"></main>
-    <div class="composer">
-      <div class="row">
-        <textarea id="input" placeholder="Type a message..." rows="1" autofocus aria-label="Message input"></textarea>
-        <button id="sendBtn" type="button" onclick="sendMsg()" aria-label="Send message">Send</button>
-      </div>
-      <div class="system-msg" id="hint">Press Enter to send, Shift+Enter for new line</div>
-    </div>
-  </div>
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-const chat = document.getElementById('chat');
-const input = document.getElementById('input');
-const sendBtn = document.getElementById('sendBtn');
-
-function autoResize(el){
-  if(!el) return;
-  el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.35) + 'px';
-}
-
-function append(msg, who) {
-  if (!chat) return;
-  const div = document.createElement('div');
-  div.classList.add('bubble');
-  if (who === 'Agent') {
-    div.classList.add('agent-msg');
-    if (typeof msg === 'string' && msg !== '') {
-      try { div.innerHTML = marked.parse(msg); }
-      catch (e) { div.textContent = 'Error rendering response: ' + e.message; }
-    } else { div.textContent = 'No or invalid response from server.'; }
-  } else if (who === 'You') {
-    div.classList.add('user-msg');
-    div.textContent = msg;
-  } else {
-    div.classList.add('system-msg');
-    div.textContent = (who ? who+': ' : '') + msg;
-  }
-  chat.appendChild(div);
-  chat.scrollTop = chat.scrollHeight;
-}
-
-function setSending(state){
-  sendBtn.disabled = state;
-}
-
-function sendMsg() {
-  if (!input) return;
-  const msg = input.value.trim();
-  if (!msg) return;
-  append(msg, 'You');
-  input.value = '';
-  autoResize(input);
-  setSending(true);
-  const thinking = document.createElement('div');
-  thinking.className = 'bubble system-msg';
-  thinking.textContent = 'Thinking…';
-  chat.appendChild(thinking);
-  chat.scrollTop = chat.scrollHeight;
-
-  fetch('/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: msg })
-  })
-  .then(r => { if (!r.ok) throw new Error('Network response was not ok'); return r.json(); })
-  .then(data => {
-    thinking.remove();
-    if (data.response !== undefined && typeof data.response === 'string') {
-      append(data.response, 'Agent');
-    } else {
-      append('Error: Invalid or missing response from server.', 'System');
-    }
-  })
-  .catch(error => {
-    thinking.remove();
-    append('Error: Failed to communicate with server. ' + error.message, 'System');
-  })
-  .finally(() => setSending(false));
-}
-
-if (input) {
-  input.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); }
-  });
-  input.addEventListener('input', () => autoResize(input));
-  window.addEventListener('resize', () => autoResize(input));
-  autoResize(input);
-  window.sendMsg = sendMsg;
-}
-});
-</script>
-</body>
-</html>
-`)
+		// Frontend moved to React/Vite SPA served separately.
+		// This endpoint now serves as a simple health/info check.
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "ok",
+			"service": "go-thing agent API",
+			"message": "Frontend is now a React/Vite SPA. Use the SPA for UI; this server exposes /chat and webhooks.",
+		})
 	})
 
 	r.POST("/chat", func(c *gin.Context) {
@@ -664,7 +482,7 @@ if (input) {
 	})
 
 	// Run Gin HTTP server with graceful shutdown
-	apiAddr := "0.0.0.0:7865"
+	apiAddr := "0.0.0.0:7866"
 	apiServer := &http.Server{Addr: apiAddr, Handler: r}
 
 	// OS signal handling (SIGINT/SIGTERM) for Air restarts
@@ -705,25 +523,25 @@ if (input) {
 // setupLogging configures the global logger and Gin to write to both stdout and a debug.log file.
 // Returns the opened file so caller can defer Close().
 func setupLogging() (*os.File, error) {
-    // Default log file path in current working directory
-    logPath := "debug.log"
+	// Default log file path in current working directory
+	logPath := "debug.log"
 
-    // Try to open in append mode, create if not exists
-    f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-    if err != nil {
-        return nil, err
-    }
+	// Try to open in append mode, create if not exists
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
 
-    // Write to both stdout and file
-    mw := io.MultiWriter(os.Stdout, f)
-    log.SetOutput(mw)
-    log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	// Write to both stdout and file
+	mw := io.MultiWriter(os.Stdout, f)
+	log.SetOutput(mw)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-    // Route Gin logs to the same writer
-    gin.DefaultWriter = mw
-    gin.DefaultErrorWriter = mw
+	// Route Gin logs to the same writer
+	gin.DefaultWriter = mw
+	gin.DefaultErrorWriter = mw
 
-    return f, nil
+	return f, nil
 }
 
 func callGeminiAPI(client *genai.Client, task string) (string, ToolCall, error) {
