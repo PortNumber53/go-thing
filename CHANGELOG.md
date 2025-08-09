@@ -13,6 +13,12 @@
 - Tool is auto-discovered via the embedded tool server and available to the agent’s tool loop and /tool endpoint.
 - Command is executed using /bin/sh -lc to support pipelines and shell features.
 
+### Security/Sandboxing
+- Added Docker sandbox execution for shell_exec: commands run inside an Arch Linux container with CHROOT_DIR mounted at /app.
+- Agent startup ensures the container exists and is running.
+- Graceful shutdown now best-effort stops the container and optionally removes it when DOCKER_AUTO_REMOVE=true in config.
+- New helpers in tools/docker_start.go: StopDockerContainer, RemoveDockerContainer(force), and internal dockerStop.
+
 ## [2.0.0] - 2025-07-27
 
 ### Changed

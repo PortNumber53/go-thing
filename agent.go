@@ -428,15 +428,22 @@ func main() {
 		defer setupLogFile.Close()
 	}
 	log.Printf("[Startup] Starting go-thing agent")
-	// Start embedded tool server with graceful shutdown support
-	toolsAddr := getToolsAddr()
-	toolServer := toolsrv.NewServer(toolsAddr)
-	go func() {
-		log.Printf("[Tools] Starting tool server on %s", toolsAddr)
-		if err := toolServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("[Tools] Tool server exited with error: %v", err)
-		}
-	}()
+	    // Start embedded tool server with graceful shutdown support
+    toolsAddr := getToolsAddr()
+    toolServer := toolsrv.NewServer(toolsAddr)
+    go func() {
+        log.Printf("[Tools] Starting tool server on %s", toolsAddr)
+        if err := toolServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+            log.Printf("[Tools] Tool server exited with error: %v", err)
+        }
+    }()
+
+    // Best-effort: ensure the Docker container used for sandboxed execution is available
+    if name, err := toolsrv.EnsureDockerContainer(); err != nil {
+        log.Printf("[Docker] Ensure container failed (continuing without sandbox): %v", err)
+    } else {
+        log.Printf("[Docker] Container ready: %s", name)
+    }
 
 	r := gin.Default()
 
@@ -516,6 +523,24 @@ func main() {
 		log.Printf("[Shutdown] Tool server shutdown error: %v", err)
 	} else {
 		log.Printf("[Shutdown] Tool server stopped")
+	}
+
+	// Best-effort: stop and optionally remove the Docker sandbox container
+	if err := toolsrv.StopDockerContainer(); err != nil {
+		log.Printf("[Shutdown] Docker stop error: %v", err)
+	} else {
+		log.Printf("[Shutdown] Docker container stopped")
+	}
+	// Check config for auto-remove
+	cfg, cerr := ini.Load(os.ExpandEnv(config.ConfigFilePath))
+	if cerr == nil {
+		if strings.EqualFold(cfg.Section("default").Key("DOCKER_AUTO_REMOVE").String(), "true") {
+			if err := toolsrv.RemoveDockerContainer(true); err != nil {
+				log.Printf("[Shutdown] Docker remove error: %v", err)
+			} else {
+				log.Printf("[Shutdown] Docker container removed")
+			}
+		}
 	}
 	log.Printf("[Shutdown] Done")
 }
