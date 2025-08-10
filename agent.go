@@ -35,6 +35,9 @@ var (
 	configData       map[string]string
 	configErr        error
 	dockerAutoRemove bool
+	// once-computed cache for CURRENT_CONTEXT_MAX_ITEMS to avoid repeated file I/O and parsing in hot paths
+	contextMaxItemsOnce   sync.Once
+	contextMaxItemsCached int
 )
 
 // Precompiled regex to collapse accidental double slashes while avoiding schemes like http://
@@ -135,28 +138,36 @@ func getContextMaxItems() int {
 		maxValue     = 50
 	)
 
-	cfg, err := loadConfig()
-	if err != nil {
-		return defaultValue
-	}
+	contextMaxItemsOnce.Do(func() {
+		// Default first
+		contextMaxItemsCached = defaultValue
 
-	v := strings.TrimSpace(cfg["CURRENT_CONTEXT_MAX_ITEMS"])
-	if v == "" {
-		return defaultValue
-	}
+		cfg, err := loadConfig()
+		if err != nil {
+			return
+		}
 
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return defaultValue
-	}
+		v := strings.TrimSpace(cfg["CURRENT_CONTEXT_MAX_ITEMS"])
+		if v == "" {
+			return
+		}
 
-	if n < minValue {
-		return minValue
-	}
-	if n > maxValue {
-		return maxValue
-	}
-	return n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return
+		}
+
+		if n < minValue {
+			contextMaxItemsCached = minValue
+			return
+		}
+		if n > maxValue {
+			contextMaxItemsCached = maxValue
+			return
+		}
+		contextMaxItemsCached = n
+	})
+	return contextMaxItemsCached
 }
 
 // getOrCreateAnyThread returns the most recently updated thread id if one exists,
@@ -652,7 +663,7 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load conversation context"})
 		return
 	}
-	reply, updatedCtx, err := geminiAPIHandler(context.Background(), event.Text, initialCtx)
+	reply, updatedCtx, err := geminiAPIHandler(c.Request.Context(), event.Text, initialCtx)
 	if err != nil {
 		log.Printf("[Slack Message] Gemini error: %v", err)
 		// Notify user of failure and stop processing to avoid persisting an invalid reply
