@@ -577,8 +577,8 @@ func main() {
 				log.Printf("[Postgres] Migrations applied from %s", pgcfg.MigrationsDir)
 			}
 			// Per-conversation threads are created on demand (HTTP per request unless provided, Slack per channel).
-        }
-    }
+		}
+	}
 
 	// Log applied config (masked where sensitive) if available
 	if iniErr == nil {
