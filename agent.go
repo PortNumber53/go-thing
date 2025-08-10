@@ -517,7 +517,8 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
         "channel": event.Channel,
     }); err != nil {
         log.Printf("[Slack Message] Failed to persist assistant message: %v", err)
-        // still try to send Slack response, but report error to caller
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist assistant message"})
+        return
     }
 
     // Try to send response back to Slack using the Slack API
