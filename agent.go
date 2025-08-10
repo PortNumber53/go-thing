@@ -11,11 +11,13 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"go-thing/db"
 	"go-thing/internal/config"
 
 	"github.com/gin-gonic/gin"
@@ -27,9 +29,9 @@ import (
 )
 
 var (
-	configOnce sync.Once
-	configData map[string]string
-	configErr  error
+	configOnce       sync.Once
+	configData       map[string]string
+	configErr        error
 	dockerAutoRemove bool
 )
 
@@ -38,6 +40,85 @@ type ToolResponse struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data,omitempty"`
 	Error   string      `json:"error,omitempty"`
+}
+
+// runMigrateCLI handles: migrate up [--step N], migrate down --step N, migrate status
+func runMigrateCLI(args []string) int {
+	if len(args) == 0 {
+		fmt.Println("Usage:\n  go-thing migrate up [--step N]\n  go-thing migrate down --step N\n  go-thing migrate status")
+		return 2
+	}
+	// Load config and init DB
+	cfgPath := os.ExpandEnv(config.ConfigFilePath)
+	cfgIni, err := ini.Load(cfgPath)
+	if err != nil {
+		fmt.Printf("[Postgres] Config not loaded (%v)\n", err)
+		return 1
+	}
+	dbConn, pgcfg, derr := db.Init(cfgIni)
+	if derr != nil {
+		fmt.Printf("[Postgres] Init failed: %v\n", derr)
+		return 1
+	}
+	defer func() { _ = dbConn.Close() }()
+
+	sub := args[0]
+	switch sub {
+	case "up":
+		steps := 0
+		// parse optional --step N
+		for i := 1; i < len(args); i++ {
+			if args[i] == "--step" && i+1 < len(args) {
+				if n, e := strconv.Atoi(args[i+1]); e == nil && n >= 0 {
+					steps = n
+				}
+			}
+		}
+		if err := db.MigrateUp(dbConn, pgcfg.MigrationsDir, steps); err != nil {
+			fmt.Printf("[Migrate] up error: %v\n", err)
+			return 1
+		}
+		fmt.Println("[Migrate] up completed")
+		return 0
+	case "down":
+		// require --step N
+		steps := -1
+		for i := 1; i < len(args); i++ {
+			if args[i] == "--step" && i+1 < len(args) {
+				if n, e := strconv.Atoi(args[i+1]); e == nil && n > 0 {
+					steps = n
+				}
+			}
+		}
+		if steps <= 0 {
+			fmt.Println("[Migrate] down requires --step N (N>0)")
+			return 2
+		}
+		if err := db.MigrateDown(dbConn, pgcfg.MigrationsDir, steps); err != nil {
+			fmt.Printf("[Migrate] down error: %v\n", err)
+			return 1
+		}
+		fmt.Println("[Migrate] down completed")
+		return 0
+	case "status":
+		applied, pending, err := db.MigrateStatus(dbConn, pgcfg.MigrationsDir)
+		if err != nil {
+			fmt.Printf("[Migrate] status error: %v\n", err)
+			return 1
+		}
+		fmt.Println("Applied:")
+		for _, v := range applied {
+			fmt.Printf("  - %s\n", v)
+		}
+		fmt.Println("Pending:")
+		for _, v := range pending {
+			fmt.Printf("  - %s\n", v)
+		}
+		return 0
+	default:
+		fmt.Println("Unknown migrate subcommand. Use: up, down, status")
+		return 2
+	}
 }
 
 // Parse tool command and execute it via tool server
@@ -147,6 +228,15 @@ func getToolsAddr() string {
 		return strings.TrimSpace(v)
 	}
 	return ":8080"
+}
+
+// getAPIAddr returns the address for the public API server from config or a default
+func getAPIAddr() string {
+	cfg, _ := loadConfig()
+	if v, ok := cfg["API_ADDR"]; ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return "0.0.0.0:7866"
 }
 
 // Get available tools from the tool server
@@ -306,6 +396,13 @@ func summarizeToolResponse(resp *ToolResponse) string {
 	}
 }
 
+// maskToken masks sensitive values leaving a small prefix/suffix for identification
+func maskToken(s string) string {
+	if s == "" { return "" }
+	if len(s) <= 8 { return "****" }
+	return s[:4] + "****" + s[len(s)-4:]
+}
+
 // Slack webhook handler
 func handleSlackWebhook(c *gin.Context) {
 	// Read the request body
@@ -430,27 +527,62 @@ func main() {
 		defer setupLogFile.Close()
 	}
 	log.Printf("[Startup] Starting go-thing agent")
-	    // Start embedded tool server with graceful shutdown support
-    toolsAddr := getToolsAddr()
-    toolServer := toolsrv.NewServer(toolsAddr)
-    go func() {
-        log.Printf("[Tools] Starting tool server on %s", toolsAddr)
-        if err := toolServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-            log.Printf("[Tools] Tool server exited with error: %v", err)
-        }
-    }()
 
-    // Best-effort: ensure the Docker container used for sandboxed execution is available
-    if name, err := toolsrv.EnsureDockerContainer(); err != nil {
-        log.Printf("[Docker] Ensure container failed (continuing without sandbox): %v", err)
-    } else {
-        log.Printf("[Docker] Container ready: %s", name)
-    }
+	// CLI: migration management
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		exitCode := runMigrateCLI(os.Args[2:])
+		if setupLogFile != nil {
+			_ = setupLogFile.Close()
+		}
+		os.Exit(exitCode)
+		return
+	}
 
-    // Load DOCKER_AUTO_REMOVE once at startup to avoid repeated config reads on shutdown
-    if cfg, cerr := ini.Load(os.ExpandEnv(config.ConfigFilePath)); cerr == nil {
-        dockerAutoRemove = strings.EqualFold(cfg.Section("default").Key("DOCKER_AUTO_REMOVE").String(), "true")
-    }
+	// Initialize PostgreSQL (optional) and run migrations
+	cfgPath := os.ExpandEnv(config.ConfigFilePath)
+	cfgIni, iniErr := ini.Load(cfgPath)
+	if iniErr != nil {
+		log.Printf("[Postgres] Config not loaded (%v); skipping DB init", iniErr)
+	} else {
+		if dbConn, pgcfg, derr := db.Init(cfgIni); derr != nil {
+			log.Printf("[Postgres] Init failed: %v (continuing without DB)", derr)
+		} else {
+			defer func() { _ = dbConn.Close() }()
+			if merr := db.RunMigrations(dbConn, pgcfg.MigrationsDir); merr != nil {
+				log.Printf("[Postgres] Migrations error: %v", merr)
+			} else {
+				log.Printf("[Postgres] Migrations applied from %s", pgcfg.MigrationsDir)
+			}
+		}
+	}
+	// Log applied config (masked where sensitive)
+	if cfgMap, _ := loadConfig(); cfgMap != nil {
+		log.Printf("[Config] Loaded from %s", cfgPath)
+		log.Printf("[Config] API_ADDR=%s TOOLS_ADDR=%s CHROOT_DIR=%s GEMINI_API_KEY=%s SLACK_BOT_TOKEN=%s",
+			getAPIAddr(), getToolsAddr(), strings.TrimSpace(cfgMap["CHROOT_DIR"]), maskToken(cfgMap["GEMINI_API_KEY"]), maskToken(cfgMap["SLACK_BOT_TOKEN"]))
+	}
+
+	// Start embedded tool server with graceful shutdown support
+	toolsAddr := getToolsAddr()
+	toolServer := toolsrv.NewServer(toolsAddr)
+	go func() {
+		log.Printf("[Tools] Starting tool server on %s", toolsAddr)
+		if err := toolServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("[Tools] Tool server exited with error: %v", err)
+		}
+	}()
+
+	// Best-effort: ensure the Docker container used for sandboxed execution is available
+	if name, err := toolsrv.EnsureDockerContainer(); err != nil {
+		log.Printf("[Docker] Ensure container failed (continuing without sandbox): %v", err)
+	} else {
+		log.Printf("[Docker] Container ready: %s", name)
+	}
+
+	// Load DOCKER_AUTO_REMOVE once at startup to avoid repeated config reads on shutdown
+	if cfg, cerr := ini.Load(os.ExpandEnv(config.ConfigFilePath)); cerr == nil {
+		dockerAutoRemove = strings.EqualFold(cfg.Section("default").Key("DOCKER_AUTO_REMOVE").String(), "true")
+	}
 
 	r := gin.Default()
 
@@ -496,7 +628,7 @@ func main() {
 	})
 
 	// Run Gin HTTP server with graceful shutdown
-	apiAddr := "0.0.0.0:7866"
+	apiAddr := getAPIAddr()
 	apiServer := &http.Server{Addr: apiAddr, Handler: r}
 
 	// OS signal handling (SIGINT/SIGTERM) for Air restarts

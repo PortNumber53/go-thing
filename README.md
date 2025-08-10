@@ -10,6 +10,9 @@ An AI agent with tool calling capabilities, built with Go and Gemini API.
 - **Available Tools**:
   - `disk_space`: Get disk space information for any path
   - `write_file`: Write files to configured directory
+- **Internal PostgreSQL Support**: Integrated PostgreSQL database support for storing and retrieving data
+  - Automatic "up" migrations applied on startup
+  - CLI for manual migration management: `migrate up`, `migrate down --step N`, `migrate status`
 
 ## Tool System
 
@@ -28,6 +31,40 @@ Get disk space information for a specified path.
 
 **Usage:**
 ```
+
+## Database Migrations
+
+Migrations are simple SQL files stored in the `migrations/` directory.
+
+- On startup, the agent automatically applies all pending "up" migrations.
+- You can manage migrations manually with the CLI.
+
+### File naming conventions
+
+- Up migrations: either legacy `NNNN_name.sql` or explicit `NNNN_name.up.sql`
+- Down migrations: `NNNN_name.down.sql`
+
+The migration engine prefers `.up.sql`/`.down.sql` pairs but will also accept legacy `.sql` for up.
+
+### CLI usage
+
+Run from the project root:
+
+```bash
+# Apply all pending up migrations
+go run agent.go migrate up
+
+# Apply at most 2 up migrations
+go run agent.go migrate up --step 2
+
+# Roll back the last migration
+go run agent.go migrate down --step 1
+
+# Show status
+go run agent.go migrate status
+```
+
+Migrations are tracked in the `schema_migrations` table.
 /tool disk_space                    # Check current directory
 /tool disk_space --path /home       # Check /home directory
 /tool disk_space --help             # Show help
@@ -68,6 +105,14 @@ Write content to a file in the configured write directory.
    GEMINI_API_KEY=your_gemini_api_key_here
    SLACK_BOT_TOKEN=xoxb-your_slack_bot_token_here
    CHROOT_DIR=/home/username/writable_directory
+   [postgres]
+   HOST=localhost
+   PORT=5432
+   USERNAME=your_username
+   PASSWORD=your_password
+   DATABASE=your_database
+   # Optional: directory containing SQL migrations (default: ./migrations)
+   MIGRATIONS_DIR=./migrations
    ```
 
 2. **Quick Start** (Recommended):
@@ -86,6 +131,7 @@ Write content to a file in the configured write directory.
 - **Integrated Tools**: All tools run directly within the agent process
 - **JSON Communication**: All tool communication uses JSON format
 - **Security**: File operations restricted to configured directories
+ - **DB & Migrations**: Internal-only PostgreSQL integration with simple file-based migrations
 
 ## API Endpoints
 
