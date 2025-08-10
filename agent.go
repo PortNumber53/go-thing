@@ -629,13 +629,15 @@ func main() {
 		log.Printf("[Chat Handler] Received message: %s", req.Message)
 		// Resolve or create thread for this request
 		threadID := req.ThreadID
-		if threadID == 0 {
-			if id, err := createNewThread(fmt.Sprintf("HTTP %s", time.Now().Format(time.RFC3339))); err == nil {
-				threadID = id
-			} else {
-				log.Printf("[DB] Failed to create HTTP thread: %v", err)
-			}
-		}
+        if threadID == 0 {
+            id, err := createNewThread(fmt.Sprintf("HTTP %s", time.Now().Format(time.RFC3339)))
+            if err != nil {
+                log.Printf("[DB] Failed to create HTTP thread: %v", err)
+                c.JSON(http.StatusInternalServerError, gin.H{"response": "Failed to create conversation thread"})
+                return
+            }
+            threadID = id
+        }
 		// Store user message
 		storeMessage(threadID, "user", req.Message, map[string]interface{}{"source": "http"})
 		response, err := geminiAPIHandler(c.Request.Context(), req.Message)
