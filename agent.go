@@ -403,24 +403,26 @@ func createNewThread(title string) (int64, error) {
 }
 
 // storeMessage inserts a message into the specified thread.
-func storeMessage(threadID int64, role, content string, metadata map[string]interface{}) {
+func storeMessage(threadID int64, role, content string, metadata map[string]interface{}) error {
 	dbc := db.Get()
     if dbc == nil {
-        log.Printf("[DB] storeMessage failed: database not initialized")
-        return
+        return fmt.Errorf("storeMessage failed: database not initialized")
     }
-	// Marshal metadata to JSONB via string parameter
-	var metaJSON string = "{}"
-	if metadata != nil {
-        if b, err := json.Marshal(metadata); err == nil {
-            metaJSON = string(b)
-        } else {
+    // Marshal metadata to JSONB via string parameter
+    var metaJSON string = "{}"
+    if metadata != nil {
+        b, err := json.Marshal(metadata)
+        if err != nil {
             log.Printf("[DB] Failed to marshal metadata: %v", err)
+            return fmt.Errorf("failed to marshal metadata: %w", err)
         }
-	}
-	if _, err := dbc.Exec(`INSERT INTO messages (thread_id, role, content, metadata) VALUES ($1,$2,$3,$4::jsonb)`, threadID, role, content, metaJSON); err != nil {
-		log.Printf("[DB] insert message failed: %v", err)
-	}
+        metaJSON = string(b)
+    }
+    if _, err := dbc.Exec(`INSERT INTO messages (thread_id, role, content, metadata) VALUES ($1,$2,$3,$4::jsonb)`, threadID, role, content, metaJSON); err != nil {
+        log.Printf("[DB] insert message failed: %v", err)
+        return err
+    }
+    return nil
 }
 
 // Slack channel -> thread mapping
@@ -490,12 +492,16 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
     }
 
     // Persist user message
-    storeMessage(threadID, "user", event.Text, map[string]interface{}{
+    if err := storeMessage(threadID, "user", event.Text, map[string]interface{}{
         "source":  "slack",
         "channel": event.Channel,
         "user":    event.User,
         "ts":      event.Timestamp,
-    })
+    }); err != nil {
+        log.Printf("[Slack Message] Failed to persist user message: %v", err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist user message"})
+        return
+    }
 
     // Process the message with Gemini
     reply, err := processUserMessage(event.Text)
@@ -506,10 +512,13 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
     }
 
 	    // Persist assistant message
-    storeMessage(threadID, "assistant", reply, map[string]interface{}{
+    if err := storeMessage(threadID, "assistant", reply, map[string]interface{}{
         "source":  "slack",
         "channel": event.Channel,
-    })
+    }); err != nil {
+        log.Printf("[Slack Message] Failed to persist assistant message: %v", err)
+        // still try to send Slack response, but report error to caller
+    }
 
     // Try to send response back to Slack using the Slack API
     if err := sendSlackResponse(event.Channel, reply); err != nil {
@@ -670,7 +679,10 @@ func main() {
             threadID = id
         }
 		// Store user message
-		storeMessage(threadID, "user", req.Message, map[string]interface{}{"source": "http"})
+		if err := storeMessage(threadID, "user", req.Message, map[string]interface{}{"source": "http"}); err != nil {
+            c.JSON(500, gin.H{"response": "Failed to persist user message"})
+            return
+        }
 		response, err := geminiAPIHandler(c.Request.Context(), req.Message)
 		if err != nil {
 			log.Printf("[Chat Handler] Error from geminiAPIHandler: %v", err)
@@ -682,7 +694,10 @@ func main() {
 		}
 		log.Printf("[Chat Handler] Sending response: %s", response)
 		// Store assistant message
-		storeMessage(threadID, "assistant", response, map[string]interface{}{"source": "http"})
+		if err := storeMessage(threadID, "assistant", response, map[string]interface{}{"source": "http"}); err != nil {
+            c.JSON(500, gin.H{"response": "Failed to persist assistant message"})
+            return
+        }
 		c.JSON(200, gin.H{"response": response, "thread_id": threadID})
 	})
 
