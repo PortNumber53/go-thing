@@ -33,7 +33,6 @@ var (
 	configData       map[string]string
 	configErr        error
 	dockerAutoRemove bool
-	currentThreadID  int64
 )
 
 // ToolResponse represents a response from tool execution
@@ -403,21 +402,11 @@ func createNewThread(title string) (int64, error) {
 	return id, nil
 }
 
-// storeMessage inserts a message for the current thread. If no thread exists, it tries to create one.
-func storeMessage(role, content string, metadata map[string]interface{}) {
+// storeMessage inserts a message into the specified thread.
+func storeMessage(threadID int64, role, content string, metadata map[string]interface{}) {
 	dbc := db.Get()
 	if dbc == nil {
 		return // DB not available; skip silently
-	}
-	// Ensure we have a thread
-	if currentThreadID == 0 {
-		if id, err := createNewThread(fmt.Sprintf("Session %s", time.Now().Format(time.RFC3339))); err == nil {
-			currentThreadID = id
-			log.Printf("[DB] Created new thread id=%d", id)
-		} else {
-			log.Printf("[DB] Failed to create thread: %v", err)
-			return
-		}
 	}
 	// Marshal metadata to JSONB via string parameter
 	var metaJSON string = "{}"
@@ -428,9 +417,24 @@ if b, err := json.Marshal(metadata); err == nil {
 			log.Printf("[DB] Failed to marshal metadata: %v", err)
 		}
 	}
-	if _, err := dbc.Exec(`INSERT INTO messages (thread_id, role, content, metadata) VALUES ($1,$2,$3,$4::jsonb)`, currentThreadID, role, content, metaJSON); err != nil {
+	if _, err := dbc.Exec(`INSERT INTO messages (thread_id, role, content, metadata) VALUES ($1,$2,$3,$4::jsonb)`, threadID, role, content, metaJSON); err != nil {
 		log.Printf("[DB] insert message failed: %v", err)
 	}
+}
+
+// Slack channel -> thread mapping
+var slackThreads sync.Map // map[string]int64
+
+func ensureSlackThread(channel string) (int64, error) {
+	if v, ok := slackThreads.Load(channel); ok {
+		return v.(int64), nil
+	}
+	id, err := createNewThread(fmt.Sprintf("Slack %s", channel))
+	if err != nil {
+		return 0, err
+	}
+	slackThreads.Store(channel, id)
+	return id, nil
 }
 
 // Slack webhook handler
@@ -498,8 +502,14 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
 	// For now, we'll process all messages in direct messages
 	// In a real implementation, you'd check the channel type and bot mentions
 
-	    // Persist user message
-    storeMessage("user", event.Text, map[string]interface{}{
+	    // Resolve Slack channel thread
+    threadID, terr := ensureSlackThread(event.Channel)
+    if terr != nil {
+        log.Printf("[DB] Failed to resolve slack thread: %v", terr)
+    }
+
+    // Persist user message
+    storeMessage(threadID, "user", event.Text, map[string]interface{}{
         "source":  "slack",
         "channel": event.Channel,
         "user":    event.User,
@@ -515,7 +525,7 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
     }
 
 	    // Persist assistant message
-    storeMessage("assistant", reply, map[string]interface{}{
+    storeMessage(threadID, "assistant", reply, map[string]interface{}{
         "source":  "slack",
         "channel": event.Channel,
     })
@@ -615,15 +625,9 @@ func main() {
 			} else {
 				log.Printf("[Postgres] Migrations applied from %s", pgcfg.MigrationsDir)
 			}
-			// Create a new thread for this agent session
-			if id, err := createNewThread(fmt.Sprintf("Startup %s", time.Now().Format(time.RFC3339))); err == nil {
-				currentThreadID = id
-				log.Printf("[DB] Session thread created id=%d", id)
-			} else {
-				log.Printf("[DB] Failed creating session thread: %v", err)
-			}
-		}
-	}
+			// Per-conversation threads are created on demand (HTTP per request unless provided, Slack per channel).
+        }
+    }
 
 	// Log applied config (masked where sensitive) if available
 	if iniErr == nil {
@@ -664,7 +668,8 @@ func main() {
 
 	r.POST("/chat", func(c *gin.Context) {
 		var req struct {
-			Message string `json:"message"`
+			Message  string `json:"message"`
+			ThreadID int64  `json:"thread_id,omitempty"`
 		}
 		if err := c.BindJSON(&req); err != nil {
 			log.Printf("[Chat Handler] Error binding JSON: %v", err)
@@ -672,8 +677,17 @@ func main() {
 			return
 		}
 		log.Printf("[Chat Handler] Received message: %s", req.Message)
+		// Resolve or create thread for this request
+		threadID := req.ThreadID
+		if threadID == 0 {
+			if id, err := createNewThread(fmt.Sprintf("HTTP %s", time.Now().Format(time.RFC3339))); err == nil {
+				threadID = id
+			} else {
+				log.Printf("[DB] Failed to create HTTP thread: %v", err)
+			}
+		}
 		// Store user message
-		storeMessage("user", req.Message, map[string]interface{}{"source": "http"})
+		storeMessage(threadID, "user", req.Message, map[string]interface{}{"source": "http"})
 		response, err := geminiAPIHandler(c.Request.Context(), req.Message)
 		if err != nil {
 			log.Printf("[Chat Handler] Error from geminiAPIHandler: %v", err)
@@ -685,8 +699,8 @@ func main() {
 		}
 		log.Printf("[Chat Handler] Sending response: %s", response)
 		// Store assistant message
-		storeMessage("assistant", response, map[string]interface{}{"source": "http"})
-		c.JSON(200, gin.H{"response": response})
+		storeMessage(threadID, "assistant", response, map[string]interface{}{"source": "http"})
+		c.JSON(200, gin.H{"response": response, "thread_id": threadID})
 	})
 
 	r.POST("/webhook/slack", func(c *gin.Context) {
