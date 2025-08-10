@@ -437,58 +437,6 @@ func ensureSlackThread(channel string) (int64, error) {
 	return id, nil
 }
 
-// Slack webhook handler
-func handleSlackWebhook(c *gin.Context) {
-	// Read the request body
-	body, err := ioutil.ReadAll(c.Request.Body)
-	if err != nil {
-		log.Printf("[Slack Webhook] Error reading body: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
-		return
-	}
-
-	// Parse the Slack event
-	var event slack.Event
-	if err := json.Unmarshal(body, &event); err != nil {
-		log.Printf("[Slack Webhook] Error parsing event: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event format"})
-		return
-	}
-
-	// Handle URL verification challenge
-	if event.Type == "url_verification" {
-		var challenge struct {
-			Challenge string `json:"challenge"`
-		}
-		if err := json.Unmarshal(body, &challenge); err != nil {
-			log.Printf("[Slack Webhook] Error parsing challenge: %v", err)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid challenge format"})
-			return
-		}
-		log.Printf("[Slack Webhook] URL verification challenge received: %s", challenge.Challenge)
-		c.JSON(http.StatusOK, gin.H{"challenge": challenge.Challenge})
-		return
-	}
-
-	// Handle events
-	if event.Type == "event_callback" {
-		var callback struct {
-			Event slack.MessageEvent `json:"event"`
-		}
-		if err := json.Unmarshal(body, &callback); err != nil {
-			log.Printf("[Slack Webhook] Error parsing callback: %v", err)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid callback format"})
-			return
-		}
-
-		// Handle message events
-		handleSlackMessage(c, &callback.Event)
-	} else {
-		log.Printf("[Slack Webhook] Unhandled event type: %s", event.Type)
-		c.JSON(http.StatusOK, gin.H{"status": "event received"})
-	}
-}
-
 // Handle regular message events
 func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
 	// Ignore bot messages to prevent loops
