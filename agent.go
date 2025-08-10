@@ -37,6 +37,9 @@ var (
 	dockerAutoRemove bool
 )
 
+// Precompiled regex to collapse accidental double slashes while avoiding schemes like http://
+var doubleSlashRegex = regexp.MustCompile(`([^:])//+`)
+
 // ToolResponse represents a response from tool execution
 type ToolResponse struct {
 	Success bool        `json:"success"`
@@ -62,8 +65,7 @@ func normalizePathInText(s string) string {
 	// Replace any occurrence of the absolute chroot path with /app
 	s2 := strings.ReplaceAll(s, ch, "/app")
 	// Collapse any accidental double slashes but avoid collapsing after a scheme (e.g., http://)
-	re := regexp.MustCompile(`([^:])//+`)
-	s2 = re.ReplaceAllString(s2, "$1/")
+	s2 = doubleSlashRegex.ReplaceAllString(s2, "$1/")
 	return s2
 }
 
@@ -652,9 +654,15 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
         return
     }
     reply, updatedCtx, err := geminiAPIHandler(context.Background(), event.Text, initialCtx)
-	if err != nil {
-		log.Printf("[Slack Message] Gemini error: %v", err)
-	}
+    if err != nil {
+        log.Printf("[Slack Message] Gemini error: %v", err)
+        // Notify user of failure and stop processing to avoid persisting an invalid reply
+        if serr := sendSlackResponse(event.Channel, "Sorry, I encountered an error. Please try again."); serr != nil {
+            log.Printf("[Slack Message] Failed to send error notice to Slack: %v", serr)
+        }
+        c.JSON(http.StatusOK, gin.H{"status": "error_processed"})
+        return
+    }
 	// Persist assistant message including current_context
 	if err := storeMessage(threadID, "assistant", reply, map[string]interface{}{
 		"source":          "slack",
