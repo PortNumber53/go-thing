@@ -121,13 +121,8 @@ func getLastContextForThread(threadID int64) ([]string, error) {
 		return nil, err
 	}
 	if meta.CurrentContext != nil {
-		out := make([]string, 0, len(meta.CurrentContext))
-		for _, s := range meta.CurrentContext {
-			if strings.TrimSpace(s) != "" {
-				out = append(out, s)
-			}
-		}
-		return out, nil
+		// The caller will sanitize the context (trim/remove empties) via sanitizeContextFacts().
+		return meta.CurrentContext, nil
 	}
 	return nil, nil
 }
@@ -1086,7 +1081,7 @@ func geminiAPIHandler(ctx context.Context, task string, initialContext []string)
 		responseText, toolCall, err := callGeminiAPI(ctx, client, currentPrompt, currentContext)
 		if err != nil {
 			log.Printf("[Gemini Loop] Error from Gemini: %v", err)
-			return "An error occurred while calling the LLM.", currentContext, nil
+			return "An error occurred while calling the LLM.", currentContext, err
 		}
 		// Always merge model-provided current_context/current_content, whether tool or final
 		if len(toolCall.GetMergedContext()) > 0 {
@@ -1112,7 +1107,7 @@ func geminiAPIHandler(ctx context.Context, task string, initialContext []string)
 		} else {
 			// No tool call, assume this is the final response
 			if strings.TrimSpace(responseText) == "" {
-				return "**No response from Gemini.**", nil, nil
+				return "**No response from Gemini.**", currentContext, nil
 			}
 			return responseText, currentContext, nil
 		}
