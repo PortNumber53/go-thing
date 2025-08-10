@@ -61,10 +61,9 @@ func normalizePathInText(s string) string {
 	}
 	// Replace any occurrence of the absolute chroot path with /app
 	s2 := strings.ReplaceAll(s, ch, "/app")
-	// Collapse any accidental double slashes (excluding scheme like http://)
-	for strings.Contains(s2, "//") {
-		s2 = strings.ReplaceAll(s2, "//", "/")
-	}
+	// Collapse any accidental double slashes but avoid collapsing after a scheme (e.g., http://)
+	re := regexp.MustCompile(`([^:])//+`)
+	s2 = re.ReplaceAllString(s2, "$1/")
 	return s2
 }
 
@@ -109,43 +108,52 @@ func getLastContextForThread(threadID int64) ([]string, error) {
 		}
 		return nil, err
 	}
-	var meta map[string]interface{}
+	var meta struct {
+		CurrentContext []string `json:"current_context"`
+	}
 	if err := json.Unmarshal(metaBytes, &meta); err != nil {
 		return nil, err
 	}
-	if raw, ok := meta["current_context"]; ok && raw != nil {
-		if arr, ok := raw.([]interface{}); ok {
-			out := make([]string, 0, len(arr))
-			for _, v := range arr {
-				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-					out = append(out, s)
-				}
+	if meta.CurrentContext != nil {
+		out := make([]string, 0, len(meta.CurrentContext))
+		for _, s := range meta.CurrentContext {
+			if strings.TrimSpace(s) != "" {
+				out = append(out, s)
 			}
-			return out, nil
 		}
+		return out, nil
 	}
 	return nil, nil
 }
 
 // getContextMaxItems reads CURRENT_CONTEXT_MAX_ITEMS from config, defaults to 8, and clamps to [1, 50].
 func getContextMaxItems() int {
+	const (
+		defaultValue = 8
+		minValue     = 1
+		maxValue     = 50
+	)
+
 	cfg, err := loadConfig()
 	if err != nil {
-		return 8
+		return defaultValue
 	}
+
 	v := strings.TrimSpace(cfg["CURRENT_CONTEXT_MAX_ITEMS"])
 	if v == "" {
-		return 8
+		return defaultValue
 	}
+
 	n, err := strconv.Atoi(v)
 	if err != nil {
-		return 8
+		return defaultValue
 	}
-	if n < 1 {
-		n = 1
+
+	if n < minValue {
+		return minValue
 	}
-	if n > 50 {
-		n = 50
+	if n > maxValue {
+		return maxValue
 	}
 	return n
 }
@@ -636,9 +644,14 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
 		return
 	}
 
-	// Load last persisted context and run gemini loop to persist updated context on Slack path too
-	initialCtx, _ := getLastContextForThread(threadID)
-	reply, updatedCtx, err := geminiAPIHandler(context.Background(), event.Text, initialCtx)
+    // Load last persisted context and run gemini loop to persist updated context on Slack path too
+    initialCtx, err := getLastContextForThread(threadID)
+    if err != nil {
+        log.Printf("[Slack Message] Failed to get last context: %v", err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load conversation context"})
+        return
+    }
+    reply, updatedCtx, err := geminiAPIHandler(context.Background(), event.Text, initialCtx)
 	if err != nil {
 		log.Printf("[Slack Message] Gemini error: %v", err)
 	}
@@ -760,13 +773,15 @@ func main() {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist user message"})
 			return
 		}
-		// Load last persisted context for this thread
-		initialCtx, lerr := getLastContextForThread(threadID)
-		if lerr != nil {
-			log.Printf("[Context] load error: %v", lerr)
-		}
-		log.Printf("[Context] Using initial current_context for HTTP: %v", initialCtx)
-		resp, updatedCtx, err := geminiAPIHandler(c.Request.Context(), req.Message, initialCtx)
+		        // Load last persisted context for this thread
+        initialCtx, err := getLastContextForThread(threadID)
+        if err != nil {
+            log.Printf("[Context] load error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load conversation context"})
+            return
+        }
+        log.Printf("[Context] Using initial current_context for HTTP: %v", initialCtx)
+        resp, updatedCtx, err := geminiAPIHandler(c.Request.Context(), req.Message, initialCtx)
 		if err != nil || strings.TrimSpace(resp) == "" {
 			if err != nil {
 				log.Printf("[Chat] gemini error: %v", err)
@@ -883,9 +898,13 @@ func callGeminiAPI(client *genai.Client, task string, persistedContext []string)
 	var contextSection strings.Builder
 	if len(persistedContext) > 0 {
 		sanitized := sanitizeContextFacts(persistedContext)
-		b, _ := json.Marshal(sanitized)
-		contextSection.WriteString("## Persisted Context\n")
-		contextSection.WriteString(fmt.Sprintf("{\"current_context\": %s}\n\n", string(b)))
+		b, err := json.Marshal(sanitized)
+		if err != nil {
+			log.Printf("[Gemini API] Failed to marshal persisted context: %v", err)
+		} else {
+			contextSection.WriteString("## Persisted Context\n")
+			contextSection.WriteString(fmt.Sprintf("{\"current_context\": %s}\n\n", string(b)))
+		}
 	}
 
 	maxItems := getContextMaxItems()
@@ -1060,7 +1079,6 @@ func geminiAPIHandler(ctx context.Context, task string, initialContext []string)
 			log.Printf("[Context] From toolCall: current_context=%v current_content=%v", toolCall.CurrentContext, toolCall.CurrentContent)
 			incoming := sanitizeContextFacts(toolCall.GetMergedContext())
 			currentContext = mergeStringSets(currentContext, incoming)
-			currentContext = sanitizeContextFacts(currentContext)
 			maxItems := getContextMaxItems()
 			if len(currentContext) > maxItems {
 				currentContext = currentContext[len(currentContext)-maxItems:]
@@ -1077,18 +1095,6 @@ func geminiAPIHandler(ctx context.Context, task string, initialContext []string)
 			// Add tool call and result to history
 			history = append(history, fmt.Sprintf("- Tool call: %s with args %v", toolCall.Tool, toolCall.Args))
 			history = append(history, fmt.Sprintf("- Tool result: %s", summarizeToolResponse(toolResp)))
-
-			// Merge any provided current_context/current_content from the model
-			if len(toolCall.GetMergedContext()) > 0 {
-				log.Printf("[Context] From toolCall: current_context=%v current_content=%v", toolCall.CurrentContext, toolCall.CurrentContent)
-				currentContext = mergeStringSets(currentContext, toolCall.GetMergedContext())
-				// Keep the context concise (limit to configured max items)
-				maxItems := getContextMaxItems()
-				if len(currentContext) > maxItems {
-					currentContext = currentContext[len(currentContext)-maxItems:]
-				}
-				log.Printf("[Context] Updated current_context: %v", currentContext)
-			}
 		} else {
 			// No tool call, assume this is the final response
 			if strings.TrimSpace(responseText) == "" {
