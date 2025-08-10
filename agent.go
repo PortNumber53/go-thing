@@ -794,18 +794,20 @@ func main() {
         }
         log.Printf("[Context] Using initial current_context for HTTP: %v", initialCtx)
         resp, updatedCtx, err := geminiAPIHandler(c.Request.Context(), req.Message, initialCtx)
-		if err != nil || strings.TrimSpace(resp) == "" {
-			if err != nil {
-				log.Printf("[Chat] gemini error: %v", err)
-			}
-			resp = "**No response available. Please try again.**"
-		}
-		log.Printf("[Context] Persisting updated current_context (HTTP): %v", updatedCtx)
-		if err := storeMessage(threadID, "assistant", resp, map[string]interface{}{"source": "http", "current_context": updatedCtx}); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist assistant message"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"response": resp, "thread_id": threadID})
+        if err != nil {
+            log.Printf("[Chat] gemini error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to process message: %v", err)})
+            return
+        }
+        if strings.TrimSpace(resp) == "" {
+            resp = "**No response available. Please try again.**"
+        }
+        log.Printf("[Context] Persisting updated current_context (HTTP): %v", updatedCtx)
+        if err := storeMessage(threadID, "assistant", resp, map[string]interface{}{"source": "http", "current_context": updatedCtx}); err != nil {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist assistant message"})
+            return
+        }
+        c.JSON(http.StatusOK, gin.H{"response": resp, "thread_id": threadID})
 	})
 	r.POST("/webhook/slack", func(c *gin.Context) {
 		body, err := io.ReadAll(c.Request.Body)
@@ -884,7 +886,7 @@ func setupLogging() (*os.File, error) {
 	return f, nil
 }
 
-func callGeminiAPI(client *genai.Client, task string, persistedContext []string) (string, ToolCall, error) {
+func callGeminiAPI(ctx context.Context, client *genai.Client, task string, persistedContext []string) (string, ToolCall, error) {
 	// Build Available Tools section dynamically
 	available, err := getAvailableTools()
 	var toolsSection strings.Builder
@@ -961,8 +963,8 @@ You are a helpful assistant that executes tasks by calling tools.
 
 **Current Request:**
 %s`, maxItems, toolsSection.String(), contextSection.String(), task)
-	log.Printf("[Gemini API] Sending prompt: %s", systemPrompt)
-	resp, err := client.Models.GenerateContent(context.Background(), "gemini-2.5-flash", genai.Text(systemPrompt), nil)
+	    log.Printf("[Gemini API] Sending prompt: %s", systemPrompt)
+    resp, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(systemPrompt), nil)
 	if err != nil {
 		log.Printf("[Gemini API] Error generating content: %v", err)
 		return "", ToolCall{}, err
@@ -1059,7 +1061,7 @@ func geminiAPIHandler(ctx context.Context, task string, initialContext []string)
 	}
 	apiKey := cfg["GEMINI_API_KEY"]
 	if apiKey == "" {
-		return "GEMINI_API_KEY missing", nil, err
+		return "GEMINI_API_KEY missing", nil, fmt.Errorf("GEMINI_API_KEY missing")
 	}
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{APIKey: apiKey})
 	if err != nil {
@@ -1081,7 +1083,7 @@ func geminiAPIHandler(ctx context.Context, task string, initialContext []string)
 			currentPrompt = fmt.Sprintf("Original Task: %s\n\nHistory of actions:\n%s", originalTask, strings.Join(history, "\n"))
 		}
 
-		responseText, toolCall, err := callGeminiAPI(client, currentPrompt, currentContext)
+		        responseText, toolCall, err := callGeminiAPI(ctx, client, currentPrompt, currentContext)
 		if err != nil {
 			log.Printf("[Gemini Loop] Error from Gemini: %v", err)
 			return "An error occurred while calling the LLM.", currentContext, nil
@@ -1101,7 +1103,7 @@ func geminiAPIHandler(ctx context.Context, task string, initialContext []string)
 		if toolCall.Tool != "" {
 			toolResp, err := executeTool(toolCall.Tool, toolCall.Args)
 			if err != nil {
-				return fmt.Sprintf("Tool %s failed: %v", toolCall.Tool, err), nil, err
+				return fmt.Sprintf("Tool %s failed: %v", toolCall.Tool, err), currentContext, err
 			}
 
 			// Add tool call and result to history
