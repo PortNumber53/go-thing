@@ -41,7 +41,7 @@ func Get() *sql.DB { return globalDB }
 func Init(cfg *ini.File) (*sql.DB, *PGConfig, error) {
 	pg := loadPGConfig(cfg)
 	if pg.DSN == "" {
-		pg.DSN = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", pg.User, pg.Password, pg.Host, pg.Port, pg.DBName, pg.SSLMode)
+		pg.DSN = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", pg.User, url.QueryEscape(pg.Password), pg.Host, pg.Port, pg.DBName, pg.SSLMode)
 	}
 	db, err := sql.Open("pgx", pg.DSN)
 	if err != nil {
