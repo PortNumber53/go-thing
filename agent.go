@@ -71,7 +71,7 @@ func normalizePathInText(s string) string {
 
 // sanitizeContextFacts rewrites host-specific paths to canonical sandbox paths and dedupes.
 func sanitizeContextFacts(in []string) []string {
-if len(in) == 0 {
+	if len(in) == 0 {
 		return in
 	}
 	seen := make(map[string]bool, len(in))
@@ -650,23 +650,23 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
 		return
 	}
 
-    // Load last persisted context and run gemini loop to persist updated context on Slack path too
-    initialCtx, err := getLastContextForThread(threadID)
-    if err != nil {
-        log.Printf("[Slack Message] Failed to get last context: %v", err)
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load conversation context"})
-        return
-    }
-    reply, updatedCtx, err := geminiAPIHandler(context.Background(), event.Text, initialCtx)
-    if err != nil {
-        log.Printf("[Slack Message] Gemini error: %v", err)
-        // Notify user of failure and stop processing to avoid persisting an invalid reply
-        if serr := sendSlackResponse(event.Channel, "Sorry, I encountered an error. Please try again."); serr != nil {
-            log.Printf("[Slack Message] Failed to send error notice to Slack: %v", serr)
-        }
-        c.JSON(http.StatusOK, gin.H{"status": "error_processed"})
-        return
-    }
+	// Load last persisted context and run gemini loop to persist updated context on Slack path too
+	initialCtx, err := getLastContextForThread(threadID)
+	if err != nil {
+		log.Printf("[Slack Message] Failed to get last context: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load conversation context"})
+		return
+	}
+	reply, updatedCtx, err := geminiAPIHandler(context.Background(), event.Text, initialCtx)
+	if err != nil {
+		log.Printf("[Slack Message] Gemini error: %v", err)
+		// Notify user of failure and stop processing to avoid persisting an invalid reply
+		if serr := sendSlackResponse(event.Channel, "Sorry, I encountered an error. Please try again."); serr != nil {
+			log.Printf("[Slack Message] Failed to send error notice to Slack: %v", serr)
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "error_processed"})
+		return
+	}
 	// Persist assistant message including current_context
 	if err := storeMessage(threadID, "assistant", reply, map[string]interface{}{
 		"source":          "slack",
@@ -785,29 +785,29 @@ func main() {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist user message"})
 			return
 		}
-		        // Load last persisted context for this thread
-        initialCtx, err := getLastContextForThread(threadID)
-        if err != nil {
-            log.Printf("[Context] load error: %v", err)
-            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load conversation context"})
-            return
-        }
-        log.Printf("[Context] Using initial current_context for HTTP: %v", initialCtx)
-        resp, updatedCtx, err := geminiAPIHandler(c.Request.Context(), req.Message, initialCtx)
-        if err != nil {
-            log.Printf("[Chat] gemini error: %v", err)
-            c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to process message: %v", err)})
-            return
-        }
-        if strings.TrimSpace(resp) == "" {
-            resp = "**No response available. Please try again.**"
-        }
-        log.Printf("[Context] Persisting updated current_context (HTTP): %v", updatedCtx)
-        if err := storeMessage(threadID, "assistant", resp, map[string]interface{}{"source": "http", "current_context": updatedCtx}); err != nil {
-            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist assistant message"})
-            return
-        }
-        c.JSON(http.StatusOK, gin.H{"response": resp, "thread_id": threadID})
+		// Load last persisted context for this thread
+		initialCtx, err := getLastContextForThread(threadID)
+		if err != nil {
+			log.Printf("[Context] load error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load conversation context"})
+			return
+		}
+		log.Printf("[Context] Using initial current_context for HTTP: %v", initialCtx)
+		resp, updatedCtx, err := geminiAPIHandler(c.Request.Context(), req.Message, initialCtx)
+		if err != nil {
+			log.Printf("[Chat] gemini error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to process message: %v", err)})
+			return
+		}
+		if strings.TrimSpace(resp) == "" {
+			resp = "**No response available. Please try again.**"
+		}
+		log.Printf("[Context] Persisting updated current_context (HTTP): %v", updatedCtx)
+		if err := storeMessage(threadID, "assistant", resp, map[string]interface{}{"source": "http", "current_context": updatedCtx}); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist assistant message"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"response": resp, "thread_id": threadID})
 	})
 	r.POST("/webhook/slack", func(c *gin.Context) {
 		body, err := io.ReadAll(c.Request.Body)
@@ -963,8 +963,8 @@ You are a helpful assistant that executes tasks by calling tools.
 
 **Current Request:**
 %s`, maxItems, toolsSection.String(), contextSection.String(), task)
-	    log.Printf("[Gemini API] Sending prompt: %s", systemPrompt)
-    resp, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(systemPrompt), nil)
+	log.Printf("[Gemini API] Sending prompt: %s", systemPrompt)
+	resp, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(systemPrompt), nil)
 	if err != nil {
 		log.Printf("[Gemini API] Error generating content: %v", err)
 		return "", ToolCall{}, err
@@ -1083,7 +1083,7 @@ func geminiAPIHandler(ctx context.Context, task string, initialContext []string)
 			currentPrompt = fmt.Sprintf("Original Task: %s\n\nHistory of actions:\n%s", originalTask, strings.Join(history, "\n"))
 		}
 
-		        responseText, toolCall, err := callGeminiAPI(ctx, client, currentPrompt, currentContext)
+		responseText, toolCall, err := callGeminiAPI(ctx, client, currentPrompt, currentContext)
 		if err != nil {
 			log.Printf("[Gemini Loop] Error from Gemini: %v", err)
 			return "An error occurred while calling the LLM.", currentContext, nil
