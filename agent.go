@@ -689,7 +689,7 @@ func main() {
 
 	r.POST("/webhook/slack", func(c *gin.Context) {
 		// Read the request body
-		body, err := ioutil.ReadAll(c.Request.Body)
+		body, err := io.ReadAll(c.Request.Body)
 		if err != nil {
 			log.Printf("[Slack Webhook] Error reading body: %v", err)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
