@@ -454,6 +454,8 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
     threadID, terr := ensureSlackThread(event.Channel)
     if terr != nil {
         log.Printf("[DB] Failed to resolve slack thread: %v", terr)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create or retrieve conversation thread"})
+        return
     }
 
     // Persist user message
