@@ -71,19 +71,23 @@ func normalizePathInText(s string) string {
 
 // sanitizeContextFacts rewrites host-specific paths to canonical sandbox paths and dedupes.
 func sanitizeContextFacts(in []string) []string {
-	if len(in) == 0 {
+if len(in) == 0 {
 		return in
 	}
+	seen := make(map[string]bool, len(in))
 	out := make([]string, 0, len(in))
 	for _, item := range in {
-		if strings.TrimSpace(item) == "" {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
 			continue
 		}
-		norm := normalizePathInText(item)
-		out = append(out, norm)
+		norm := normalizePathInText(trimmed)
+		if !seen[norm] {
+			seen[norm] = true
+			out = append(out, norm)
+		}
 	}
-	// dedupe while preserving order
-	return mergeStringSets(nil, out)
+	return out
 }
 
 // getLastContextForThread loads the most recent message metadata for a thread and extracts current_context
