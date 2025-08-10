@@ -37,6 +37,7 @@
   - `migrations/0002_conversations_threads_messages.down.sql` drops `messages` then `threads`.
   - Indexes: `messages(thread_id)`, `messages(created_at)`.
   - `migrations/0003_threads_updated_at_trigger.up.sql` adds a PL/pgSQL trigger to refresh `threads.updated_at` on UPDATE (with matching `.down.sql`).
+  - `migrations/0004_bump_thread_on_message_insert.up.sql` updates `threads.updated_at` automatically when a new message is inserted (with matching `.down.sql`).
 
 ### Docker Sandbox Lifecycle
 - Added graceful stop/remove on shutdown based on `DOCKER_AUTO_REMOVE`.
