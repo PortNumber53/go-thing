@@ -1,6 +1,7 @@
 package main
 
 import (
+    "database/sql"
 	"context"
 	"encoding/json"
 	"flag"
@@ -40,6 +41,27 @@ type ToolResponse struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data,omitempty"`
 	Error   string      `json:"error,omitempty"`
+}
+
+// getOrCreateAnyThread returns the most recently updated thread id if one exists,
+// otherwise it creates the first thread and returns its id.
+func getOrCreateAnyThread() (int64, error) {
+    dbc := db.Get()
+    if dbc == nil {
+        return 0, fmt.Errorf("db not initialized")
+    }
+    var id int64
+    // Try to get the latest updated thread
+    err := dbc.QueryRow(`SELECT id FROM threads ORDER BY updated_at DESC LIMIT 1`).Scan(&id)
+    if err == nil {
+        return id, nil
+    }
+    if err != nil && err != sql.ErrNoRows {
+        return 0, err
+    }
+    // No rows, create the first thread
+    title := fmt.Sprintf("Default Thread %s", time.Now().Format("2006-01-02"))
+    return createNewThread(title)
 }
 
 // runMigrateCLI handles: migrate up [--step N], migrate down --step N, migrate status
@@ -388,56 +410,140 @@ func maskToken(s string) string {
 	return s[:4] + "****" + s[len(s)-4:]
 }
 
-// Slack webhook handler
-func handleSlackWebhook(c *gin.Context) {
-	// Read the request body
-	body, err := ioutil.ReadAll(c.Request.Body)
+// createNewThread creates a new thread row and returns its ID.
+func createNewThread(title string) (int64, error) {
+	dbc := db.Get()
+	if dbc == nil {
+		return 0, fmt.Errorf("db not initialized")
+	}
+	var id int64
+	err := dbc.QueryRow(`INSERT INTO threads (title) VALUES ($1) RETURNING id`, title).Scan(&id)
 	if err != nil {
-		log.Printf("[Slack Webhook] Error reading body: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
-		return
+		return 0, err
 	}
+	return id, nil
+}
 
-	// Parse the Slack event
-	var event slack.Event
-	if err := json.Unmarshal(body, &event); err != nil {
-		log.Printf("[Slack Webhook] Error parsing event: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event format"})
-		return
-	}
+// storeMessage inserts a message into the specified thread.
+func storeMessage(threadID int64, role, content string, metadata map[string]interface{}) error {
+	dbc := db.Get()
+    if dbc == nil {
+        return fmt.Errorf("storeMessage failed: database not initialized")
+    }
+    // Marshal metadata to JSONB via string parameter
+    var metaJSON string = "{}"
+    if metadata != nil {
+        b, err := json.Marshal(metadata)
+        if err != nil {
+            log.Printf("[DB] Failed to marshal metadata: %v", err)
+            return fmt.Errorf("failed to marshal metadata: %w", err)
+        }
+        metaJSON = string(b)
+    }
+    if _, err := dbc.Exec(`INSERT INTO messages (thread_id, role, content, metadata) VALUES ($1,$2,$3,$4::jsonb)`, threadID, role, content, metaJSON); err != nil {
+        log.Printf("[DB] insert message failed: %v", err)
+        return err
+    }
+    return nil
+}
 
-	// Handle URL verification challenge
-	if event.Type == "url_verification" {
-		var challenge struct {
-			Challenge string `json:"challenge"`
-		}
-		if err := json.Unmarshal(body, &challenge); err != nil {
-			log.Printf("[Slack Webhook] Error parsing challenge: %v", err)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid challenge format"})
-			return
-		}
-		log.Printf("[Slack Webhook] URL verification challenge received: %s", challenge.Challenge)
-		c.JSON(http.StatusOK, gin.H{"challenge": challenge.Challenge})
-		return
-	}
+// Slack channel -> thread mapping
+// Bounded in-memory cache for Slack channel -> thread_id to avoid unbounded growth
+type SlackCache struct {
+    mu    sync.Mutex
+    m     map[string]int64
+    order []string
+    cap   int
+}
 
-	// Handle events
-	if event.Type == "event_callback" {
-		var callback struct {
-			Event slack.MessageEvent `json:"event"`
-		}
-		if err := json.Unmarshal(body, &callback); err != nil {
-			log.Printf("[Slack Webhook] Error parsing callback: %v", err)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid callback format"})
-			return
-		}
+func (c *SlackCache) Get(k string) (int64, bool) {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    if c.m == nil {
+        return 0, false
+    }
+    v, ok := c.m[k]
+    if !ok {
+        return 0, false
+    }
+    // move to end (most-recently used)
+    for i, key := range c.order {
+        if key == k {
+            c.order = append(c.order[:i], c.order[i+1:]...)
+            break
+        }
+    }
+    c.order = append(c.order, k)
+    return v, true
+}
 
-		// Handle message events
-		handleSlackMessage(c, &callback.Event)
-	} else {
-		log.Printf("[Slack Webhook] Unhandled event type: %s", event.Type)
-		c.JSON(http.StatusOK, gin.H{"status": "event received"})
-	}
+func (c *SlackCache) Put(k string, v int64) {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    if c.m == nil {
+        c.m = make(map[string]int64)
+    }
+    if _, exists := c.m[k]; exists {
+        // update and move to end
+        c.m[k] = v
+        for i, key := range c.order {
+            if key == k {
+                c.order = append(c.order[:i], c.order[i+1:]...)
+                break
+            }
+        }
+        c.order = append(c.order, k)
+        return
+    }
+    // insert new
+    c.m[k] = v
+    c.order = append(c.order, k)
+    // evict if over capacity
+    if c.cap > 0 && len(c.order) > c.cap {
+        evict := c.order[0]
+        c.order = c.order[1:]
+        delete(c.m, evict)
+        // also remove the per-channel lock for the evicted channel
+        removeSlackChannelLock(evict)
+    }
+}
+
+var slackThreads = &SlackCache{cap: 25}
+
+func ensureSlackThread(channel string) (int64, error) {
+    // New logic: use any existing thread (most recently updated),
+    // or create the first one if none exists. Channel is ignored.
+    return getOrCreateAnyThread()
+}
+
+// Per-channel lock registry for Slack thread creation
+var slackThreadLockRegistry struct {
+    mu sync.Mutex
+    m  map[string]*sync.Mutex
+}
+
+func getSlackChannelLock(channel string) *sync.Mutex {
+    slackThreadLockRegistry.mu.Lock()
+    defer slackThreadLockRegistry.mu.Unlock()
+    if slackThreadLockRegistry.m == nil {
+        slackThreadLockRegistry.m = make(map[string]*sync.Mutex)
+    }
+    l, ok := slackThreadLockRegistry.m[channel]
+    if !ok {
+        l = &sync.Mutex{}
+        slackThreadLockRegistry.m[channel] = l
+    }
+    return l
+}
+
+// removeSlackChannelLock deletes the per-channel lock when evicting from cache
+func removeSlackChannelLock(channel string) {
+    slackThreadLockRegistry.mu.Lock()
+    defer slackThreadLockRegistry.mu.Unlock()
+    if slackThreadLockRegistry.m == nil {
+        return
+    }
+    delete(slackThreadLockRegistry.m, channel)
 }
 
 // Handle regular message events
@@ -449,11 +555,27 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
 		return
 	}
 
-	// Check if this is a direct message or the bot was mentioned
-	// For now, we'll process all messages in direct messages
-	// In a real implementation, you'd check the channel type and bot mentions
+	// Use existing thread if any, otherwise create the first one
+	threadID, err := getOrCreateAnyThread()
+	if err != nil {
+		log.Printf("[Slack Message] ensure thread failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to ensure thread"})
+		return
+	}
 
-	// Process the message with Gemini
+	// Persist user message
+	if err := storeMessage(threadID, "user", event.Text, map[string]interface{}{
+		"source":  "slack",
+		"channel": event.Channel,
+		"user":    event.User,
+		"ts":      event.Timestamp,
+	}); err != nil {
+		log.Printf("[Slack Message] Failed to persist user message: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist user message"})
+		return
+	}
+
+	// Process the message
 	reply, err := processUserMessage(event.Text)
 	if err != nil {
 		log.Printf("[Slack Message] Error processing message: %v", err)
@@ -461,10 +583,19 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
 		return
 	}
 
-	// Try to send response back to Slack using the Slack API
+	// Persist assistant message
+	if err := storeMessage(threadID, "assistant", reply, map[string]interface{}{
+		"source":  "slack",
+		"channel": event.Channel,
+	}); err != nil {
+		log.Printf("[Slack Message] Failed to persist assistant message: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist assistant message"})
+		return
+	}
+
+	// Try to send response back to Slack
 	if err := sendSlackResponse(event.Channel, reply); err != nil {
 		log.Printf("[Slack Message] Failed to send response to Slack: %v", err)
-		// Still return success to Slack to avoid retries
 	}
 
 	log.Printf("[Slack Message] Channel: %s, User: %s, Text: %s", event.Channel, event.User, event.Text)
@@ -472,230 +603,162 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
 	c.JSON(http.StatusOK, gin.H{"status": "message processed", "reply": reply})
 }
 
-// Send response back to Slack
+// Send response back to Slack using bot token
 func sendSlackResponse(channel, message string) error {
-	// Load config to get Slack bot token
-	cfg, err := loadConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load config: %v", err)
-	}
-
-	botToken := cfg["SLACK_BOT_TOKEN"]
-	if botToken == "" {
-		return fmt.Errorf("SLACK_BOT_TOKEN missing in config")
-	}
-
-	// Create Slack client
-	api := slack.New(botToken)
-
-	// Send message
-	_, _, err = api.PostMessage(
-		channel,
-		slack.MsgOptionText(message, false),
-		slack.MsgOptionAsUser(true),
-	)
-
-	if err != nil {
-		return fmt.Errorf("failed to post message: %v", err)
-	}
-
-	log.Printf("[Slack API] Message sent to channel %s", channel)
-	return nil
+    cfg, err := loadConfig()
+    if err != nil {
+        return fmt.Errorf("failed to load config: %v", err)
+    }
+    botToken := cfg["SLACK_BOT_TOKEN"]
+    if strings.TrimSpace(botToken) == "" {
+        return fmt.Errorf("SLACK_BOT_TOKEN missing in config")
+    }
+    api := slack.New(botToken)
+    _, _, err = api.PostMessage(
+        channel,
+        slack.MsgOptionText(message, false),
+        slack.MsgOptionAsUser(true),
+    )
+    if err != nil {
+        return fmt.Errorf("failed to post message: %v", err)
+    }
+    log.Printf("[Slack API] Message sent to channel %s", channel)
+    return nil
 }
 
 func main() {
-	// Setup logging to both stdout and debug.log
-	setupLogFile, err := setupLogging()
-	if err != nil {
-		log.Printf("[Startup] Failed to set up file logging: %v", err)
-	} else if setupLogFile != nil {
-		defer setupLogFile.Close()
-	}
-	log.Printf("[Startup] Starting go-thing agent")
+    // Setup logging
+    f, err := setupLogging()
+    if err != nil {
+        log.Printf("[Startup] Failed to setup logging: %v", err)
+    } else if f != nil {
+        defer f.Close()
+    }
+    log.Printf("[Startup] Starting go-thing agent")
 
-	// CLI: migration management
-	if len(os.Args) > 1 && os.Args[1] == "migrate" {
-		exitCode := runMigrateCLI(os.Args[2:])
-		if setupLogFile != nil {
-			_ = setupLogFile.Close()
-		}
-		os.Exit(exitCode)
-		return
-	}
+    // CLI migrate
+    if len(os.Args) > 1 && os.Args[1] == "migrate" {
+        os.Exit(runMigrateCLI(os.Args[2:]))
+        return
+    }
 
-	// Load configuration once and reuse
-	cfgPath := os.ExpandEnv(config.ConfigFilePath)
-	cfgIni, iniErr := ini.Load(cfgPath)
-	// Derive runtime configuration values with sensible defaults
-	apiAddr := "0.0.0.0:7866"
-	toolsAddr := ":8080"
-	chrootDir := ""
-	gemKey := ""
-	slackToken := ""
-	if iniErr == nil {
-		def := cfgIni.Section("default")
-		if v := strings.TrimSpace(def.Key("API_ADDR").String()); v != "" { apiAddr = v }
-		if v := strings.TrimSpace(def.Key("TOOLS_ADDR").String()); v != "" { toolsAddr = v }
-		chrootDir = strings.TrimSpace(def.Key("CHROOT_DIR").String())
-		gemKey = def.Key("GEMINI_API_KEY").String()
-		slackToken = def.Key("SLACK_BOT_TOKEN").String()
-		// Cache DOCKER_AUTO_REMOVE for shutdown path
-		dockerAutoRemove = strings.EqualFold(def.Key("DOCKER_AUTO_REMOVE").String(), "true")
-	} else {
-		log.Printf("[Config] Load failed (%v); using defaults and skipping DB init", iniErr)
-	}
+    // Load config and init DB/migrations if possible
+    cfgPath := os.ExpandEnv(config.ConfigFilePath)
+    cfgIni, iniErr := ini.Load(cfgPath)
+    if iniErr == nil {
+        if dbConn, pgcfg, derr := db.Init(cfgIni); derr != nil {
+            log.Printf("[Postgres] Init failed: %v (continuing without DB)", derr)
+        } else {
+            defer func() { _ = dbConn.Close() }()
+            if merr := db.RunMigrations(dbConn, pgcfg.MigrationsDir); merr != nil {
+                log.Printf("[Postgres] Migrations error: %v", merr)
+            } else {
+                log.Printf("[Postgres] Migrations applied from %s", pgcfg.MigrationsDir)
+            }
+        }
+    } else {
+        log.Printf("[Config] Load failed (%v); continuing with defaults", iniErr)
+    }
 
-	// Initialize PostgreSQL (optional) and run migrations
-	if iniErr == nil {
-		if dbConn, pgcfg, derr := db.Init(cfgIni); derr != nil {
-			log.Printf("[Postgres] Init failed: %v (continuing without DB)", derr)
-		} else {
-			defer func() { _ = dbConn.Close() }()
-			if merr := db.RunMigrations(dbConn, pgcfg.MigrationsDir); merr != nil {
-				log.Printf("[Postgres] Migrations error: %v", merr)
-			} else {
-				log.Printf("[Postgres] Migrations applied from %s", pgcfg.MigrationsDir)
-			}
-		}
-	}
+    // Determine addresses
+    apiAddr := "0.0.0.0:7866"
+    if cfg, err := loadConfig(); err == nil {
+        if v := strings.TrimSpace(cfg["API_ADDR"]); v != "" { apiAddr = v }
+        dockerAutoRemove = strings.EqualFold(cfg["DOCKER_AUTO_REMOVE"], "true")
+    }
 
-	// Log applied config (masked where sensitive) if available
-	if iniErr == nil {
-		log.Printf("[Config] Loaded from %s", cfgPath)
-		log.Printf("[Config] API_ADDR=%s TOOLS_ADDR=%s CHROOT_DIR=%s GEMINI_API_KEY=%s SLACK_BOT_TOKEN=%s",
-			apiAddr, toolsAddr, chrootDir, maskToken(gemKey), maskToken(slackToken))
-	}
+    // Start tool server
+    toolServer := toolsrv.NewServer(getToolsAddr())
+    go func() {
+        log.Printf("[Tools] Starting tool server on %s", getToolsAddr())
+        if err := toolServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+            log.Printf("[Tools] Tool server error: %v", err)
+        }
+    }()
 
-	// Start embedded tool server with graceful shutdown support
-	toolServer := toolsrv.NewServer(toolsAddr)
-	go func() {
-		log.Printf("[Tools] Starting tool server on %s", toolsAddr)
-		if err := toolServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("[Tools] Tool server exited with error: %v", err)
-		}
-	}()
+    // Gin router and routes
+    r := gin.Default()
+    r.GET("/", func(c *gin.Context) {
+        c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "go-thing agent API"})
+    })
+    r.POST("/chat", func(c *gin.Context) {
+        var req struct{ Message string `json:"message" binding:"required"` }
+        if err := c.ShouldBindJSON(&req); err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+            return
+        }
+        threadID, err := getOrCreateAnyThread()
+        if err != nil {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to ensure thread"})
+            return
+        }
+        if err := storeMessage(threadID, "user", req.Message, map[string]interface{}{"source": "http"}); err != nil {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist user message"})
+            return
+        }
+        resp, err := geminiAPIHandler(c.Request.Context(), req.Message)
+        if err != nil || strings.TrimSpace(resp) == "" {
+            if err != nil { log.Printf("[Chat] gemini error: %v", err) }
+            resp = "**No response available. Please try again.**"
+        }
+        if err := storeMessage(threadID, "assistant", resp, map[string]interface{}{"source": "http"}); err != nil {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist assistant message"})
+            return
+        }
+        c.JSON(http.StatusOK, gin.H{"response": resp, "thread_id": threadID})
+    })
+    r.POST("/webhook/slack", func(c *gin.Context) {
+        body, err := io.ReadAll(c.Request.Body)
+        if err != nil { c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read body"}); return }
+        var ev slack.Event
+        if err := json.Unmarshal(body, &ev); err != nil { c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event"}); return }
+        if ev.Type == "url_verification" {
+            var ch struct{ Challenge string `json:"challenge"` }
+            if err := json.Unmarshal(body, &ch); err != nil { c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid challenge"}); return }
+            c.JSON(http.StatusOK, gin.H{"challenge": ch.Challenge}); return
+        }
+        if ev.Type == "event_callback" {
+            var cb struct{ Event slack.MessageEvent `json:"event"` }
+            if err := json.Unmarshal(body, &cb); err != nil { c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid callback"}); return }
+            handleSlackMessage(c, &cb.Event)
+            return
+        }
+        c.JSON(http.StatusOK, gin.H{"status": "event received"})
+    })
+    r.POST("/webhook", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "webhook received"}) })
 
-	// Best-effort: ensure the Docker container used for sandboxed execution is available
-	if name, err := toolsrv.EnsureDockerContainer(); err != nil {
-		log.Printf("[Docker] Ensure container failed (continuing without sandbox): %v", err)
-	} else {
-		log.Printf("[Docker] Container ready: %s", name)
-	}
-
-	// dockerAutoRemove already cached from initial config load
-
-	r := gin.Default()
-
-	r.GET("/", func(c *gin.Context) {
-		// Frontend moved to React/Vite SPA served separately.
-		// This endpoint now serves as a simple health/info check.
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "ok",
-			"service": "go-thing agent API",
-			"message": "Frontend is now a React/Vite SPA. Use the SPA for UI; this server exposes /chat and webhooks.",
-		})
-	})
-
-	r.POST("/chat", func(c *gin.Context) {
-		var req struct {
-			Message string `json:"message"`
-		}
-		if err := c.BindJSON(&req); err != nil {
-			log.Printf("[Chat Handler] Error binding JSON: %v", err)
-			c.JSON(400, gin.H{"response": "Invalid request format"})
-			return
-		}
-		log.Printf("[Chat Handler] Received message: %s", req.Message)
-		response, err := geminiAPIHandler(c.Request.Context(), req.Message)
-		if err != nil {
-			log.Printf("[Chat Handler] Error from geminiAPIHandler: %v", err)
-			c.JSON(500, gin.H{"response": "Internal server error"})
-			return
-		}
-		if strings.TrimSpace(response) == "" {
-			response = "**No response available. Please try again.**"
-		}
-		log.Printf("[Chat Handler] Sending response: %s", response)
-		c.JSON(200, gin.H{"response": response})
-	})
-
-	r.POST("/webhook/slack", handleSlackWebhook)
-
-	// Keep the existing generic webhook for backward compatibility
-	r.POST("/webhook", func(c *gin.Context) {
-		// Placeholder for Slack webhook integration
-		c.JSON(http.StatusOK, gin.H{"status": "webhook received"})
-	})
-
-	// Run Gin HTTP server with graceful shutdown
-	apiServer := &http.Server{Addr: apiAddr, Handler: r}
-
-	// OS signal handling (SIGINT/SIGTERM) for Air restarts
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		log.Printf("[API] Starting HTTP server on %s", apiAddr)
-		if err := apiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("[API] HTTP server exited with error: %v", err)
-		}
-	}()
-
-	// Wait for termination signal
-	sig := <-quit
-	log.Printf("[Shutdown] Caught signal: %v. Shutting down servers...", sig)
-
-	// Graceful shutdown context
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Shutdown API server first to stop accepting new requests
-	if err := apiServer.Shutdown(ctx); err != nil {
-		log.Printf("[Shutdown] API server shutdown error: %v", err)
-	} else {
-		log.Printf("[Shutdown] API server stopped")
-	}
-
-	// Shutdown tool server
-	if err := toolServer.Shutdown(ctx); err != nil {
-		log.Printf("[Shutdown] Tool server shutdown error: %v", err)
-	} else {
-		log.Printf("[Shutdown] Tool server stopped")
-	}
-
-	// Best-effort: stop and optionally remove the Docker sandbox container
-	if err := toolsrv.StopDockerContainer(); err != nil {
-		log.Printf("[Shutdown] Docker stop error: %v", err)
-	} else {
-		log.Printf("[Shutdown] Docker container stopped")
-	}
-	// Use cached flag for auto-remove to avoid re-reading config on shutdown path
-	if dockerAutoRemove {
-		if err := toolsrv.RemoveDockerContainer(true); err != nil {
-			log.Printf("[Shutdown] Docker remove error: %v", err)
-		} else {
-			log.Printf("[Shutdown] Docker container removed")
-		}
-	}
-	log.Printf("[Shutdown] Done")
+    // HTTP server with graceful shutdown
+    apiServer := &http.Server{Addr: apiAddr, Handler: r}
+    quit := make(chan os.Signal, 1)
+    signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+    go func() {
+        log.Printf("[API] Starting HTTP server on %s", apiAddr)
+        if err := apiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+            log.Printf("[API] Server error: %v", err)
+        }
+    }()
+    sig := <-quit
+    log.Printf("[Shutdown] Signal: %v", sig)
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    _ = apiServer.Shutdown(ctx)
+    _ = toolServer.Shutdown(ctx)
 }
 
-// setupLogging configures the global logger and Gin to write to both stdout and a debug.log file.
-// Returns the opened file so caller can defer Close().
 func setupLogging() (*os.File, error) {
-	// Default log file path in current working directory
-	logPath := "debug.log"
+    // Default log file path in current working directory
+    logPath := "debug.log"
 
-	// Try to open in append mode, create if not exists
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return nil, err
-	}
+    // Try to open in append mode, create if not exists
+    f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+    if err != nil {
+        return nil, err
+    }
 
-	// Write to both stdout and file
-	mw := io.MultiWriter(os.Stdout, f)
-	log.SetOutput(mw)
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+    // Write to both stdout and file
+    mw := io.MultiWriter(os.Stdout, f)
+    log.SetOutput(mw)
+    log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
 	// Route Gin logs to the same writer
 	gin.DefaultWriter = mw
