@@ -224,15 +224,6 @@ func getToolsAddr() string {
 	return ":8080"
 }
 
-// getAPIAddr returns the address for the public API server from config or a default
-func getAPIAddr() string {
-	cfg, _ := loadConfig()
-	if v, ok := cfg["API_ADDR"]; ok && strings.TrimSpace(v) != "" {
-		return strings.TrimSpace(v)
-	}
-	return "0.0.0.0:7866"
-}
-
 // Get available tools from the tool server
 func getAvailableTools() ([]Tool, error) {
 	addr := getToolsAddr()

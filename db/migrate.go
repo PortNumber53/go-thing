@@ -26,10 +26,18 @@ func MigrateUp(db *sql.DB, dir string, steps int) error {
 	count := 0
 	for _, name := range ups {
 		if appliedSet[name] { continue }
-		if err := applyFile(db, filepath.Join(dir, name)); err != nil {
+		// Apply and mark within a single transaction for atomicity
+		tx, terr := db.Begin()
+		if terr != nil { return terr }
+		if err := applyFile(tx, filepath.Join(dir, name)); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("migration %s failed: %w", name, err)
 		}
-		if err := markApplied(db, name); err != nil { return err }
+		if err := markApplied(tx, name); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if cerr := tx.Commit(); cerr != nil { return cerr }
 		count++
 		if steps > 0 && count >= steps { break }
 	}
@@ -55,10 +63,18 @@ func MigrateDown(db *sql.DB, dir string, steps int) error {
 		if _, statErr := os.Stat(downPath); statErr != nil {
 			return fmt.Errorf("down migration not found for %s (expected %s)", ver, downName)
 		}
-		if err := applyFile(db, downPath); err != nil {
+		// Apply down and unmark within a transaction
+		tx, terr := db.Begin()
+		if terr != nil { return terr }
+		if err := applyFile(tx, downPath); err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("down migration %s failed: %w", downName, err)
 		}
-		if err := unmarkApplied(db, ver); err != nil { return err }
+		if err := unmarkApplied(tx, ver); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if cerr := tx.Commit(); cerr != nil { return cerr }
 		steps--
 	}
 	return nil
@@ -66,18 +82,20 @@ func MigrateDown(db *sql.DB, dir string, steps int) error {
 
 // MigrateStatus returns applied versions and pending counts.
 func MigrateStatus(db *sql.DB, dir string) (applied []string, pending []string, err error) {
-	if err = ensureMigrationsTable(db); err != nil { return }
-	ups, err2 := listUpFiles(dir)
-	if err2 != nil { err = err2; return }
-	aset, err2 := appliedSet(db)
-	if err2 != nil { err = err2; return }
-	for _, v := range orderedApplied(aset) {
-		applied = append(applied, v)
-	}
-	for _, f := range ups {
-		if !aset[f] { pending = append(pending, f) }
-	}
-	return
+    if err = ensureMigrationsTable(db); err != nil { return }
+    var ups []string
+    ups, err = listUpFiles(dir)
+    if err != nil { return }
+    var aset map[string]bool
+    aset, err = appliedSet(db)
+    if err != nil { return }
+    for _, v := range orderedApplied(aset) {
+        applied = append(applied, v)
+    }
+    for _, f := range ups {
+        if !aset[f] { pending = append(pending, f) }
+    }
+    return
 }
 
 func ensureMigrationsTable(db *sql.DB) error {
@@ -121,13 +139,17 @@ func orderedApplied(aset map[string]bool) []string {
 	return list
 }
 
-func markApplied(db *sql.DB, v string) error {
-	_, err := db.Exec(`INSERT INTO schema_migrations(version) VALUES($1)`, v)
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func markApplied(ex execer, v string) error {
+	_, err := ex.Exec(`INSERT INTO schema_migrations(version) VALUES($1)`, v)
 	return err
 }
 
-func unmarkApplied(db *sql.DB, v string) error {
-	_, err := db.Exec(`DELETE FROM schema_migrations WHERE version=$1`, v)
+func unmarkApplied(ex execer, v string) error {
+	_, err := ex.Exec(`DELETE FROM schema_migrations WHERE version=$1`, v)
 	return err
 }
 
@@ -160,7 +182,7 @@ func guessDownName(up string) string {
 	return up + ".down.sql"
 }
 
-func applyFile(db *sql.DB, path string) error {
+func applyFile(ex execer, path string) error {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -168,7 +190,7 @@ func applyFile(db *sql.DB, path string) error {
 	if len(strings.TrimSpace(string(content))) == 0 {
 		return nil // skip empty files
 	}
-	if _, err := db.Exec(string(content)); err != nil {
+	if _, err := ex.Exec(string(content)); err != nil {
 		return err
 	}
 	return nil
