@@ -422,8 +422,10 @@ func storeMessage(role, content string, metadata map[string]interface{}) {
 	// Marshal metadata to JSONB via string parameter
 	var metaJSON string = "{}"
 	if metadata != nil {
-		if b, err := json.Marshal(metadata); err == nil {
+if b, err := json.Marshal(metadata); err == nil {
 			metaJSON = string(b)
+		} else {
+			log.Printf("[DB] Failed to marshal metadata: %v", err)
 		}
 	}
 	if _, err := dbc.Exec(`INSERT INTO messages (thread_id, role, content, metadata) VALUES ($1,$2,$3,$4::jsonb)`, currentThreadID, role, content, metaJSON); err != nil {
