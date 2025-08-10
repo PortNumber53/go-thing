@@ -405,9 +405,10 @@ func createNewThread(title string) (int64, error) {
 // storeMessage inserts a message into the specified thread.
 func storeMessage(threadID int64, role, content string, metadata map[string]interface{}) {
 	dbc := db.Get()
-	if dbc == nil {
-		return // DB not available; skip silently
-	}
+    if dbc == nil {
+        log.Printf("[DB] storeMessage failed: database not initialized")
+        return
+    }
 	// Marshal metadata to JSONB via string parameter
 	var metaJSON string = "{}"
 	if metadata != nil {
