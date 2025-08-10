@@ -1022,15 +1022,7 @@ type ToolCall struct {
 
 // GetMergedContext returns a merged context slice from either current_context or current_content
 func (tc *ToolCall) GetMergedContext() []string {
-	// Prefer current_context, but also merge current_content if present
-	var out []string
-	if len(tc.CurrentContext) > 0 {
-		out = append(out, tc.CurrentContext...)
-	}
-	if len(tc.CurrentContent) > 0 {
-		out = mergeStringSets(out, tc.CurrentContent)
-	}
-	return out
+    return mergeStringSets(tc.CurrentContext, tc.CurrentContent)
 }
 
 // mergeStringSets merges two string slices, de-duplicating while preserving order (favoring later slice order at the end)
