@@ -427,15 +427,45 @@ func storeMessage(threadID int64, role, content string, metadata map[string]inte
 var slackThreads sync.Map // map[string]int64
 
 func ensureSlackThread(channel string) (int64, error) {
-	if v, ok := slackThreads.Load(channel); ok {
-		return v.(int64), nil
-	}
-	id, err := createNewThread(fmt.Sprintf("Slack %s", channel))
-	if err != nil {
-		return 0, err
-	}
-	slackThreads.Store(channel, id)
-	return id, nil
+    if v, ok := slackThreads.Load(channel); ok {
+        return v.(int64), nil
+    }
+    // Acquire per-channel lock to avoid duplicate thread creation
+    l := getSlackChannelLock(channel)
+    l.Lock()
+    defer l.Unlock()
+    // Double-check after acquiring lock
+    if v, ok := slackThreads.Load(channel); ok {
+        return v.(int64), nil
+    }
+    // Create with channel + date to aid identification
+    title := fmt.Sprintf("Slack %s %s", channel, time.Now().Format("2006-01-02"))
+    id, err := createNewThread(title)
+    if err != nil {
+        return 0, err
+    }
+    slackThreads.Store(channel, id)
+    return id, nil
+}
+
+// Per-channel lock registry for Slack thread creation
+var slackThreadLockRegistry struct {
+    mu sync.Mutex
+    m  map[string]*sync.Mutex
+}
+
+func getSlackChannelLock(channel string) *sync.Mutex {
+    slackThreadLockRegistry.mu.Lock()
+    defer slackThreadLockRegistry.mu.Unlock()
+    if slackThreadLockRegistry.m == nil {
+        slackThreadLockRegistry.m = make(map[string]*sync.Mutex)
+    }
+    l, ok := slackThreadLockRegistry.m[channel]
+    if !ok {
+        l = &sync.Mutex{}
+        slackThreadLockRegistry.m[channel] = l
+    }
+    return l
 }
 
 // Handle regular message events
