@@ -33,9 +33,10 @@
 
 ### Conversation storage
 - Added migrations to persist chats:
-  - `migrations/0002_conversations_threads_messages.up.sql` creates `conversations`, `threads`, and `messages` with FKs and indexes.
-  - `migrations/0002_conversations_threads_messages.down.sql` drops them in reverse order.
-  - Indexes: `threads(conversation_id)`, `messages(thread_id)`, `messages(created_at)`.
+  - `migrations/0002_conversations_threads_messages.up.sql` creates `threads` and `messages` with FKs and indexes.
+  - `migrations/0002_conversations_threads_messages.down.sql` drops `messages` then `threads`.
+  - Indexes: `messages(thread_id)`, `messages(created_at)`.
+  - `migrations/0003_threads_updated_at_trigger.up.sql` adds a PL/pgSQL trigger to refresh `threads.updated_at` on UPDATE (with matching `.down.sql`).
 
 ### Docker Sandbox Lifecycle
 - Added graceful stop/remove on shutdown based on `DOCKER_AUTO_REMOVE`.
