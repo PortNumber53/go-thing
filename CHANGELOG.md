@@ -31,6 +31,12 @@
 - Added migration CLI in `agent.go` with commands: `migrate up [--step N]`, `migrate down --step N`, and `migrate status`.
 - Enhanced migration engine to support `.up.sql`/`.down.sql` files, step-wise up/down, and status reporting.
 
+### Conversation storage
+- Added migrations to persist chats:
+  - `migrations/0002_conversations_threads_messages.up.sql` creates `conversations`, `threads`, and `messages` with FKs and indexes.
+  - `migrations/0002_conversations_threads_messages.down.sql` drops them in reverse order.
+  - Indexes: `threads(conversation_id)`, `messages(thread_id)`, `messages(created_at)`.
+
 ### Docker Sandbox Lifecycle
 - Added graceful stop/remove on shutdown based on `DOCKER_AUTO_REMOVE`.
 - New helpers in `tools/docker_start.go`: `StopDockerContainer`, `RemoveDockerContainer(force)`, and internal `dockerStop`.

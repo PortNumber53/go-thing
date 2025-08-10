@@ -33,6 +33,7 @@ var (
 	configData       map[string]string
 	configErr        error
 	dockerAutoRemove bool
+	currentThreadID  int64
 )
 
 // ToolResponse represents a response from tool execution
@@ -388,6 +389,48 @@ func maskToken(s string) string {
 	return s[:4] + "****" + s[len(s)-4:]
 }
 
+// createNewThread creates a new thread row and returns its ID.
+func createNewThread(title string) (int64, error) {
+	dbc := db.Get()
+	if dbc == nil {
+		return 0, fmt.Errorf("db not initialized")
+	}
+	var id int64
+	err := dbc.QueryRow(`INSERT INTO threads (title) VALUES ($1) RETURNING id`, title).Scan(&id)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// storeMessage inserts a message for the current thread. If no thread exists, it tries to create one.
+func storeMessage(role, content string, metadata map[string]interface{}) {
+	dbc := db.Get()
+	if dbc == nil {
+		return // DB not available; skip silently
+	}
+	// Ensure we have a thread
+	if currentThreadID == 0 {
+		if id, err := createNewThread(fmt.Sprintf("Session %s", time.Now().Format(time.RFC3339))); err == nil {
+			currentThreadID = id
+			log.Printf("[DB] Created new thread id=%d", id)
+		} else {
+			log.Printf("[DB] Failed to create thread: %v", err)
+			return
+		}
+	}
+	// Marshal metadata to JSONB via string parameter
+	var metaJSON string = "{}"
+	if metadata != nil {
+		if b, err := json.Marshal(metadata); err == nil {
+			metaJSON = string(b)
+		}
+	}
+	if _, err := dbc.Exec(`INSERT INTO messages (thread_id, role, content, metadata) VALUES ($1,$2,$3,$4::jsonb)`, currentThreadID, role, content, metaJSON); err != nil {
+		log.Printf("[DB] insert message failed: %v", err)
+	}
+}
+
 // Slack webhook handler
 func handleSlackWebhook(c *gin.Context) {
 	// Read the request body
@@ -453,19 +496,33 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
 	// For now, we'll process all messages in direct messages
 	// In a real implementation, you'd check the channel type and bot mentions
 
-	// Process the message with Gemini
-	reply, err := processUserMessage(event.Text)
-	if err != nil {
-		log.Printf("[Slack Message] Error processing message: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process message"})
-		return
-	}
+	    // Persist user message
+    storeMessage("user", event.Text, map[string]interface{}{
+        "source":  "slack",
+        "channel": event.Channel,
+        "user":    event.User,
+        "ts":      event.Timestamp,
+    })
 
-	// Try to send response back to Slack using the Slack API
-	if err := sendSlackResponse(event.Channel, reply); err != nil {
-		log.Printf("[Slack Message] Failed to send response to Slack: %v", err)
-		// Still return success to Slack to avoid retries
-	}
+    // Process the message with Gemini
+    reply, err := processUserMessage(event.Text)
+    if err != nil {
+        log.Printf("[Slack Message] Error processing message: %v", err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process message"})
+        return
+    }
+
+	    // Persist assistant message
+    storeMessage("assistant", reply, map[string]interface{}{
+        "source":  "slack",
+        "channel": event.Channel,
+    })
+
+    // Try to send response back to Slack using the Slack API
+    if err := sendSlackResponse(event.Channel, reply); err != nil {
+        log.Printf("[Slack Message] Failed to send response to Slack: %v", err)
+        // Still return success to Slack to avoid retries
+    }
 
 	log.Printf("[Slack Message] Channel: %s, User: %s, Text: %s", event.Channel, event.User, event.Text)
 	log.Printf("[Slack Message] Response: %s", reply)
@@ -556,6 +613,13 @@ func main() {
 			} else {
 				log.Printf("[Postgres] Migrations applied from %s", pgcfg.MigrationsDir)
 			}
+			// Create a new thread for this agent session
+			if id, err := createNewThread(fmt.Sprintf("Startup %s", time.Now().Format(time.RFC3339))); err == nil {
+				currentThreadID = id
+				log.Printf("[DB] Session thread created id=%d", id)
+			} else {
+				log.Printf("[DB] Failed creating session thread: %v", err)
+			}
 		}
 	}
 
@@ -606,6 +670,8 @@ func main() {
 			return
 		}
 		log.Printf("[Chat Handler] Received message: %s", req.Message)
+		// Store user message
+		storeMessage("user", req.Message, map[string]interface{}{"source": "http"})
 		response, err := geminiAPIHandler(c.Request.Context(), req.Message)
 		if err != nil {
 			log.Printf("[Chat Handler] Error from geminiAPIHandler: %v", err)
@@ -616,10 +682,61 @@ func main() {
 			response = "**No response available. Please try again.**"
 		}
 		log.Printf("[Chat Handler] Sending response: %s", response)
+		// Store assistant message
+		storeMessage("assistant", response, map[string]interface{}{"source": "http"})
 		c.JSON(200, gin.H{"response": response})
 	})
 
-	r.POST("/webhook/slack", handleSlackWebhook)
+	r.POST("/webhook/slack", func(c *gin.Context) {
+		// Read the request body
+		body, err := ioutil.ReadAll(c.Request.Body)
+		if err != nil {
+			log.Printf("[Slack Webhook] Error reading body: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
+			return
+		}
+
+		// Parse the Slack event
+		var event slack.Event
+		if err := json.Unmarshal(body, &event); err != nil {
+			log.Printf("[Slack Webhook] Error parsing event: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event format"})
+			return
+		}
+
+		// Handle URL verification challenge
+		if event.Type == "url_verification" {
+			var challenge struct {
+				Challenge string `json:"challenge"`
+			}
+			if err := json.Unmarshal(body, &challenge); err != nil {
+				log.Printf("[Slack Webhook] Error parsing challenge: %v", err)
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid challenge format"})
+				return
+			}
+			log.Printf("[Slack Webhook] URL verification challenge received: %s", challenge.Challenge)
+			c.JSON(http.StatusOK, gin.H{"challenge": challenge.Challenge})
+			return
+		}
+
+		// Handle events
+		if event.Type == "event_callback" {
+			var callback struct {
+				Event slack.MessageEvent `json:"event"`
+			}
+			if err := json.Unmarshal(body, &callback); err != nil {
+				log.Printf("[Slack Webhook] Error parsing callback: %v", err)
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid callback format"})
+				return
+			}
+
+			// Handle message events
+			handleSlackMessage(c, &callback.Event)
+		} else {
+			log.Printf("[Slack Webhook] Unhandled event type: %s", event.Type)
+			c.JSON(http.StatusOK, gin.H{"status": "event received"})
+		}
+	})
 
 	// Keep the existing generic webhook for backward compatibility
 	r.POST("/webhook", func(c *gin.Context) {
