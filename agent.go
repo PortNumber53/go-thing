@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -11,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -65,36 +65,30 @@ func runMigrateCLI(args []string) int {
 	sub := args[0]
 	switch sub {
 	case "up":
-		steps := 0
-		// parse optional --step N
-		for i := 1; i < len(args); i++ {
-			if args[i] == "--step" && i+1 < len(args) {
-				if n, e := strconv.Atoi(args[i+1]); e == nil && n >= 0 {
-					steps = n
-				}
-			}
+		fs := flag.NewFlagSet("up", flag.ContinueOnError)
+		step := fs.Int("step", 0, "number of up migrations to apply (0=all)")
+		if err := fs.Parse(args[1:]); err != nil {
+			fmt.Printf("[Migrate] parse error: %v\n", err)
+			return 2
 		}
-		if err := db.MigrateUp(dbConn, pgcfg.MigrationsDir, steps); err != nil {
+		if err := db.MigrateUp(dbConn, pgcfg.MigrationsDir, *step); err != nil {
 			fmt.Printf("[Migrate] up error: %v\n", err)
 			return 1
 		}
 		fmt.Println("[Migrate] up completed")
 		return 0
 	case "down":
-		// require --step N
-		steps := -1
-		for i := 1; i < len(args); i++ {
-			if args[i] == "--step" && i+1 < len(args) {
-				if n, e := strconv.Atoi(args[i+1]); e == nil && n > 0 {
-					steps = n
-				}
-			}
+		fs := flag.NewFlagSet("down", flag.ContinueOnError)
+		step := fs.Int("step", -1, "number of migrations to roll back (required)")
+		if err := fs.Parse(args[1:]); err != nil {
+			fmt.Printf("[Migrate] parse error: %v\n", err)
+			return 2
 		}
-		if steps <= 0 {
+		if *step <= 0 {
 			fmt.Println("[Migrate] down requires --step N (N>0)")
 			return 2
 		}
-		if err := db.MigrateDown(dbConn, pgcfg.MigrationsDir, steps); err != nil {
+		if err := db.MigrateDown(dbConn, pgcfg.MigrationsDir, *step); err != nil {
 			fmt.Printf("[Migrate] down error: %v\n", err)
 			return 1
 		}
@@ -538,12 +532,30 @@ func main() {
 		return
 	}
 
-	// Initialize PostgreSQL (optional) and run migrations
+	// Load configuration once and reuse
 	cfgPath := os.ExpandEnv(config.ConfigFilePath)
 	cfgIni, iniErr := ini.Load(cfgPath)
-	if iniErr != nil {
-		log.Printf("[Postgres] Config not loaded (%v); skipping DB init", iniErr)
+	// Derive runtime configuration values with sensible defaults
+	apiAddr := "0.0.0.0:7866"
+	toolsAddr := ":8080"
+	chrootDir := ""
+	gemKey := ""
+	slackToken := ""
+	if iniErr == nil {
+		def := cfgIni.Section("default")
+		if v := strings.TrimSpace(def.Key("API_ADDR").String()); v != "" { apiAddr = v }
+		if v := strings.TrimSpace(def.Key("TOOLS_ADDR").String()); v != "" { toolsAddr = v }
+		chrootDir = strings.TrimSpace(def.Key("CHROOT_DIR").String())
+		gemKey = def.Key("GEMINI_API_KEY").String()
+		slackToken = def.Key("SLACK_BOT_TOKEN").String()
+		// Cache DOCKER_AUTO_REMOVE for shutdown path
+		dockerAutoRemove = strings.EqualFold(def.Key("DOCKER_AUTO_REMOVE").String(), "true")
 	} else {
+		log.Printf("[Config] Load failed (%v); using defaults and skipping DB init", iniErr)
+	}
+
+	// Initialize PostgreSQL (optional) and run migrations
+	if iniErr == nil {
 		if dbConn, pgcfg, derr := db.Init(cfgIni); derr != nil {
 			log.Printf("[Postgres] Init failed: %v (continuing without DB)", derr)
 		} else {
@@ -555,15 +567,15 @@ func main() {
 			}
 		}
 	}
-	// Log applied config (masked where sensitive)
-	if cfgMap, _ := loadConfig(); cfgMap != nil {
+
+	// Log applied config (masked where sensitive) if available
+	if iniErr == nil {
 		log.Printf("[Config] Loaded from %s", cfgPath)
 		log.Printf("[Config] API_ADDR=%s TOOLS_ADDR=%s CHROOT_DIR=%s GEMINI_API_KEY=%s SLACK_BOT_TOKEN=%s",
-			getAPIAddr(), getToolsAddr(), strings.TrimSpace(cfgMap["CHROOT_DIR"]), maskToken(cfgMap["GEMINI_API_KEY"]), maskToken(cfgMap["SLACK_BOT_TOKEN"]))
+			apiAddr, toolsAddr, chrootDir, maskToken(gemKey), maskToken(slackToken))
 	}
 
 	// Start embedded tool server with graceful shutdown support
-	toolsAddr := getToolsAddr()
 	toolServer := toolsrv.NewServer(toolsAddr)
 	go func() {
 		log.Printf("[Tools] Starting tool server on %s", toolsAddr)
@@ -579,10 +591,7 @@ func main() {
 		log.Printf("[Docker] Container ready: %s", name)
 	}
 
-	// Load DOCKER_AUTO_REMOVE once at startup to avoid repeated config reads on shutdown
-	if cfg, cerr := ini.Load(os.ExpandEnv(config.ConfigFilePath)); cerr == nil {
-		dockerAutoRemove = strings.EqualFold(cfg.Section("default").Key("DOCKER_AUTO_REMOVE").String(), "true")
-	}
+	// dockerAutoRemove already cached from initial config load
 
 	r := gin.Default()
 
@@ -628,7 +637,6 @@ func main() {
 	})
 
 	// Run Gin HTTP server with graceful shutdown
-	apiAddr := getAPIAddr()
 	apiServer := &http.Server{Addr: apiAddr, Handler: r}
 
 	// OS signal handling (SIGINT/SIGTERM) for Air restarts

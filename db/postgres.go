@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"net/url"
 
 	"gopkg.in/ini.v1"
 
@@ -86,10 +87,4 @@ func firstNonEmpty(vals ...string) string {
 		if v != "" { return v }
 	}
 	return ""
-}
-
-func keyOrEnv(sec *ini.Section, key, env, fallback string) string {
-	if v := sec.Key(key).String(); v != "" { return v }
-	if v := os.Getenv(env); v != "" { return v }
-	return fallback
 }

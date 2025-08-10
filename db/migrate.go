@@ -1,11 +1,9 @@
 package db
 
 import (
-	"bufio"
 	"database/sql"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -163,31 +161,15 @@ func guessDownName(up string) string {
 }
 
 func applyFile(db *sql.DB, path string) error {
-	f, err := os.Open(path)
-	if err != nil { return err }
-	defer f.Close()
-	b := bufio.NewReader(f)
-	var sb strings.Builder
-	for {
-		line, err := b.ReadString('\n')
-		if err != nil && err != io.EOF { return err }
-		ltrim := strings.TrimSpace(line)
-		if strings.HasPrefix(ltrim, "--") || ltrim == "" {
-			if err == io.EOF { break }
-			continue
-		}
-		sb.WriteString(line)
-		if strings.Contains(line, ";") { // naive split on semicolon terminator
-			stmt := strings.TrimSpace(sb.String())
-			if stmt != "" {
-				if _, e := db.Exec(stmt); e != nil { return e }
-			}
-			sb.Reset()
-		}
-		if err == io.EOF { break }
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
 	}
-	if tail := strings.TrimSpace(sb.String()); tail != "" {
-		if _, e := db.Exec(tail); e != nil { return e }
+	if len(strings.TrimSpace(string(content))) == 0 {
+		return nil // skip empty files
+	}
+	if _, err := db.Exec(string(content)); err != nil {
+		return err
 	}
 	return nil
 }
