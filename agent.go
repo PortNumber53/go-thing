@@ -1052,15 +1052,15 @@ func geminiAPIHandler(ctx context.Context, task string, initialContext []string)
 	}
 	cfg, err := loadConfig()
 	if err != nil {
-		return "Error loading config", nil, err
+		return "", nil, err
 	}
 	apiKey := cfg["GEMINI_API_KEY"]
 	if apiKey == "" {
-		return "GEMINI_API_KEY missing", nil, fmt.Errorf("GEMINI_API_KEY missing")
+		return "", nil, fmt.Errorf("GEMINI_API_KEY missing")
 	}
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{APIKey: apiKey})
 	if err != nil {
-		return "Error initializing Gemini client", nil, err
+		return "", nil, err
 	}
 
 	maxIterations := 30
@@ -1081,7 +1081,7 @@ func geminiAPIHandler(ctx context.Context, task string, initialContext []string)
 		responseText, toolCall, err := callGeminiAPI(ctx, client, currentPrompt, currentContext)
 		if err != nil {
 			log.Printf("[Gemini Loop] Error from Gemini: %v", err)
-			return "An error occurred while calling the LLM.", currentContext, err
+			return "", currentContext, err
 		}
 		// Always merge model-provided current_context/current_content, whether tool or final
 		if len(toolCall.GetMergedContext()) > 0 {
@@ -1098,7 +1098,7 @@ func geminiAPIHandler(ctx context.Context, task string, initialContext []string)
 		if toolCall.Tool != "" {
 			toolResp, err := executeTool(toolCall.Tool, toolCall.Args)
 			if err != nil {
-				return fmt.Sprintf("Tool %s failed: %v", toolCall.Tool, err), currentContext, err
+				return "", currentContext, err
 			}
 
 			// Add tool call and result to history
@@ -1113,45 +1113,4 @@ func geminiAPIHandler(ctx context.Context, task string, initialContext []string)
 		}
 	}
 	return "**Max iterations reached or no final response.** Please refine your query.", currentContext, nil
-}
-
-func processUserMessage(message string) (string, error) {
-	// Check for explicit tool commands first
-	if strings.HasPrefix(message, "/tools") {
-		return listAvailableTools()
-	}
-
-	if strings.HasPrefix(message, "/tool ") {
-		return parseAndExecuteTool(message)
-	}
-
-	// Analyze message for implicit tool requests
-	lowerMessage := strings.ToLower(message)
-
-	// Check for disk space related queries
-	if strings.Contains(lowerMessage, "disk") ||
-		strings.Contains(lowerMessage, "space") ||
-		strings.Contains(lowerMessage, "storage") ||
-		strings.Contains(lowerMessage, "how much space") ||
-		strings.Contains(lowerMessage, "disk usage") ||
-		strings.Contains(lowerMessage, "free space") {
-		// Execute disk space tool
-		result, err := parseAndExecuteTool("/tool disk_space")
-		if err != nil {
-			return "", err
-		}
-		return result, nil
-	}
-
-	// Check for tool listing requests
-	if strings.Contains(lowerMessage, "tools") ||
-		strings.Contains(lowerMessage, "what can you do") ||
-		strings.Contains(lowerMessage, "capabilities") ||
-		strings.Contains(lowerMessage, "available") {
-		return listAvailableTools()
-	}
-
-	// For other messages, use Gemini with tool awareness
-	resp, _, err := geminiAPIHandler(context.Background(), message, nil)
-	return resp, err
 }
