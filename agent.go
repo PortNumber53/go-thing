@@ -411,7 +411,7 @@ func storeMessage(threadID int64, role, content string, metadata map[string]inte
 	// Marshal metadata to JSONB via string parameter
 	var metaJSON string = "{}"
 	if metadata != nil {
-if b, err := json.Marshal(metadata); err == nil {
+        if b, err := json.Marshal(metadata); err == nil {
 			metaJSON = string(b)
 		} else {
 			log.Printf("[DB] Failed to marshal metadata: %v", err)
