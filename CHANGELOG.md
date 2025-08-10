@@ -19,6 +19,22 @@
 - Graceful shutdown now best-effort stops the container and optionally removes it when DOCKER_AUTO_REMOVE=true in config.
 - New helpers in tools/docker_start.go: StopDockerContainer, RemoveDockerContainer(force), and internal dockerStop.
 
+## 2025-08-09
+
+### PostgreSQL Integration
+- Internal PostgreSQL support:
+  - Added `db/postgres.go` for INI-driven connection via `pgx` stdlib.
+  - Added `db/migrate.go` simple file-based migrations (tracked by `schema_migrations`).
+  - `agent.go` initializes DB and runs migrations at startup if `[postgres]` section is present.
+  - Added `config.sample.ini` and example migration `migrations/0001_init.sql`.
+  - Updated README with configuration notes.
+- Added migration CLI in `agent.go` with commands: `migrate up [--step N]`, `migrate down --step N`, and `migrate status`.
+- Enhanced migration engine to support `.up.sql`/`.down.sql` files, step-wise up/down, and status reporting.
+
+### Docker Sandbox Lifecycle
+- Added graceful stop/remove on shutdown based on `DOCKER_AUTO_REMOVE`.
+- New helpers in `tools/docker_start.go`: `StopDockerContainer`, `RemoveDockerContainer(force)`, and internal `dockerStop`.
+
 ## [2.0.0] - 2025-07-27
 
 ### Changed
