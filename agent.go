@@ -426,19 +426,79 @@ func storeMessage(threadID int64, role, content string, metadata map[string]inte
 }
 
 // Slack channel -> thread mapping
-var slackThreads sync.Map // map[string]int64
+// Bounded in-memory cache for Slack channel -> thread_id to avoid unbounded growth
+type SlackCache struct {
+    mu    sync.Mutex
+    m     map[string]int64
+    order []string
+    cap   int
+}
+
+func (c *SlackCache) Get(k string) (int64, bool) {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    if c.m == nil {
+        return 0, false
+    }
+    v, ok := c.m[k]
+    if !ok {
+        return 0, false
+    }
+    // move to end (most-recently used)
+    for i, key := range c.order {
+        if key == k {
+            c.order = append(c.order[:i], c.order[i+1:]...)
+            break
+        }
+    }
+    c.order = append(c.order, k)
+    return v, true
+}
+
+func (c *SlackCache) Put(k string, v int64) {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    if c.m == nil {
+        c.m = make(map[string]int64)
+    }
+    if _, exists := c.m[k]; exists {
+        // update and move to end
+        c.m[k] = v
+        for i, key := range c.order {
+            if key == k {
+                c.order = append(c.order[:i], c.order[i+1:]...)
+                break
+            }
+        }
+        c.order = append(c.order, k)
+        return
+    }
+    // insert new
+    c.m[k] = v
+    c.order = append(c.order, k)
+    // evict if over capacity
+    if c.cap > 0 && len(c.order) > c.cap {
+        evict := c.order[0]
+        c.order = c.order[1:]
+        delete(c.m, evict)
+        // also remove the per-channel lock for the evicted channel
+        removeSlackChannelLock(evict)
+    }
+}
+
+var slackThreads = &SlackCache{cap: 25}
 
 func ensureSlackThread(channel string) (int64, error) {
-    if v, ok := slackThreads.Load(channel); ok {
-        return v.(int64), nil
+    if v, ok := slackThreads.Get(channel); ok {
+        return v, nil
     }
     // Acquire per-channel lock to avoid duplicate thread creation
     l := getSlackChannelLock(channel)
     l.Lock()
     defer l.Unlock()
     // Double-check after acquiring lock
-    if v, ok := slackThreads.Load(channel); ok {
-        return v.(int64), nil
+    if v, ok := slackThreads.Get(channel); ok {
+        return v, nil
     }
     // Create with channel + date to aid identification
     title := fmt.Sprintf("Slack %s %s", channel, time.Now().Format("2006-01-02"))
@@ -446,7 +506,7 @@ func ensureSlackThread(channel string) (int64, error) {
     if err != nil {
         return 0, err
     }
-    slackThreads.Store(channel, id)
+    slackThreads.Put(channel, id)
     return id, nil
 }
 
@@ -468,6 +528,16 @@ func getSlackChannelLock(channel string) *sync.Mutex {
         slackThreadLockRegistry.m[channel] = l
     }
     return l
+}
+
+// removeSlackChannelLock deletes the per-channel lock when evicting from cache
+func removeSlackChannelLock(channel string) {
+    slackThreadLockRegistry.mu.Lock()
+    defer slackThreadLockRegistry.mu.Unlock()
+    if slackThreadLockRegistry.m == nil {
+        return
+    }
+    delete(slackThreadLockRegistry.m, channel)
 }
 
 // Handle regular message events
