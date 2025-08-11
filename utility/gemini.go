@@ -53,12 +53,12 @@ func callGeminiAPI(ctx context.Context, client *genai.Client, task string, persi
 	if len(persistedContext) > 0 {
 		sanitized := SanitizeContextFacts(persistedContext)
 		b, err := json.Marshal(sanitized)
-		if err != nil {
-			log.Printf("[Gemini API] Failed to marshal persisted context: %v", err)
-		} else {
-			contextSection.WriteString("## Persisted Context\n")
-			contextSection.WriteString(fmt.Sprintf("{\"current_context\": %s}\n\n", string(b)))
-		}
+if err != nil {
+	log.Printf("[Gemini API] Failed to marshal persisted context: %v", err)
+	return "", ToolCall{}, fmt.Errorf("failed to marshal persisted context: %w", err)
+}
+contextSection.WriteString("## Persisted Context\n")
+contextSection.WriteString(fmt.Sprintf("{\"current_context\": %s}\n\n", string(b)))
 	}
 
 	maxItems := getContextMaxItems()
