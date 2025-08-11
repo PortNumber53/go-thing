@@ -38,6 +38,9 @@ var (
 	// once-computed cache for CURRENT_CONTEXT_MAX_ITEMS to avoid repeated file I/O and parsing in hot paths
 	contextMaxItemsOnce   sync.Once
 	contextMaxItemsCached int
+	// once-computed cache for CHROOT_DIR to avoid repeated lookups on hot path
+	chrootDirOnce   sync.Once
+	chrootDirCached string
 )
 
 // Precompiled regex to collapse accidental double slashes while avoiding schemes like http://
@@ -52,11 +55,15 @@ type ToolResponse struct {
 
 // getChrootDir returns the CHROOT_DIR from config if set, else empty string.
 func getChrootDir() string {
-	cfg, err := loadConfig()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimRight(strings.TrimSpace(cfg["CHROOT_DIR"]), "/")
+	chrootDirOnce.Do(func() {
+		cfg, err := loadConfig()
+		if err != nil {
+			chrootDirCached = ""
+			return
+		}
+		chrootDirCached = strings.TrimRight(strings.TrimSpace(cfg["CHROOT_DIR"]), "/")
+	})
+	return chrootDirCached
 }
 
 // normalizePathInText rewrites host chroot paths to their canonical in-sandbox alias (/app)
@@ -802,7 +809,7 @@ func main() {
 		resp, updatedCtx, err := geminiAPIHandler(c.Request.Context(), req.Message, initialCtx)
 		if err != nil {
 			log.Printf("[Chat] gemini error: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to process message: %v", err)})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process message. Please try again later."})
 			return
 		}
 		if strings.TrimSpace(resp) == "" {
