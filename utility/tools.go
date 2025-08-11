@@ -1,9 +1,10 @@
 package utility
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -105,9 +106,12 @@ func ExecuteTool(toolName string, args map[string]interface{}) (*tools.ToolRespo
 	addr := GetToolsAddr()
 	url := "http://127.0.0.1" + addr + "/api/tools"
 	payload := map[string]interface{}{"tool": toolName, "args": args}
-	body, _ := json.Marshal(payload)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal tool request payload: %w", err)
+	}
 	log.Printf("[Agent->Tools] POST %s body=%s", url, string(body))
-	req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +121,13 @@ func ExecuteTool(toolName string, args map[string]interface{}) (*tools.ToolRespo
 		return nil, err
 	}
 	defer resp.Body.Close()
-	rb, _ := ioutil.ReadAll(resp.Body)
+	rb, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read tool server response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("tool server returned %s: %s", resp.Status, string(rb))
+	}
 	log.Printf("[Agent->Tools] Response %s body=%s", resp.Status, string(rb))
 	var tr tools.ToolResponse
 	if err := json.Unmarshal(rb, &tr); err != nil {
