@@ -1,8 +1,8 @@
 package main
 
 import (
-    "database/sql"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -34,7 +35,16 @@ var (
 	configData       map[string]string
 	configErr        error
 	dockerAutoRemove bool
+	// once-computed cache for CURRENT_CONTEXT_MAX_ITEMS to avoid repeated file I/O and parsing in hot paths
+	contextMaxItemsOnce   sync.Once
+	contextMaxItemsCached int
+	// once-computed cache for CHROOT_DIR to avoid repeated lookups on hot path
+	chrootDirOnce   sync.Once
+	chrootDirCached string
 )
+
+// Precompiled regex to collapse accidental double slashes while avoiding schemes like http://
+var doubleSlashRegex = regexp.MustCompile(`([^:/])//+`)
 
 // ToolResponse represents a response from tool execution
 type ToolResponse struct {
@@ -43,25 +53,149 @@ type ToolResponse struct {
 	Error   string      `json:"error,omitempty"`
 }
 
+// getChrootDir returns the CHROOT_DIR from config if set, else empty string.
+func getChrootDir() string {
+	chrootDirOnce.Do(func() {
+		cfg, err := loadConfig()
+		if err != nil {
+			chrootDirCached = ""
+			return
+		}
+		chrootDirCached = strings.TrimRight(strings.TrimSpace(cfg["CHROOT_DIR"]), "/")
+	})
+	return chrootDirCached
+}
+
+// normalizePathInText rewrites host chroot paths to their canonical in-sandbox alias (/app)
+func normalizePathInText(s string) string {
+	ch := getChrootDir()
+	if ch == "" {
+		return s
+	}
+	// Replace any occurrence of the absolute chroot path with /app
+	s2 := strings.ReplaceAll(s, ch, "/app")
+	// Collapse any accidental double slashes but avoid collapsing after a scheme (e.g., http://)
+	s2 = doubleSlashRegex.ReplaceAllString(s2, "$1/")
+	return s2
+}
+
+// sanitizeContextFacts rewrites host-specific paths to canonical sandbox paths and dedupes.
+func sanitizeContextFacts(in []string) []string {
+	if len(in) == 0 {
+		return in
+	}
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, item := range in {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		norm := normalizePathInText(trimmed)
+		if !seen[norm] {
+			seen[norm] = true
+			out = append(out, norm)
+		}
+	}
+	return out
+}
+
+// getLastContextForThread loads the most recent message metadata for a thread and extracts current_context
+func getLastContextForThread(threadID int64) ([]string, error) {
+	dbc := db.Get()
+	if dbc == nil {
+		return nil, fmt.Errorf("db not initialized")
+	}
+	// Fetch the most recent message that actually has a non-empty current_context
+	// Using JSONB operators to ensure we don't pick up the latest user message w/o context
+	var metaBytes []byte
+	err := dbc.QueryRow(
+		`SELECT metadata FROM messages
+         WHERE thread_id=$1
+           AND role = 'assistant'
+           AND metadata ? 'current_context'
+           AND jsonb_typeof(metadata->'current_context') = 'array'
+           AND jsonb_array_length(metadata->'current_context') > 0
+         ORDER BY id DESC LIMIT 1`, threadID,
+	).Scan(&metaBytes)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var meta struct {
+		CurrentContext []string `json:"current_context"`
+	}
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		return nil, err
+	}
+	if meta.CurrentContext != nil {
+		// The caller will sanitize the context (trim/remove empties) via sanitizeContextFacts().
+		return meta.CurrentContext, nil
+	}
+	return nil, nil
+}
+
+// getContextMaxItems reads CURRENT_CONTEXT_MAX_ITEMS from config, defaults to 8, and clamps to [1, 50].
+func getContextMaxItems() int {
+	const (
+		defaultValue = 8
+		minValue     = 1
+		maxValue     = 50
+	)
+
+	contextMaxItemsOnce.Do(func() {
+		// Default first
+		contextMaxItemsCached = defaultValue
+
+		cfg, err := loadConfig()
+		if err != nil {
+			return
+		}
+
+		v := strings.TrimSpace(cfg["CURRENT_CONTEXT_MAX_ITEMS"])
+		if v == "" {
+			return
+		}
+
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return
+		}
+
+		if n < minValue {
+			contextMaxItemsCached = minValue
+			return
+		}
+		if n > maxValue {
+			contextMaxItemsCached = maxValue
+			return
+		}
+		contextMaxItemsCached = n
+	})
+	return contextMaxItemsCached
+}
+
 // getOrCreateAnyThread returns the most recently updated thread id if one exists,
 // otherwise it creates the first thread and returns its id.
 func getOrCreateAnyThread() (int64, error) {
-    dbc := db.Get()
-    if dbc == nil {
-        return 0, fmt.Errorf("db not initialized")
-    }
-    var id int64
-    // Try to get the latest updated thread
-    err := dbc.QueryRow(`SELECT id FROM threads ORDER BY updated_at DESC LIMIT 1`).Scan(&id)
-    if err == nil {
-        return id, nil
-    }
-    if err != nil && err != sql.ErrNoRows {
-        return 0, err
-    }
-    // No rows, create the first thread
-    title := fmt.Sprintf("Default Thread %s", time.Now().Format("2006-01-02"))
-    return createNewThread(title)
+	dbc := db.Get()
+	if dbc == nil {
+		return 0, fmt.Errorf("db not initialized")
+	}
+	var id int64
+	// Try to get the latest updated thread
+	err := dbc.QueryRow(`SELECT id FROM threads ORDER BY updated_at DESC LIMIT 1`).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	// No rows, create the first thread
+	title := fmt.Sprintf("Default Thread %s", time.Now().Format("2006-01-02"))
+	return createNewThread(title)
 }
 
 // runMigrateCLI handles: migrate up [--step N], migrate down --step N, migrate status
@@ -342,58 +476,8 @@ func listAvailableTools() (string, error) {
 	return result.String(), nil
 }
 
-// Enhanced Gemini API call with tool awareness
-func geminiAPIHandler(ctx context.Context, task string) (string, error) {
-	log.Printf("[Gemini API] Handler invoked for task: %s", task)
-	cfg, err := loadConfig()
-	if err != nil {
-		return "Error loading config", nil
-	}
-	apiKey := cfg["GEMINI_API_KEY"]
-	if apiKey == "" {
-		return "GEMINI_API_KEY missing", nil
-	}
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{APIKey: apiKey})
-	if err != nil {
-		return "Error initializing Gemini client", nil
-	}
-
-	maxIterations := 30
-	originalTask := task
-	var history []string
-
-	for i := 0; i < maxIterations; i++ {
-		currentPrompt := originalTask
-		if len(history) > 0 {
-			currentPrompt = fmt.Sprintf("Original Task: %s\n\nHistory of actions:\n%s", originalTask, strings.Join(history, "\n"))
-		}
-
-		responseText, toolCall, err := callGeminiAPI(client, currentPrompt)
-		if err != nil {
-			log.Printf("[Gemini API] Error in API call: %v", err)
-			return "Gemini API error occurred", nil
-		}
-
-		if toolCall.Tool != "" {
-			toolResp, err := executeTool(toolCall.Tool, toolCall.Args)
-			if err != nil {
-				return fmt.Sprintf("Tool %s failed: %v", toolCall.Tool, err), nil
-			}
-
-			// Add tool call and result to history
-			history = append(history, fmt.Sprintf("- Tool call: %s with args %v", toolCall.Tool, toolCall.Args))
-			history = append(history, fmt.Sprintf("- Tool result: %s", summarizeToolResponse(toolResp)))
-		} else {
-			// No tool call, assume this is the final response
-			if strings.TrimSpace(responseText) == "" {
-				return "**No response from Gemini.**", nil
-			}
-			return responseText, nil // Return immediately with Gemini's response
-		}
-	}
-	return "**Max iterations reached or no final response.** Please refine your query.", nil
-}
-
+// (moved) Enhanced Gemini API handler is defined later in this file.
+// The earlier partial definition was removed to avoid duplication and syntax errors.
 // Helper to summarize tool response concisely
 func summarizeToolResponse(resp *ToolResponse) string {
 	if resp.Success {
@@ -405,8 +489,12 @@ func summarizeToolResponse(resp *ToolResponse) string {
 
 // maskToken masks sensitive values leaving a small prefix/suffix for identification
 func maskToken(s string) string {
-	if s == "" { return "" }
-	if len(s) <= 8 { return "****" }
+	if s == "" {
+		return ""
+	}
+	if len(s) <= 8 {
+		return "****"
+	}
 	return s[:4] + "****" + s[len(s)-4:]
 }
 
@@ -427,123 +515,123 @@ func createNewThread(title string) (int64, error) {
 // storeMessage inserts a message into the specified thread.
 func storeMessage(threadID int64, role, content string, metadata map[string]interface{}) error {
 	dbc := db.Get()
-    if dbc == nil {
-        return fmt.Errorf("storeMessage failed: database not initialized")
-    }
-    // Marshal metadata to JSONB via string parameter
-    var metaJSON string = "{}"
-    if metadata != nil {
-        b, err := json.Marshal(metadata)
-        if err != nil {
-            log.Printf("[DB] Failed to marshal metadata: %v", err)
-            return fmt.Errorf("failed to marshal metadata: %w", err)
-        }
-        metaJSON = string(b)
-    }
-    if _, err := dbc.Exec(`INSERT INTO messages (thread_id, role, content, metadata) VALUES ($1,$2,$3,$4::jsonb)`, threadID, role, content, metaJSON); err != nil {
-        log.Printf("[DB] insert message failed: %v", err)
-        return err
-    }
-    return nil
+	if dbc == nil {
+		return fmt.Errorf("storeMessage failed: database not initialized")
+	}
+	// Marshal metadata to JSONB via string parameter
+	var metaJSON string = "{}"
+	if metadata != nil {
+		b, err := json.Marshal(metadata)
+		if err != nil {
+			log.Printf("[DB] Failed to marshal metadata: %v", err)
+			return fmt.Errorf("failed to marshal metadata: %w", err)
+		}
+		metaJSON = string(b)
+	}
+	if _, err := dbc.Exec(`INSERT INTO messages (thread_id, role, content, metadata) VALUES ($1,$2,$3,$4::jsonb)`, threadID, role, content, metaJSON); err != nil {
+		log.Printf("[DB] insert message failed: %v", err)
+		return err
+	}
+	return nil
 }
 
 // Slack channel -> thread mapping
 // Bounded in-memory cache for Slack channel -> thread_id to avoid unbounded growth
 type SlackCache struct {
-    mu    sync.Mutex
-    m     map[string]int64
-    order []string
-    cap   int
+	mu    sync.Mutex
+	m     map[string]int64
+	order []string
+	cap   int
 }
 
 func (c *SlackCache) Get(k string) (int64, bool) {
-    c.mu.Lock()
-    defer c.mu.Unlock()
-    if c.m == nil {
-        return 0, false
-    }
-    v, ok := c.m[k]
-    if !ok {
-        return 0, false
-    }
-    // move to end (most-recently used)
-    for i, key := range c.order {
-        if key == k {
-            c.order = append(c.order[:i], c.order[i+1:]...)
-            break
-        }
-    }
-    c.order = append(c.order, k)
-    return v, true
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil {
+		return 0, false
+	}
+	v, ok := c.m[k]
+	if !ok {
+		return 0, false
+	}
+	// move to end (most-recently used)
+	for i, key := range c.order {
+		if key == k {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			break
+		}
+	}
+	c.order = append(c.order, k)
+	return v, true
 }
 
 func (c *SlackCache) Put(k string, v int64) {
-    c.mu.Lock()
-    defer c.mu.Unlock()
-    if c.m == nil {
-        c.m = make(map[string]int64)
-    }
-    if _, exists := c.m[k]; exists {
-        // update and move to end
-        c.m[k] = v
-        for i, key := range c.order {
-            if key == k {
-                c.order = append(c.order[:i], c.order[i+1:]...)
-                break
-            }
-        }
-        c.order = append(c.order, k)
-        return
-    }
-    // insert new
-    c.m[k] = v
-    c.order = append(c.order, k)
-    // evict if over capacity
-    if c.cap > 0 && len(c.order) > c.cap {
-        evict := c.order[0]
-        c.order = c.order[1:]
-        delete(c.m, evict)
-        // also remove the per-channel lock for the evicted channel
-        removeSlackChannelLock(evict)
-    }
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil {
+		c.m = make(map[string]int64)
+	}
+	if _, exists := c.m[k]; exists {
+		// update and move to end
+		c.m[k] = v
+		for i, key := range c.order {
+			if key == k {
+				c.order = append(c.order[:i], c.order[i+1:]...)
+				break
+			}
+		}
+		c.order = append(c.order, k)
+		return
+	}
+	// insert new
+	c.m[k] = v
+	c.order = append(c.order, k)
+	// evict if over capacity
+	if c.cap > 0 && len(c.order) > c.cap {
+		evict := c.order[0]
+		c.order = c.order[1:]
+		delete(c.m, evict)
+		// also remove the per-channel lock for the evicted channel
+		removeSlackChannelLock(evict)
+	}
 }
 
 var slackThreads = &SlackCache{cap: 25}
 
 func ensureSlackThread(channel string) (int64, error) {
-    // New logic: use any existing thread (most recently updated),
-    // or create the first one if none exists. Channel is ignored.
-    return getOrCreateAnyThread()
+	// New logic: use any existing thread (most recently updated),
+	// or create the first one if none exists. Channel is ignored.
+	return getOrCreateAnyThread()
 }
 
 // Per-channel lock registry for Slack thread creation
 var slackThreadLockRegistry struct {
-    mu sync.Mutex
-    m  map[string]*sync.Mutex
+	mu sync.Mutex
+	m  map[string]*sync.Mutex
 }
 
 func getSlackChannelLock(channel string) *sync.Mutex {
-    slackThreadLockRegistry.mu.Lock()
-    defer slackThreadLockRegistry.mu.Unlock()
-    if slackThreadLockRegistry.m == nil {
-        slackThreadLockRegistry.m = make(map[string]*sync.Mutex)
-    }
-    l, ok := slackThreadLockRegistry.m[channel]
-    if !ok {
-        l = &sync.Mutex{}
-        slackThreadLockRegistry.m[channel] = l
-    }
-    return l
+	slackThreadLockRegistry.mu.Lock()
+	defer slackThreadLockRegistry.mu.Unlock()
+	if slackThreadLockRegistry.m == nil {
+		slackThreadLockRegistry.m = make(map[string]*sync.Mutex)
+	}
+	l, ok := slackThreadLockRegistry.m[channel]
+	if !ok {
+		l = &sync.Mutex{}
+		slackThreadLockRegistry.m[channel] = l
+	}
+	return l
 }
 
 // removeSlackChannelLock deletes the per-channel lock when evicting from cache
 func removeSlackChannelLock(channel string) {
-    slackThreadLockRegistry.mu.Lock()
-    defer slackThreadLockRegistry.mu.Unlock()
-    if slackThreadLockRegistry.m == nil {
-        return
-    }
-    delete(slackThreadLockRegistry.m, channel)
+	slackThreadLockRegistry.mu.Lock()
+	defer slackThreadLockRegistry.mu.Unlock()
+	if slackThreadLockRegistry.m == nil {
+		return
+	}
+	delete(slackThreadLockRegistry.m, channel)
 }
 
 // Handle regular message events
@@ -575,18 +663,28 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
 		return
 	}
 
-	// Process the message
-	reply, err := processUserMessage(event.Text)
+	// Load last persisted context and run gemini loop to persist updated context on Slack path too
+	initialCtx, err := getLastContextForThread(threadID)
 	if err != nil {
-		log.Printf("[Slack Message] Error processing message: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process message"})
+		log.Printf("[Slack Message] Failed to get last context: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load conversation context"})
 		return
 	}
-
-	// Persist assistant message
+	reply, updatedCtx, err := geminiAPIHandler(c.Request.Context(), event.Text, initialCtx)
+	if err != nil {
+		log.Printf("[Slack Message] Gemini error: %v", err)
+		// Notify user of failure and stop processing to avoid persisting an invalid reply
+		if serr := sendSlackResponse(event.Channel, "Sorry, I encountered an error. Please try again."); serr != nil {
+			log.Printf("[Slack Message] Failed to send error notice to Slack: %v", serr)
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "error_processed"})
+		return
+	}
+	// Persist assistant message including current_context
 	if err := storeMessage(threadID, "assistant", reply, map[string]interface{}{
-		"source":  "slack",
-		"channel": event.Channel,
+		"source":          "slack",
+		"channel":         event.Channel,
+		"current_context": updatedCtx,
 	}); err != nil {
 		log.Printf("[Slack Message] Failed to persist assistant message: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist assistant message"})
@@ -605,160 +703,194 @@ func handleSlackMessage(c *gin.Context, event *slack.MessageEvent) {
 
 // Send response back to Slack using bot token
 func sendSlackResponse(channel, message string) error {
-    cfg, err := loadConfig()
-    if err != nil {
-        return fmt.Errorf("failed to load config: %v", err)
-    }
-    botToken := cfg["SLACK_BOT_TOKEN"]
-    if strings.TrimSpace(botToken) == "" {
-        return fmt.Errorf("SLACK_BOT_TOKEN missing in config")
-    }
-    api := slack.New(botToken)
-    _, _, err = api.PostMessage(
-        channel,
-        slack.MsgOptionText(message, false),
-        slack.MsgOptionAsUser(true),
-    )
-    if err != nil {
-        return fmt.Errorf("failed to post message: %v", err)
-    }
-    log.Printf("[Slack API] Message sent to channel %s", channel)
-    return nil
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %v", err)
+	}
+	botToken := cfg["SLACK_BOT_TOKEN"]
+	if strings.TrimSpace(botToken) == "" {
+		return fmt.Errorf("SLACK_BOT_TOKEN missing in config")
+	}
+	api := slack.New(botToken)
+	_, _, err = api.PostMessage(
+		channel,
+		slack.MsgOptionText(message, false),
+		slack.MsgOptionAsUser(true),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to post message: %v", err)
+	}
+	log.Printf("[Slack API] Message sent to channel %s", channel)
+	return nil
 }
 
 func main() {
-    // Setup logging
-    f, err := setupLogging()
-    if err != nil {
-        log.Printf("[Startup] Failed to setup logging: %v", err)
-    } else if f != nil {
-        defer f.Close()
-    }
-    log.Printf("[Startup] Starting go-thing agent")
+	// Setup logging
+	f, err := setupLogging()
+	if err != nil {
+		log.Printf("[Startup] Failed to setup logging: %v", err)
+	} else if f != nil {
+		defer f.Close()
+	}
+	log.Printf("[Startup] Starting go-thing agent")
 
-    // CLI migrate
-    if len(os.Args) > 1 && os.Args[1] == "migrate" {
-        os.Exit(runMigrateCLI(os.Args[2:]))
-        return
-    }
+	// CLI migrate
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		os.Exit(runMigrateCLI(os.Args[2:]))
+		return
+	}
 
-    // Load config and init DB/migrations if possible
-    cfgPath := os.ExpandEnv(config.ConfigFilePath)
-    cfgIni, iniErr := ini.Load(cfgPath)
-    if iniErr == nil {
-        if dbConn, pgcfg, derr := db.Init(cfgIni); derr != nil {
-            log.Printf("[Postgres] Init failed: %v (continuing without DB)", derr)
-        } else {
-            defer func() { _ = dbConn.Close() }()
-            if merr := db.RunMigrations(dbConn, pgcfg.MigrationsDir); merr != nil {
-                log.Printf("[Postgres] Migrations error: %v", merr)
-            } else {
-                log.Printf("[Postgres] Migrations applied from %s", pgcfg.MigrationsDir)
-            }
-        }
-    } else {
-        log.Printf("[Config] Load failed (%v); continuing with defaults", iniErr)
-    }
+	// Load config and init DB/migrations if possible
+	cfgPath := os.ExpandEnv(config.ConfigFilePath)
+	cfgIni, iniErr := ini.Load(cfgPath)
+	if iniErr == nil {
+		if dbConn, pgcfg, derr := db.Init(cfgIni); derr != nil {
+			log.Printf("[Postgres] Init failed: %v (continuing without DB)", derr)
+		} else {
+			defer func() { _ = dbConn.Close() }()
+			if merr := db.RunMigrations(dbConn, pgcfg.MigrationsDir); merr != nil {
+				log.Printf("[Postgres] Migrations error: %v", merr)
+			} else {
+				log.Printf("[Postgres] Migrations applied from %s", pgcfg.MigrationsDir)
+			}
+		}
+	} else {
+		log.Printf("[Config] Load failed (%v); continuing with defaults", iniErr)
+	}
 
-    // Determine addresses
-    apiAddr := "0.0.0.0:7866"
-    if cfg, err := loadConfig(); err == nil {
-        if v := strings.TrimSpace(cfg["API_ADDR"]); v != "" { apiAddr = v }
-        dockerAutoRemove = strings.EqualFold(cfg["DOCKER_AUTO_REMOVE"], "true")
-    }
+	// Determine addresses
+	apiAddr := "0.0.0.0:7866"
+	if cfg, err := loadConfig(); err == nil {
+		if v := strings.TrimSpace(cfg["API_ADDR"]); v != "" {
+			apiAddr = v
+		}
+		dockerAutoRemove = strings.EqualFold(cfg["DOCKER_AUTO_REMOVE"], "true")
+	}
 
-    // Start tool server
-    toolServer := toolsrv.NewServer(getToolsAddr())
-    go func() {
-        log.Printf("[Tools] Starting tool server on %s", getToolsAddr())
-        if err := toolServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-            log.Printf("[Tools] Tool server error: %v", err)
-        }
-    }()
+	// Start tool server
+	toolServer := toolsrv.NewServer(getToolsAddr())
+	go func() {
+		log.Printf("[Tools] Starting tool server on %s", getToolsAddr())
+		if err := toolServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("[Tools] Tool server error: %v", err)
+		}
+	}()
 
-    // Gin router and routes
-    r := gin.Default()
-    r.GET("/", func(c *gin.Context) {
-        c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "go-thing agent API"})
-    })
-    r.POST("/chat", func(c *gin.Context) {
-        var req struct{ Message string `json:"message" binding:"required"` }
-        if err := c.ShouldBindJSON(&req); err != nil {
-            c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
-            return
-        }
-        threadID, err := getOrCreateAnyThread()
-        if err != nil {
-            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to ensure thread"})
-            return
-        }
-        if err := storeMessage(threadID, "user", req.Message, map[string]interface{}{"source": "http"}); err != nil {
-            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist user message"})
-            return
-        }
-        resp, err := geminiAPIHandler(c.Request.Context(), req.Message)
-        if err != nil || strings.TrimSpace(resp) == "" {
-            if err != nil { log.Printf("[Chat] gemini error: %v", err) }
-            resp = "**No response available. Please try again.**"
-        }
-        if err := storeMessage(threadID, "assistant", resp, map[string]interface{}{"source": "http"}); err != nil {
-            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist assistant message"})
-            return
-        }
-        c.JSON(http.StatusOK, gin.H{"response": resp, "thread_id": threadID})
-    })
-    r.POST("/webhook/slack", func(c *gin.Context) {
-        body, err := io.ReadAll(c.Request.Body)
-        if err != nil { c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read body"}); return }
-        var ev slack.Event
-        if err := json.Unmarshal(body, &ev); err != nil { c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event"}); return }
-        if ev.Type == "url_verification" {
-            var ch struct{ Challenge string `json:"challenge"` }
-            if err := json.Unmarshal(body, &ch); err != nil { c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid challenge"}); return }
-            c.JSON(http.StatusOK, gin.H{"challenge": ch.Challenge}); return
-        }
-        if ev.Type == "event_callback" {
-            var cb struct{ Event slack.MessageEvent `json:"event"` }
-            if err := json.Unmarshal(body, &cb); err != nil { c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid callback"}); return }
-            handleSlackMessage(c, &cb.Event)
-            return
-        }
-        c.JSON(http.StatusOK, gin.H{"status": "event received"})
-    })
-    r.POST("/webhook", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "webhook received"}) })
+	// Gin router and routes
+	r := gin.Default()
+	r.GET("/", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "go-thing agent API"})
+	})
+	r.POST("/chat", func(c *gin.Context) {
+		var req struct {
+			Message string `json:"message" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+			return
+		}
+		threadID, err := getOrCreateAnyThread()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to ensure thread"})
+			return
+		}
+		if err := storeMessage(threadID, "user", req.Message, map[string]interface{}{"source": "http"}); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist user message"})
+			return
+		}
+		// Load last persisted context for this thread
+		initialCtx, err := getLastContextForThread(threadID)
+		if err != nil {
+			log.Printf("[Context] load error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load conversation context"})
+			return
+		}
+		log.Printf("[Context] Using initial current_context for HTTP: %v", initialCtx)
+		resp, updatedCtx, err := geminiAPIHandler(c.Request.Context(), req.Message, initialCtx)
+		if err != nil {
+			log.Printf("[Chat] gemini error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process message. Please try again later."})
+			return
+		}
+		if strings.TrimSpace(resp) == "" {
+			resp = "**No response available. Please try again.**"
+		}
+		log.Printf("[Context] Persisting updated current_context (HTTP): %v", updatedCtx)
+		if err := storeMessage(threadID, "assistant", resp, map[string]interface{}{"source": "http", "current_context": updatedCtx}); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist assistant message"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"response": resp, "thread_id": threadID})
+	})
+	r.POST("/webhook/slack", func(c *gin.Context) {
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read body"})
+			return
+		}
+		var ev slack.Event
+		if err := json.Unmarshal(body, &ev); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid event"})
+			return
+		}
+		if ev.Type == "url_verification" {
+			var ch struct {
+				Challenge string `json:"challenge"`
+			}
+			if err := json.Unmarshal(body, &ch); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid challenge"})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"challenge": ch.Challenge})
+			return
+		}
+		if ev.Type == "event_callback" {
+			var cb struct {
+				Event slack.MessageEvent `json:"event"`
+			}
+			if err := json.Unmarshal(body, &cb); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid callback"})
+				return
+			}
+			handleSlackMessage(c, &cb.Event)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "event received"})
+	})
+	r.POST("/webhook", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "webhook received"}) })
 
-    // HTTP server with graceful shutdown
-    apiServer := &http.Server{Addr: apiAddr, Handler: r}
-    quit := make(chan os.Signal, 1)
-    signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-    go func() {
-        log.Printf("[API] Starting HTTP server on %s", apiAddr)
-        if err := apiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-            log.Printf("[API] Server error: %v", err)
-        }
-    }()
-    sig := <-quit
-    log.Printf("[Shutdown] Signal: %v", sig)
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-    defer cancel()
-    _ = apiServer.Shutdown(ctx)
-    _ = toolServer.Shutdown(ctx)
+	// HTTP server with graceful shutdown
+	apiServer := &http.Server{Addr: apiAddr, Handler: r}
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		log.Printf("[API] Starting HTTP server on %s", apiAddr)
+		if err := apiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("[API] Server error: %v", err)
+		}
+	}()
+	sig := <-quit
+	log.Printf("[Shutdown] Signal: %v", sig)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = apiServer.Shutdown(ctx)
+	_ = toolServer.Shutdown(ctx)
 }
 
 func setupLogging() (*os.File, error) {
-    // Default log file path in current working directory
-    logPath := "debug.log"
+	// Default log file path in current working directory
+	logPath := "debug.log"
 
-    // Try to open in append mode, create if not exists
-    f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-    if err != nil {
-        return nil, err
-    }
+	// Try to open in append mode, create if not exists
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
 
-    // Write to both stdout and file
-    mw := io.MultiWriter(os.Stdout, f)
-    log.SetOutput(mw)
-    log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	// Write to both stdout and file
+	mw := io.MultiWriter(os.Stdout, f)
+	log.SetOutput(mw)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
 	// Route Gin logs to the same writer
 	gin.DefaultWriter = mw
@@ -767,7 +899,7 @@ func setupLogging() (*os.File, error) {
 	return f, nil
 }
 
-func callGeminiAPI(client *genai.Client, task string) (string, ToolCall, error) {
+func callGeminiAPI(ctx context.Context, client *genai.Client, task string, persistedContext []string) (string, ToolCall, error) {
 	// Build Available Tools section dynamically
 	available, err := getAvailableTools()
 	var toolsSection strings.Builder
@@ -789,15 +921,63 @@ func callGeminiAPI(client *genai.Client, task string) (string, ToolCall, error) 
 		toolsSection.WriteString("- (failed to load tools)\n")
 	}
 
-	systemPrompt := "You are a helpful assistant that executes tasks by calling tools.\n\n" +
-		"**Instructions:**\n" +
-		"1. **Analyze the Request:** Review the 'Original Task' and the 'History of actions' to understand what has been done and what is left to do.\n" +
-		"2. **Decide the Next Step:**\n    *   If the task is not yet complete, determine the next tool to call. Output a JSON object for the tool call.\n    *   If the task is complete, provide a final, user-facing response in Markdown.\n" +
-		"3.  **Strict Output Formatting:**\n    *   For tool calls, output **ONLY** a JSON object like: '{\"tool\": \"tool_name\", \"args\": {\"arg1\": \"value1\"}}'.\n    *   For final answers, output **ONLY** Markdown-formatted text.\n    *   Do not include any other text, explanations, or conversational filler.\n\n" +
-		toolsSection.String() +
-		"\n---\n\n**Current Request:**\n" + task
+	// Persisted Context Section (emit as JSON so the model can easily ingest)
+	var contextSection strings.Builder
+	if len(persistedContext) > 0 {
+		sanitized := sanitizeContextFacts(persistedContext)
+		b, err := json.Marshal(sanitized)
+		if err != nil {
+			log.Printf("[Gemini API] Failed to marshal persisted context: %v", err)
+		} else {
+			contextSection.WriteString("## Persisted Context\n")
+			contextSection.WriteString(fmt.Sprintf("{\"current_context\": %s}\n\n", string(b)))
+		}
+	}
+
+	maxItems := getContextMaxItems()
+	systemPrompt := fmt.Sprintf(`# Role
+You are a helpful assistant that executes tasks by calling tools.
+
+## Instructions
+1. Analyze the Request
+   - Review the "Original Task" and the "History of actions" to understand what has been done and what is left to do.
+2. Maintain and Revise Context (ALWAYS)
+   - Always include a current_context array reflecting the most important environment/state/constraint facts for THIS turn.
+   - Prioritize remembering high-signal details; prune and deduplicate aggressively.
+   - Keep it short (<= %d items). Always revise current_context based on the latest user message and outcomes.
+3. Decide the Next Step
+   - If the task is not yet complete, determine the next tool to call.
+   - If the task is complete, prepare a final, user-facing response.
+4. Strict Output Format (ALWAYS JSON)
+   - Respond ONLY with a single JSON object, never Markdown or prose.
+   - Schema:
+     {
+       "current_context": ["..."],
+       "tool": "tool_name" | "",
+       "args": {"arg1": "value1"},
+       "final": "Final Markdown response if no tool is needed, else empty string"
+     }
+   - When a tool call is needed, set "tool" and "args"; set "final" to "".
+   - When providing a final response, set "final" and leave "tool" as "".
+
+## Execution Environment (IMPORTANT)
+- All commands run inside a running Docker container with a chroot at /app.
+- Only paths under /app are valid. Never use host paths (e.g., /home/...); map them to /app equivalents.
+- Some state may be ephemeral and NOT persist between separate calls. Do not assume running processes or temporary files exist later.
+- If a step depends on prior results, restate the essential facts in current_context and re-create needed state deterministically.
+- Treat the working directory as /app unless otherwise noted; prefer relative project paths (e.g., crypto-trading-bot/frontend).
+- If a tool reports path/permission issues, adjust to remain within /app and avoid relying on host environment tools.
+
+%s
+
+%s
+
+---
+
+**Current Request:**
+%s`, maxItems, toolsSection.String(), contextSection.String(), task)
 	log.Printf("[Gemini API] Sending prompt: %s", systemPrompt)
-	resp, err := client.Models.GenerateContent(context.Background(), "gemini-2.5-flash", genai.Text(systemPrompt), nil)
+	resp, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(systemPrompt), nil)
 	if err != nil {
 		log.Printf("[Gemini API] Error generating content: %v", err)
 		return "", ToolCall{}, err
@@ -817,60 +997,130 @@ func callGeminiAPI(client *genai.Client, task string) (string, ToolCall, error) 
 		cleanedResponse = strings.TrimSpace(cleanedResponse)
 	}
 
-	// Parse for JSON tool call
+	// Parse for JSON model response
 	var toolCall ToolCall
 	err = json.Unmarshal([]byte(cleanedResponse), &toolCall)
-	if err == nil && toolCall.Tool != "" {
-		log.Printf("[Gemini API] Tool call detected: %v", toolCall)
-		return responseText, toolCall, nil
-	} else {
-		log.Printf("[Gemini API] No tool call, assuming final response: %s", responseText)
-		return responseText, ToolCall{}, nil
+	if err == nil {
+		// Log parsed context if present
+		if len(toolCall.CurrentContext) > 0 || len(toolCall.CurrentContent) > 0 {
+			merged := toolCall.GetMergedContext()
+			log.Printf("[Gemini API] current_json: current_context=%v current_content=%v merged=%v", toolCall.CurrentContext, toolCall.CurrentContent, merged)
+		}
+		if toolCall.Tool != "" {
+			log.Printf("[Gemini API] Tool call detected: %v", toolCall)
+			return "", toolCall, nil
+		}
+		// Final path: ensure responseText reflects final content
+		log.Printf("[Gemini API] Final JSON detected")
+		return toolCall.Final, toolCall, nil
 	}
+	// Fallback: not JSON
+	log.Printf("[Gemini API] Non-JSON response, returning raw text")
+	return responseText, ToolCall{}, nil
 }
 
 type ToolCall struct {
-	Tool string                 `json:"tool"`
-	Args map[string]interface{} `json:"args"`
+	Tool           string                 `json:"tool"`
+	Args           map[string]interface{} `json:"args"`
+	CurrentContext []string               `json:"current_context,omitempty"`
+	CurrentContent []string               `json:"current_content,omitempty"`
+	Final          string                 `json:"final,omitempty"`
 }
 
-// Process user message with tool support
-func processUserMessage(message string) (string, error) {
-	// Check for explicit tool commands first
-	if strings.HasPrefix(message, "/tools") {
-		return listAvailableTools()
-	}
+// GetMergedContext returns a merged context slice from either current_context or current_content
+func (tc *ToolCall) GetMergedContext() []string {
+    return mergeStringSets(tc.CurrentContext, tc.CurrentContent)
+}
 
-	if strings.HasPrefix(message, "/tool ") {
-		return parseAndExecuteTool(message)
-	}
-
-	// Analyze message for implicit tool requests
-	lowerMessage := strings.ToLower(message)
-
-	// Check for disk space related queries
-	if strings.Contains(lowerMessage, "disk") ||
-		strings.Contains(lowerMessage, "space") ||
-		strings.Contains(lowerMessage, "storage") ||
-		strings.Contains(lowerMessage, "how much space") ||
-		strings.Contains(lowerMessage, "disk usage") ||
-		strings.Contains(lowerMessage, "free space") {
-		// Execute disk space tool
-		result, err := parseAndExecuteTool("/tool disk_space")
-		if err != nil {
-			return "", err
+// mergeStringSets merges two string slices, de-duplicating while preserving order (favoring later slice order at the end)
+func mergeStringSets(base []string, extra []string) []string {
+	seen := make(map[string]bool, len(base)+len(extra))
+	res := make([]string, 0, len(base)+len(extra))
+	for _, v := range base {
+		if !seen[v] {
+			seen[v] = true
+			res = append(res, v)
 		}
-		return result, nil
+	}
+	for _, v := range extra {
+		if !seen[v] {
+			seen[v] = true
+			res = append(res, v)
+		}
+	}
+	return res
+}
+
+// geminiAPIHandler runs the LLM/tool loop. It accepts an initialContext (persisted across turns)
+// and returns the final assistant response and the updated current_context slice.
+func geminiAPIHandler(ctx context.Context, task string, initialContext []string) (string, []string, error) {
+	log.Printf("[Gemini API] Handler invoked for task: %s", task)
+	if len(initialContext) > 0 {
+		log.Printf("[Context] Loaded initial current_context: %v", initialContext)
+	} else {
+		log.Printf("[Context] No initial current_context loaded")
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return "", nil, err
+	}
+	apiKey := cfg["GEMINI_API_KEY"]
+	if apiKey == "" {
+		return "", nil, fmt.Errorf("GEMINI_API_KEY missing")
+	}
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{APIKey: apiKey})
+	if err != nil {
+		return "", nil, err
 	}
 
-	// Check for tool listing requests
-	if strings.Contains(lowerMessage, "tools") ||
-		strings.Contains(lowerMessage, "what can you do") ||
-		strings.Contains(lowerMessage, "capabilities") ||
-		strings.Contains(lowerMessage, "available") {
-		return listAvailableTools()
+	maxIterations := 30
+	originalTask := task
+	var history []string
+	// Aggregated, rolling context provided by the model via current_context/current_content
+	var currentContext []string
+	if len(initialContext) > 0 {
+		currentContext = mergeStringSets(currentContext, initialContext)
 	}
 
-	// For other messages, use Gemini with tool awareness
-	return geminiAPIHandler(context.Background(), message)
+	for i := 0; i < maxIterations; i++ {
+		currentPrompt := originalTask
+		if len(history) > 0 {
+			currentPrompt = fmt.Sprintf("Original Task: %s\n\nHistory of actions:\n%s", originalTask, strings.Join(history, "\n"))
+		}
+
+		responseText, toolCall, err := callGeminiAPI(ctx, client, currentPrompt, currentContext)
+		if err != nil {
+			log.Printf("[Gemini Loop] Error from Gemini: %v", err)
+			return "", currentContext, err
+		}
+		// Always merge model-provided current_context/current_content, whether tool or final
+		if len(toolCall.GetMergedContext()) > 0 {
+			log.Printf("[Context] From toolCall: current_context=%v current_content=%v", toolCall.CurrentContext, toolCall.CurrentContent)
+			incoming := sanitizeContextFacts(toolCall.GetMergedContext())
+			currentContext = mergeStringSets(currentContext, incoming)
+			maxItems := getContextMaxItems()
+			if len(currentContext) > maxItems {
+				currentContext = currentContext[len(currentContext)-maxItems:]
+			}
+			log.Printf("[Context] Updated current_context: %v", currentContext)
+		}
+
+		if toolCall.Tool != "" {
+			toolResp, err := executeTool(toolCall.Tool, toolCall.Args)
+			if err != nil {
+				return "", currentContext, err
+			}
+
+			// Add tool call and result to history
+			history = append(history, fmt.Sprintf("- Tool call: %s with args %v", toolCall.Tool, toolCall.Args))
+			history = append(history, fmt.Sprintf("- Tool result: %s", summarizeToolResponse(toolResp)))
+		} else {
+			// No tool call, assume this is the final response
+			if strings.TrimSpace(responseText) == "" {
+				return "**No response from Gemini.**", currentContext, nil
+			}
+			return responseText, currentContext, nil
+		}
+	}
+	return "**Max iterations reached or no final response.** Please refine your query.", currentContext, nil
 }
