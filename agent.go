@@ -1035,7 +1035,7 @@ func (tc *ToolCall) GetMergedContext() []string {
 // mergeStringSets merges two string slices, de-duplicating while preserving order (favoring later slice order at the end)
 func mergeStringSets(base []string, extra []string) []string {
 	seen := make(map[string]bool, len(base)+len(extra))
-	var res []string
+	res := make([]string, 0, len(base)+len(extra))
 	for _, v := range base {
 		if !seen[v] {
 			seen[v] = true
