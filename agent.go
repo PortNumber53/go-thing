@@ -44,7 +44,7 @@ var (
 )
 
 // Precompiled regex to collapse accidental double slashes while avoiding schemes like http://
-var doubleSlashRegex = regexp.MustCompile(`([^:])//+`)
+var doubleSlashRegex = regexp.MustCompile(`([^:/])//+`)
 
 // ToolResponse represents a response from tool execution
 type ToolResponse struct {
