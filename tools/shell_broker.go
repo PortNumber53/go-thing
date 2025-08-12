@@ -106,7 +106,7 @@ func (b *ShellBroker) CreateOrGet(id string, subdir string) (*ShellSession, erro
 	}
 	b.sessions[id] = s
 	log.Printf("[Shell] session %s started: workdir=%s container=%s", id, workdir, containerName)
-go s.run()
+	go s.run()
 	go func() {
 		// Wait for the command to exit to release process resources and prevent zombies.
 		if err := s.cmd.Wait(); err != nil {
