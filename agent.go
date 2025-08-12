@@ -9,13 +9,16 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"sync"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/slack-go/slack"
 	"gopkg.in/ini.v1"
 
@@ -156,6 +159,73 @@ var tools = map[string]Tool{}
 // summarizeToolResponse moved to utility_misc.go
 // maskToken moved to utility_misc.go
 
+// Cached allowlist of origins for WebSocket upgrades
+var (
+	allowedOrigins     map[string]struct{}
+	allowedOriginsOnce sync.Once
+)
+
+// WebSocket upgrader for shell streaming
+// Secure origin check: allow only configured origins or same-origin by default.
+var wsUpgrader = websocket.Upgrader{
+	CheckOrigin: isAllowedWSOrigin,
+}
+
+// isAllowedWSOrigin restricts WebSocket connections to trusted origins to prevent CSWSH.
+// Allowed origins can be configured via [default] ALLOWED_ORIGINS in the INI config (comma-separated full origins).
+// If not configured, we allow only same-origin based on the request's Host and scheme.
+func isAllowedWSOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if strings.TrimSpace(origin) == "" {
+		return false
+	}
+	if u, err := url.Parse(origin); err != nil {
+		return false
+	} else if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+
+	// Parse and cache allowed origins on first run
+	allowedOriginsOnce.Do(func() {
+		allowedOrigins = make(map[string]struct{})
+		if cfg, err := utility.LoadConfig(); err == nil && cfg != nil {
+			if raw := strings.TrimSpace(cfg["ALLOWED_ORIGINS"]); raw != "" {
+				for _, item := range strings.Split(raw, ",") {
+					a := strings.TrimSpace(item)
+					if a != "" {
+						allowedOrigins[a] = struct{}{}
+					}
+				}
+			}
+		} else if err != nil {
+			log.Printf("[ShellWS] failed to load config for allowed origins: %v. Falling back to same-origin policy.", err)
+		}
+	})
+
+	// If an allowlist is configured, use it exclusively.
+	if len(allowedOrigins) > 0 {
+		_, ok := allowedOrigins[origin]
+		return ok
+	}
+
+	// Fallback: allow same-origin only
+	// NOTE: r.TLS indicates whether THIS hop used TLS. When running behind a
+	// reverse proxy that terminates TLS, r.TLS will be nil even if the client
+	// connected via HTTPS. In that case the Origin header may be "https://…" but
+	// the computed sameOrigin below would be "http://…", causing a false
+	// mismatch. Consider honoring standard proxy headers (e.g. X-Forwarded-Proto)
+	// or configuring Gin trusted proxies so scheme detection is proxy-aware.
+	// Example (pseudo):
+	//   proto := r.Header.Get("X-Forwarded-Proto")
+	//   if proto == "https" { scheme = "https" }
+scheme := "http"
+if r.Header.Get("X-Forwarded-Proto") == "https" || r.TLS != nil {
+	scheme = "https"
+}
+	sameOrigin := fmt.Sprintf("%s://%s", scheme, r.Host)
+	return origin == sameOrigin
+}
+
 func main() {
 	// Setup logging
 	f, err := logging.Setup()
@@ -212,6 +282,119 @@ func main() {
 	r := gin.Default()
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "go-thing agent API"})
+	})
+	// Shell session management endpoints
+	r.GET("/shell/sessions", func(c *gin.Context) {
+		ids := toolsrv.GetShellBroker().List()
+		c.JSON(http.StatusOK, gin.H{"sessions": ids})
+	})
+	r.POST("/shell/sessions", func(c *gin.Context) {
+		var req struct {
+			ID     string `json:"id" binding:"required"`
+			Subdir string `json:"subdir"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+			return
+		}
+ 		if strings.TrimSpace(req.ID) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "session id cannot be empty"})
+			return
+		}
+		if _, err := toolsrv.GetShellBroker().CreateOrGet(req.ID, req.Subdir); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "id": req.ID})
+	})
+	r.DELETE("/shell/sessions/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		if err := toolsrv.GetShellBroker().Close(id); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	r.GET("/shell/ws/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		// Create if missing with default workdir
+		sess, err := toolsrv.GetShellBroker().CreateOrGet(id, "")
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			log.Printf("[ShellWS] upgrade error: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		// Subscribe to output
+		outCh := sess.Subscribe()
+		defer sess.Unsubscribe(outCh)
+
+		// Writer goroutine
+		done := make(chan struct{})
+		var once sync.Once
+		closeDone := func() { once.Do(func() { close(done) }) }
+		var writeMu sync.Mutex
+		go func() {
+			for {
+				select {
+				case data, ok := <-outCh:
+					if !ok {
+						// Serialize WebSocket writes with a shared mutex to avoid concurrent writer issues.
+						writeMu.Lock()
+						_ = conn.WriteMessage(websocket.TextMessage, []byte("[session closed]\n"))
+						writeMu.Unlock()
+						_ = conn.Close()
+						closeDone()
+						return
+					}
+					writeMu.Lock()
+					err := conn.WriteMessage(websocket.BinaryMessage, data)
+					writeMu.Unlock()
+					if err != nil {
+						log.Printf("[ShellWS %s] write error: %v", id, err)
+						_ = conn.Close()
+						closeDone()
+						return
+					}
+				case <-done:
+					return
+				}
+			}
+		}()
+
+		// Read loop -> enqueue to shell with heartbeat and backpressure handling
+		const pongWait = 60 * time.Second
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		conn.SetPongHandler(func(string) error {
+			conn.SetReadDeadline(time.Now().Add(pongWait))
+			return nil
+		})
+
+		ReadLoop:
+		for {
+			mt, msg, err := conn.ReadMessage()
+			if err != nil {
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+					log.Printf("[ShellWS %s] read error: %v", id, err)
+				}
+				break
+			}
+			if mt == websocket.TextMessage || mt == websocket.BinaryMessage {
+				if !sess.Enqueue(msg) {
+					log.Printf("[ShellWS %s] input queue is full, closing connection.", id)
+					writeMu.Lock()
+					_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "Input queue full"))
+					writeMu.Unlock()
+					break ReadLoop
+				}
+			}
+		}
+		closeDone()
 	})
 	r.POST("/chat", func(c *gin.Context) {
 		var req struct {
@@ -309,4 +492,6 @@ func main() {
 	defer cancel()
 	_ = apiServer.Shutdown(ctx)
 	_ = toolServer.Shutdown(ctx)
+	// Close shell sessions gracefully (single lock via CloseAll)
+	toolsrv.GetShellBroker().CloseAll()
 }
