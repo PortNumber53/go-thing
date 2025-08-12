@@ -106,7 +106,15 @@ func (b *ShellBroker) CreateOrGet(id string, subdir string) (*ShellSession, erro
 	}
 	b.sessions[id] = s
 	log.Printf("[Shell] session %s started: workdir=%s container=%s", id, workdir, containerName)
-	go s.run()
+go s.run()
+	go func() {
+		// Wait for the command to exit to release process resources and prevent zombies.
+		if err := s.cmd.Wait(); err != nil {
+			log.Printf("[Shell %s] command process exited with error: %v", s.ID, err)
+		}
+		// Ensure the session is fully cleaned up if the process exits for any reason.
+		s.Close()
+	}()
 	return s, nil
 }
 
