@@ -48,31 +48,30 @@ func removeANSI(s string) string {
 // If found, it sets cwd to the detected path and returns seg with the PWD line removed.
 // It handles the sentinel appearing at the start of seg or after a newline.
 func extractCwdAndTrim(seg, pwdMark string) (out string, cwd string) {
-    // Look for a line that starts with the pwdMark either at the beginning or after a newline
-    if j := strings.LastIndex(seg, "\n"+pwdMark); j >= 0 {
-        line := seg[j+1:]
-        if nl := strings.IndexByte(line, '\n'); nl >= 0 {
-            line = line[:nl]
-        }
-        if strings.HasPrefix(line, pwdMark) {
-            cwd = strings.TrimPrefix(line, pwdMark)
-            // Remove the pwd line from the output segment
-            seg = seg[:j]
-        }
-    } else if strings.HasPrefix(seg, pwdMark) {
-        line := seg
-        if nl := strings.IndexByte(line, '\n'); nl >= 0 {
-            line = line[:nl]
-        }
-        cwd = strings.TrimPrefix(line, pwdMark)
-        // Remove the pwd line at the start
-        if nl := strings.IndexByte(seg, '\n'); nl >= 0 {
-            seg = seg[nl+1:]
-        } else {
-            seg = ""
+    lines := strings.Split(seg, "\n")
+    outLines := make([]string, 0, len(lines))
+    foundIdx := -1
+
+    // Find the last occurrence of the PWD sentinel line, matching original LastIndex behavior
+    for i := len(lines) - 1; i >= 0; i-- {
+        if strings.HasPrefix(lines[i], pwdMark) {
+            cwd = strings.TrimPrefix(lines[i], pwdMark)
+            foundIdx = i
+            break
         }
     }
-    return seg, cwd
+
+    if foundIdx == -1 {
+        return seg, ""
+    }
+
+    // Rebuild the output without the sentinel line
+    for i, line := range lines {
+        if i != foundIdx {
+            outLines = append(outLines, line)
+        }
+    }
+    return strings.Join(outLines, "\n"), cwd
 }
 
 // executeShellSessionTool runs a command in a persistent interactive shell session managed by ShellBroker.

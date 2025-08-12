@@ -213,9 +213,13 @@ func (s *ShellSession) readLoop(r io.Reader) {
 			s.broadcast(payload)
 		}
 		if err != nil {
-			if err == io.EOF { return }
-			// Broadcast error as message and exit loop
-			s.broadcast([]byte("\n[session error] " + err.Error() + "\n"))
+			if err != io.EOF {
+				log.Printf("[Shell %s] read error, closing session: %v", s.ID, err)
+				// Broadcast error as message before closing
+				s.broadcast([]byte("\n[session error] " + err.Error() + "\n"))
+			}
+			// Ensure full session cleanup on any read error or EOF
+			s.Close()
 			return
 		}
 	}
