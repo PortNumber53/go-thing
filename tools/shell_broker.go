@@ -179,6 +179,15 @@ func (s *ShellSession) Close() {
 		_ = s.write([]byte("exit\n"))
 		// Give the shell a moment
 		time.AfterFunc(500*time.Millisecond, func() { _ = s.cmd.Process.Kill() })
+
+		// Notify and unblock all subscribers to prevent goroutine leaks.
+		s.subsMu.Lock()
+		for ch := range s.subscribers {
+			close(ch)
+		}
+		// Reset the map so Unsubscribe won't act on closed channels.
+		s.subscribers = make(map[chan []byte]struct{})
+		s.subsMu.Unlock()
 	})
 }
 

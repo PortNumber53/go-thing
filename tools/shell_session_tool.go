@@ -197,13 +197,11 @@ ReadLoop:
 			tailKeep := len(endMark) + 512
 			if acc.Len() > tailKeep {
 				s := acc.String()
-				if len(s) > tailKeep {
-					toWrite := s[:len(s)-tailKeep]
-					tail := s[len(s)-tailKeep:]
-					outBuf.WriteString(toWrite)
-					acc.Reset()
-					acc.WriteString(tail)
-				}
+				toWrite := s[:len(s)-tailKeep]
+				tail := s[len(s)-tailKeep:]
+				outBuf.WriteString(toWrite)
+				acc.Reset()
+				acc.WriteString(tail)
 			}
 		case <-deadlineTimer.C:
 			break ReadLoop
