@@ -155,13 +155,20 @@ func (s *ShellSession) Enqueue(data []byte) { s.inputQueue <- data }
 // Subscribe returns a channel to receive broadcast output. Call Unsubscribe when done.
 func (s *ShellSession) Subscribe() chan []byte {
 	ch := make(chan []byte, 256)
-	s.subsMu.Lock(); s.subscribers[ch] = struct{}{}; s.subsMu.Unlock()
+	s.subsMu.Lock()
+	defer s.subsMu.Unlock()
+	s.subscribers[ch] = struct{}{}
 	return ch
 }
 
 // Unsubscribe removes a subscriber and closes its channel.
 func (s *ShellSession) Unsubscribe(ch chan []byte) {
-	s.subsMu.Lock(); if _, ok := s.subscribers[ch]; ok { delete(s.subscribers, ch); close(ch) }; s.subsMu.Unlock()
+	s.subsMu.Lock()
+	defer s.subsMu.Unlock()
+	if _, ok := s.subscribers[ch]; ok {
+		delete(s.subscribers, ch)
+		close(ch)
+	}
 }
 
 // Close signals the session to terminate.
@@ -222,7 +229,8 @@ func (s *ShellSession) readLoop(r io.Reader) {
 		if n > 0 {
 			payload := make([]byte, n)
 			copy(payload, buf[:n])
-			log.Printf("[Shell %s] read %d bytes: %q", s.ID, n, string(payload))
+			// Avoid logging raw payload to prevent potential secret leakage.
+			log.Printf("[Shell %s] read %d bytes", s.ID, n)
 			s.broadcast(payload)
 		}
 		if err != nil {
