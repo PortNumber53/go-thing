@@ -120,7 +120,8 @@ func (b *ShellBroker) Get(id string) (*ShellSession, bool) {
 
 // List returns active session IDs.
 func (b *ShellBroker) List() []string {
-	b.mu.RLock(); defer b.mu.RUnlock()
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 	out := make([]string, 0, len(b.sessions))
 	for id := range b.sessions { out = append(out, id) }
 	return out
