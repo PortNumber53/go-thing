@@ -189,11 +189,6 @@ ReadLoop:
 				outBuf.WriteString(outSeg)
 				break ReadLoop
 			}
-			if i := strings.Index(cur, endMark); i >= 0 {
-				outSeg := cur[:i]
-				outBuf.WriteString(outSeg)
-				break ReadLoop
-			}
 			// Not found yet; keep a small tail for upcoming endMark detection.
 			// To avoid losing data for large outputs, write the truncated prefix to outBuf.
 			tailKeep := len(endMark) + 512
