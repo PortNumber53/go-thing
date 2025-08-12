@@ -346,14 +346,28 @@ func main() {
 			}
 		}()
 
-		// Read loop -> enqueue to shell
+		// Read loop -> enqueue to shell with heartbeat and backpressure handling
+		const pongWait = 60 * time.Second
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		conn.SetPongHandler(func(string) error {
+			conn.SetReadDeadline(time.Now().Add(pongWait))
+			return nil
+		})
+
+		ReadLoop:
 		for {
 			mt, msg, err := conn.ReadMessage()
-			if err != nil { break }
+			if err != nil {
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+					log.Printf("[ShellWS %s] read error: %v", id, err)
+				}
+				break
+			}
 			if mt == websocket.TextMessage || mt == websocket.BinaryMessage {
 				if !sess.Enqueue(msg) {
-					// Input queue full; notify client and drop this message to avoid blocking.
-					_ = conn.WriteMessage(websocket.TextMessage, []byte("[backpressure] input queue full, dropping input\n"))
+					log.Printf("[ShellWS %s] input queue is full, closing connection.", id)
+					_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "Input queue full"))
+					break ReadLoop
 				}
 			}
 		}
