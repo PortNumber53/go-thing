@@ -129,7 +129,8 @@ func (b *ShellBroker) List() []string {
 
 // Close terminates and removes a session.
 func (b *ShellBroker) Close(id string) error {
-	b.mu.Lock(); defer b.mu.Unlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	s, ok := b.sessions[id]
 	if !ok { return nil }
 	s.Close()
