@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/slack-go/slack"
 	"gopkg.in/ini.v1"
 
@@ -156,6 +157,11 @@ var tools = map[string]Tool{}
 // summarizeToolResponse moved to utility_misc.go
 // maskToken moved to utility_misc.go
 
+// WebSocket upgrader for shell streaming
+var wsUpgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
 func main() {
 	// Setup logging
 	f, err := logging.Setup()
@@ -212,6 +218,77 @@ func main() {
 	r := gin.Default()
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "go-thing agent API"})
+	})
+	// Shell session management endpoints
+	r.GET("/shell/sessions", func(c *gin.Context) {
+		ids := toolsrv.GetShellBroker().List()
+		c.JSON(http.StatusOK, gin.H{"sessions": ids})
+	})
+	r.POST("/shell/sessions", func(c *gin.Context) {
+		var req struct {
+			ID     string `json:"id" binding:"required"`
+			Subdir string `json:"subdir"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+			return
+		}
+		if _, err := toolsrv.GetShellBroker().CreateOrGet(req.ID, req.Subdir); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "id": req.ID})
+	})
+	r.DELETE("/shell/sessions/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		if err := toolsrv.GetShellBroker().Close(id); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	r.GET("/shell/ws/:id", func(c *gin.Context) {
+		id := c.Param("id")
+		// Create if missing with default workdir
+		sess, err := toolsrv.GetShellBroker().CreateOrGet(id, "")
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			log.Printf("[ShellWS] upgrade error: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		// Subscribe to output
+		outCh := sess.Subscribe()
+		defer sess.Unsubscribe(outCh)
+
+		// Writer goroutine
+		done := make(chan struct{})
+		go func() {
+			for {
+				select {
+				case data, ok := <-outCh:
+					if !ok { _ = conn.WriteMessage(websocket.TextMessage, []byte("[session closed]\n")); close(done); return }
+					if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil { close(done); return }
+				case <-done:
+					return
+				}
+			}
+		}()
+
+		// Read loop -> enqueue to shell
+		for {
+			mt, msg, err := conn.ReadMessage()
+			if err != nil { break }
+			if mt == websocket.TextMessage || mt == websocket.BinaryMessage {
+				sess.Enqueue(msg)
+			}
+		}
+		close(done)
 	})
 	r.POST("/chat", func(c *gin.Context) {
 		var req struct {
@@ -309,4 +386,8 @@ func main() {
 	defer cancel()
 	_ = apiServer.Shutdown(ctx)
 	_ = toolServer.Shutdown(ctx)
+	// Close shell sessions gracefully
+	for _, id := range toolsrv.GetShellBroker().List() {
+		_ = toolsrv.GetShellBroker().Close(id)
+	}
 }

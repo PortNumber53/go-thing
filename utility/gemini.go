@@ -53,12 +53,12 @@ func callGeminiAPI(ctx context.Context, client *genai.Client, task string, persi
 	if len(persistedContext) > 0 {
 		sanitized := SanitizeContextFacts(persistedContext)
 		b, err := json.Marshal(sanitized)
-if err != nil {
-	log.Printf("[Gemini API] Failed to marshal persisted context: %v", err)
-	return "", ToolCall{}, fmt.Errorf("failed to marshal persisted context: %w", err)
-}
-contextSection.WriteString("## Persisted Context\n")
-contextSection.WriteString(fmt.Sprintf("{\"current_context\": %s}\n\n", string(b)))
+		if err != nil {
+			log.Printf("[Gemini API] Failed to marshal persisted context: %v", err)
+			return "", ToolCall{}, fmt.Errorf("failed to marshal persisted context: %w", err)
+		}
+		contextSection.WriteString("## Persisted Context\n")
+		contextSection.WriteString(fmt.Sprintf("{\"current_context\": %s}\n\n", string(b)))
 	}
 
 	maxItems := getContextMaxItems()
@@ -94,6 +94,11 @@ You are a helpful assistant that executes tasks by calling tools.
 - If a step depends on prior results, restate the essential facts in current_context and re-create needed state deterministically.
 - Treat the working directory as /app unless otherwise noted; prefer relative project paths (e.g., crypto-trading-bot/frontend).
 - If a tool reports path/permission issues, adjust to remain within /app and avoid relying on host environment tools.
+
+### Shell Sessions (STATEFUL)
+- Use the persistent shell tool shell_session for any shell work that relies on state (e.g., cd, environment setup, long-running processes).
+- Pick a single session id (e.g., dev) and keep using it for the entire task. Include a note like "session_id=dev" in current_context so you reuse it on the next turn.
+- Do NOT use shell_exec for stateful operations; shell_exec creates a fresh, stateless process each time.
 
 %s
 
