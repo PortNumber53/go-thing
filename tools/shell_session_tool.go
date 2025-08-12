@@ -212,13 +212,15 @@ func executeShellSessionTool(args map[string]interface{}) (*ToolResponse, error)
 		}
 	}
 DONE:
-	// Extract cwd from the captured segment, removing the PWD line from output if present.
-	seg := outBuf.String()
-	seg, cwd := extractCwdAndTrim(seg, pwdMark)
-	if cwdDetected == "" && cwd != "" { cwdDetected = cwd }
-	out := strings.TrimSpace(seg)
-	if out == "" && seenStart {
-		// Fallback: if we saw the start but not end, return what we have accumulated
+    // Combine the main buffer and the accumulator's remaining content to get the full output.
+    outBuf.WriteString(acc.String())
+    // Extract cwd from the captured segment, removing the PWD line from output if present.
+    seg := outBuf.String()
+    seg, cwd := extractCwdAndTrim(seg, pwdMark)
+    if cwdDetected == "" && cwd != "" { cwdDetected = cwd }
+    out := strings.TrimSpace(seg)
+    if out == "" && seenStart {
+        // Fallback: if we saw the start but not end, return what we have accumulated
 		cur := acc.String()
 		var pre string
 		if i := strings.Index(cur, "\n"+endMark); i >= 0 {
