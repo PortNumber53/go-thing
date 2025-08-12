@@ -334,7 +334,12 @@ func main() {
 						closeDone()
 						return
 					}
-					if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil { closeDone(); return }
+					if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+						log.Printf("[ShellWS %s] write error: %v", id, err)
+						_ = conn.Close()
+						closeDone()
+						return
+					}
 				case <-done:
 					return
 				}
