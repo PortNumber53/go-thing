@@ -127,6 +127,17 @@ func (b *ShellBroker) Close(id string) error {
 	return nil
 }
 
+// CloseAll terminates all active sessions under a single lock.
+func (b *ShellBroker) CloseAll() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for id, s := range b.sessions {
+		s.Close()
+		delete(b.sessions, id)
+	}
+	log.Printf("[Shell] Closed all active sessions.")
+}
+
 // Enqueue writes data (appends newline if desired by caller) to the session's stdin serially.
 func (s *ShellSession) Enqueue(data []byte) { s.inputQueue <- data }
 

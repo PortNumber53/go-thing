@@ -194,14 +194,19 @@ func executeShellSessionTool(args map[string]interface{}) (*ToolResponse, error)
 				outBuf.WriteString(outSeg)
 				goto DONE
 			}
-			// Not found yet; do not flush everything to outBuf to avoid duplicating
-			// Keep a small tail for upcoming endMark detection
-			tailKeep := len(endMark) + 512
-			if acc.Len() > tailKeep {
-				s := acc.String()
-				if len(s) > tailKeep { s = s[len(s)-tailKeep:] }
-				acc.Reset(); acc.WriteString(s)
-			}
+			// Not found yet; keep a small tail for upcoming endMark detection.
+            // To avoid losing data for large outputs, write the truncated prefix to outBuf.
+            tailKeep := len(endMark) + 512
+            if acc.Len() > tailKeep {
+                s := acc.String()
+                if len(s) > tailKeep {
+                    toWrite := s[:len(s)-tailKeep]
+                    tail := s[len(s)-tailKeep:]
+                    outBuf.WriteString(toWrite)
+                    acc.Reset()
+                    acc.WriteString(tail)
+                }
+            }
 		case <-time.After(50 * time.Millisecond):
 			// poll
 		}
