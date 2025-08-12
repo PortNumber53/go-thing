@@ -65,16 +65,9 @@ func extractCwdAndTrim(seg, pwdMark string) (out string, cwd string) {
         return seg, ""
     }
 
-    // Rebuild the output without the sentinel line
-    // NOTE: For fewer allocations on large outputs, consider using a single slice append:
-    //   return strings.Join(append(lines[:foundIdx], lines[foundIdx+1:]...), "\n"), cwd
-    // This avoids building outLines incrementally while keeping readability.
-    for i, line := range lines {
-        if i != foundIdx {
-            outLines = append(outLines, line)
-        }
-    }
-    return strings.Join(outLines, "\n"), cwd
+    // Rebuild the output without the sentinel line using a single slice append
+    // for better performance with large outputs.
+    return strings.Join(append(lines[:foundIdx], lines[foundIdx+1:]...), "\n"), cwd
 }
 
 // executeShellSessionTool runs a command in a persistent interactive shell session managed by ShellBroker.
