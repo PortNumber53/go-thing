@@ -49,7 +49,6 @@ func removeANSI(s string) string {
 // It handles the sentinel appearing at the start of seg or after a newline.
 func extractCwdAndTrim(seg, pwdMark string) (out string, cwd string) {
     lines := strings.Split(seg, "\n")
-    outLines := make([]string, 0, len(lines))
     foundIdx := -1
 
     // Find the last occurrence of the PWD sentinel line, matching original LastIndex behavior
@@ -66,7 +65,7 @@ func extractCwdAndTrim(seg, pwdMark string) (out string, cwd string) {
     }
 
     // Rebuild the output without the sentinel line using a single slice append
-    // for better performance with large outputs.
+    // for better performance and fewer allocations on large outputs.
     return strings.Join(append(lines[:foundIdx], lines[foundIdx+1:]...), "\n"), cwd
 }
 

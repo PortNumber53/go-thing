@@ -339,6 +339,11 @@ func main() {
 				select {
 				case data, ok := <-outCh:
 					if !ok {
+						// NOTE: gorilla/websocket forbids concurrent writes. This WriteMessage
+						// may race with writes from other goroutines (e.g., the reader loop below)
+						// unless all writes share a sync.Mutex. Consider introducing:
+						//   var writeMu sync.Mutex
+						// and guarding every conn.WriteMessage with writeMu.Lock()/Unlock().
 						_ = conn.WriteMessage(websocket.TextMessage, []byte("[session closed]\n"))
 						_ = conn.Close()
 						closeDone()
@@ -376,6 +381,12 @@ func main() {
 			if mt == websocket.TextMessage || mt == websocket.BinaryMessage {
 				if !sess.Enqueue(msg) {
 					log.Printf("[ShellWS %s] input queue is full, closing connection.", id)
+					// NOTE: Serialize all WebSocket writes with a shared sync.Mutex to avoid
+					// concurrent writer panics/data corruption in gorilla/websocket.
+					// Example:
+					//   writeMu.Lock()
+					//   _ = conn.WriteMessage(...)
+					//   writeMu.Unlock()
 					_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "Input queue full"))
 					break ReadLoop
 				}
