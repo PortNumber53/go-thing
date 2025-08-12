@@ -215,9 +215,11 @@ ReadLoop:
 	// Extract cwd from the captured segment, removing the PWD line from output if present.
 	seg := outBuf.String()
 	seg, cwd := extractCwdAndTrim(seg, pwdMark)
-	if cwdDetected == "" && cwd != "" { cwdDetected = cwd }
 	out := strings.TrimSpace(seg)
-	if cwdDetected == "" { cwdDetected = sess.Workdir }
+	cwdDetected = cwd
+	if cwdDetected == "" {
+		cwdDetected = sess.Workdir
+	}
 	return &ToolResponse{Success: true, Data: map[string]interface{}{
 		"id":      idVal,
 		"workdir": sess.Workdir,
