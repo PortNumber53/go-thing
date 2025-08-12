@@ -179,7 +179,7 @@ func isAllowedWSOrigin(r *http.Request) bool {
 	if strings.TrimSpace(origin) == "" {
 		return false
 	}
- 	if u, err := url.Parse(origin); err != nil {
+ ️	if u, err := url.Parse(origin); err != nil {
  		return false
  	} else if u.Scheme != "http" && u.Scheme != "https" {
  		return false
