@@ -71,9 +71,17 @@ func (b *ShellBroker) CreateOrGet(id string, subdir string) (*ShellSession, erro
 	}
 
 	workdir := "/app"
-	if sub := strings.TrimSpace(subdir); sub != "" {
-		workdir = "/app/" + filepath.ToSlash(sub)
-	}
+    if sub := strings.TrimSpace(subdir); sub != "" {
+        // Sanitize the subdirectory path to prevent path traversal attacks.
+        // filepath.Join will resolve elements like ".." and create a canonical path.
+        joinedPath := filepath.Join("/app", sub)
+
+        // Ensure the resulting path is still within the intended /app directory.
+        if !strings.HasPrefix(joinedPath, "/app/") && joinedPath != "/app" {
+            return nil, fmt.Errorf("invalid subdir, potential path traversal: %q", sub)
+        }
+        workdir = filepath.ToSlash(joinedPath)
+    }
 
 	// docker exec with TTY; attach a real PTY so the shell is truly interactive
 	execArgs := []string{"exec", "-i", "-t", "-w", workdir, containerName, "/bin/bash"}
