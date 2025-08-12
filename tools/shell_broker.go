@@ -150,7 +150,15 @@ func (b *ShellBroker) CloseAll() {
 }
 
 // Enqueue writes data (appends newline if desired by caller) to the session's stdin serially.
-func (s *ShellSession) Enqueue(data []byte) { s.inputQueue <- data }
+// It is non-blocking and returns false if the input queue is full so callers can handle backpressure.
+func (s *ShellSession) Enqueue(data []byte) bool {
+	select {
+	case s.inputQueue <- data:
+		return true
+	default:
+		return false
+	}
+}
 
 // Subscribe returns a channel to receive broadcast output. Call Unsubscribe when done.
 func (s *ShellSession) Subscribe() chan []byte {

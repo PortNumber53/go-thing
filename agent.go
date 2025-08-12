@@ -351,7 +351,10 @@ func main() {
 			mt, msg, err := conn.ReadMessage()
 			if err != nil { break }
 			if mt == websocket.TextMessage || mt == websocket.BinaryMessage {
-				sess.Enqueue(msg)
+				if !sess.Enqueue(msg) {
+					// Input queue full; notify client and drop this message to avoid blocking.
+					_ = conn.WriteMessage(websocket.TextMessage, []byte("[backpressure] input queue full, dropping input\n"))
+				}
 			}
 		}
 		closeDone()

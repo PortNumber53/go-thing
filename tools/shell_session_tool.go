@@ -132,7 +132,9 @@ func executeShellSessionTool(args map[string]interface{}) (*ToolResponse, error)
 		"printf '%s\\n'; { %s ; }; printf '%%s%%s\\n' '%s' \"$(pwd)\"; printf '%s\\n'\n",
 		startMark, cmdStr, pwdMark, endMark,
 	)
-	sess.Enqueue([]byte(wrapped))
+	if !sess.Enqueue([]byte(wrapped)) {
+		return &ToolResponse{Success: false, Error: "shell input queue is full; please retry shortly"}, nil
+	}
 
 	deadlineTimer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
 	defer deadlineTimer.Stop()
