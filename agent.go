@@ -209,6 +209,15 @@ func isAllowedWSOrigin(r *http.Request) bool {
 	}
 
 	// Fallback: allow same-origin only
+	// NOTE: r.TLS indicates whether THIS hop used TLS. When running behind a
+	// reverse proxy that terminates TLS, r.TLS will be nil even if the client
+	// connected via HTTPS. In that case the Origin header may be "https://…" but
+	// the computed sameOrigin below would be "http://…", causing a false
+	// mismatch. Consider honoring standard proxy headers (e.g. X-Forwarded-Proto)
+	// or configuring Gin trusted proxies so scheme detection is proxy-aware.
+	// Example (pseudo):
+	//   proto := r.Header.Get("X-Forwarded-Proto")
+	//   if proto == "https" { scheme = "https" }
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"

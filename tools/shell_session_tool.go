@@ -66,6 +66,9 @@ func extractCwdAndTrim(seg, pwdMark string) (out string, cwd string) {
     }
 
     // Rebuild the output without the sentinel line
+    // NOTE: For fewer allocations on large outputs, consider using a single slice append:
+    //   return strings.Join(append(lines[:foundIdx], lines[foundIdx+1:]...), "\n"), cwd
+    // This avoids building outLines incrementally while keeping readability.
     for i, line := range lines {
         if i != foundIdx {
             outLines = append(outLines, line)
