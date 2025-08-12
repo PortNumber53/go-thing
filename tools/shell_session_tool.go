@@ -44,6 +44,37 @@ func removeANSI(s string) string {
 	return string(out)
 }
 
+// extractCwdAndTrim searches for a PWD sentinel line (pwdMark) in seg.
+// If found, it sets cwd to the detected path and returns seg with the PWD line removed.
+// It handles the sentinel appearing at the start of seg or after a newline.
+func extractCwdAndTrim(seg, pwdMark string) (out string, cwd string) {
+    // Look for a line that starts with the pwdMark either at the beginning or after a newline
+    if j := strings.LastIndex(seg, "\n"+pwdMark); j >= 0 {
+        line := seg[j+1:]
+        if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+            line = line[:nl]
+        }
+        if strings.HasPrefix(line, pwdMark) {
+            cwd = strings.TrimPrefix(line, pwdMark)
+            // Remove the pwd line from the output segment
+            seg = seg[:j]
+        }
+    } else if strings.HasPrefix(seg, pwdMark) {
+        line := seg
+        if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+            line = line[:nl]
+        }
+        cwd = strings.TrimPrefix(line, pwdMark)
+        // Remove the pwd line at the start
+        if nl := strings.IndexByte(seg, '\n'); nl >= 0 {
+            seg = seg[nl+1:]
+        } else {
+            seg = ""
+        }
+    }
+    return seg, cwd
+}
+
 // executeShellSessionTool runs a command in a persistent interactive shell session managed by ShellBroker.
 // Args:
 //   id (string, required): session identifier
@@ -178,30 +209,8 @@ func executeShellSessionTool(args map[string]interface{}) (*ToolResponse, error)
 DONE:
 	// Extract cwd from the captured segment, removing the PWD line from output if present.
 	seg := outBuf.String()
-	// Look for a line that starts with the pwdMark either at the beginning or after a newline
-	if j := strings.LastIndex(seg, "\n"+pwdMark); j >= 0 {
-		line := seg[j+1:]
-		if nl := strings.IndexByte(line, '\n'); nl >= 0 {
-			line = line[:nl]
-		}
-		if strings.HasPrefix(line, pwdMark) {
-			cwdDetected = strings.TrimPrefix(line, pwdMark)
-			// Remove the pwd line from the output segment
-			seg = seg[:j]
-		}
-	} else if strings.HasPrefix(seg, pwdMark) {
-		line := seg
-		if nl := strings.IndexByte(line, '\n'); nl >= 0 {
-			line = line[:nl]
-		}
-		cwdDetected = strings.TrimPrefix(line, pwdMark)
-		// Remove the pwd line at the start
-		if nl := strings.IndexByte(outBuf.String(), '\n'); nl >= 0 {
-			seg = outBuf.String()[nl+1:]
-		} else {
-			seg = ""
-		}
-	}
+	seg, cwd := extractCwdAndTrim(seg, pwdMark)
+	if cwdDetected == "" && cwd != "" { cwdDetected = cwd }
 	out := strings.TrimSpace(seg)
 	if out == "" && seenStart {
 		// Fallback: if we saw the start but not end, return what we have accumulated
@@ -215,16 +224,8 @@ DONE:
 			pre = cur
 		}
 		// Try to parse PWD from the fallback segment too
-		if j := strings.LastIndex(pre, "\n"+pwdMark); j >= 0 {
-			line := pre[j+1:]
-			if nl := strings.IndexByte(line, '\n'); nl >= 0 { line = line[:nl] }
-			if strings.HasPrefix(line, pwdMark) { cwdDetected = strings.TrimPrefix(line, pwdMark); pre = pre[:j] }
-		} else if strings.HasPrefix(pre, pwdMark) {
-			line := pre
-			if nl := strings.IndexByte(line, '\n'); nl >= 0 { line = line[:nl] }
-			cwdDetected = strings.TrimPrefix(line, pwdMark)
-			if nl := strings.IndexByte(pre, '\n'); nl >= 0 { pre = pre[nl+1:] } else { pre = "" }
-		}
+		pre, cwd2 := extractCwdAndTrim(pre, pwdMark)
+		if cwdDetected == "" && cwd2 != "" { cwdDetected = cwd2 }
 		out = strings.TrimSpace(pre)
 	}
 	if cwdDetected == "" { cwdDetected = sess.Workdir }

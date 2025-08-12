@@ -9,8 +9,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"sync"
 	"strings"
 	"syscall"
 	"time"
@@ -158,8 +160,47 @@ var tools = map[string]Tool{}
 // maskToken moved to utility_misc.go
 
 // WebSocket upgrader for shell streaming
+// Secure origin check: allow only configured origins or same-origin by default.
 var wsUpgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+    CheckOrigin: isAllowedWSOrigin,
+}
+
+// isAllowedWSOrigin restricts WebSocket connections to trusted origins to prevent CSWSH.
+// Allowed origins can be configured via [default] ALLOWED_ORIGINS in the INI config (comma-separated full origins).
+// If not configured, we allow only same-origin based on the request's Host and scheme.
+func isAllowedWSOrigin(r *http.Request) bool {
+    origin := r.Header.Get("Origin")
+    if strings.TrimSpace(origin) == "" {
+        return false
+    }
+    if _, err := url.Parse(origin); err != nil {
+        return false
+    }
+
+    // Try config-driven allowlist first
+    if cfg, err := utility.LoadConfig(); err == nil && cfg != nil {
+        if raw := strings.TrimSpace(cfg["ALLOWED_ORIGINS"]); raw != "" {
+            for _, item := range strings.Split(raw, ",") {
+                a := strings.TrimSpace(item)
+                if a == "" {
+                    continue
+                }
+                if origin == a {
+                    return true
+                }
+            }
+            // Config present but no match -> deny
+            return false
+        }
+    }
+
+    // Fallback: allow same-origin only
+    scheme := "http"
+    if r.TLS != nil {
+        scheme = "https"
+    }
+    sameOrigin := fmt.Sprintf("%s://%s", scheme, r.Host)
+    return origin == sameOrigin
 }
 
 func main() {
@@ -268,12 +309,18 @@ func main() {
 
 		// Writer goroutine
 		done := make(chan struct{})
+		var once sync.Once
+		closeDone := func() { once.Do(func() { close(done) }) }
 		go func() {
 			for {
 				select {
 				case data, ok := <-outCh:
-					if !ok { _ = conn.WriteMessage(websocket.TextMessage, []byte("[session closed]\n")); close(done); return }
-					if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil { close(done); return }
+					if !ok {
+						_ = conn.WriteMessage(websocket.TextMessage, []byte("[session closed]\n"))
+						closeDone()
+						return
+					}
+					if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil { closeDone(); return }
 				case <-done:
 					return
 				}
@@ -288,7 +335,7 @@ func main() {
 				sess.Enqueue(msg)
 			}
 		}
-		close(done)
+		closeDone()
 	})
 	r.POST("/chat", func(c *gin.Context) {
 		var req struct {
