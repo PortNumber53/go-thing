@@ -445,6 +445,6 @@ func main() {
 	defer cancel()
 	_ = apiServer.Shutdown(ctx)
 	_ = toolServer.Shutdown(ctx)
-    // Close shell sessions gracefully (single lock via CloseAll)
-    toolsrv.GetShellBroker().CloseAll()
+	// Close shell sessions gracefully (single lock via CloseAll)
+	toolsrv.GetShellBroker().CloseAll()
 }
