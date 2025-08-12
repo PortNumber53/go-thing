@@ -218,10 +218,10 @@ func isAllowedWSOrigin(r *http.Request) bool {
 	// Example (pseudo):
 	//   proto := r.Header.Get("X-Forwarded-Proto")
 	//   if proto == "https" { scheme = "https" }
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
+scheme := "http"
+if r.Header.Get("X-Forwarded-Proto") == "https" || r.TLS != nil {
+	scheme = "https"
+}
 	sameOrigin := fmt.Sprintf("%s://%s", scheme, r.Host)
 	return origin == sameOrigin
 }
