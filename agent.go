@@ -331,6 +331,7 @@ func main() {
 				case data, ok := <-outCh:
 					if !ok {
 						_ = conn.WriteMessage(websocket.TextMessage, []byte("[session closed]\n"))
+						_ = conn.Close()
 						closeDone()
 						return
 					}
