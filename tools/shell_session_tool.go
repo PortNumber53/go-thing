@@ -150,6 +150,7 @@ func executeShellSessionTool(args map[string]interface{}) (*ToolResponse, error)
 		s = strings.ReplaceAll(s, "\r", "\n")
 		return s
 	}
+ReadLoop:
 	for {
 		if time.Now().After(deadline) {
 			break
@@ -187,12 +188,12 @@ func executeShellSessionTool(args map[string]interface{}) (*ToolResponse, error)
 			if i := strings.Index(cur, "\n"+endMark); i >= 0 {
 				outSeg := cur[:i]
 				outBuf.WriteString(outSeg)
-				goto DONE
+				break ReadLoop
 			}
 			if i := strings.Index(cur, endMark); i >= 0 {
 				outSeg := cur[:i]
 				outBuf.WriteString(outSeg)
-				goto DONE
+				break ReadLoop
 			}
 			// Not found yet; keep a small tail for upcoming endMark detection.
             // To avoid losing data for large outputs, write the truncated prefix to outBuf.
@@ -211,7 +212,7 @@ func executeShellSessionTool(args map[string]interface{}) (*ToolResponse, error)
 			// poll
 		}
 	}
-DONE:
+    // Post-loop finalization: combine remaining accumulator and process output
     // Combine the main buffer and the accumulator's remaining content to get the full output.
     outBuf.WriteString(acc.String())
     // Extract cwd from the captured segment, removing the PWD line from output if present.
