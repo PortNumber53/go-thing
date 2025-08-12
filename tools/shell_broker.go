@@ -197,6 +197,7 @@ func (s *ShellSession) write(data []byte) error {
 
 func (s *ShellSession) readLoop(r io.Reader) {
 	br := bufio.NewReader(r)
+	buf := make([]byte, 4096)
 	for {
 		select {
 		case <-s.closed:
@@ -204,7 +205,6 @@ func (s *ShellSession) readLoop(r io.Reader) {
 		default:
 		}
 		// Read whatever is available; do not block forever on long lines
-		buf := make([]byte, 4096)
 		n, err := br.Read(buf)
 		if n > 0 {
 			payload := make([]byte, n)
