@@ -220,22 +220,6 @@ ReadLoop:
     seg, cwd := extractCwdAndTrim(seg, pwdMark)
     if cwdDetected == "" && cwd != "" { cwdDetected = cwd }
     out := strings.TrimSpace(seg)
-    if out == "" && seenStart {
-        // Fallback: if we saw the start but not end, return what we have accumulated
-		cur := acc.String()
-		var pre string
-		if i := strings.Index(cur, "\n"+endMark); i >= 0 {
-			pre = cur[:i]
-		} else if i := strings.Index(cur, endMark); i >= 0 {
-			pre = cur[:i]
-		} else {
-			pre = cur
-		}
-		// Try to parse PWD from the fallback segment too
-		pre, cwd2 := extractCwdAndTrim(pre, pwdMark)
-		if cwdDetected == "" && cwd2 != "" { cwdDetected = cwd2 }
-		out = strings.TrimSpace(pre)
-	}
 	if cwdDetected == "" { cwdDetected = sess.Workdir }
 	return &ToolResponse{Success: true, Data: map[string]interface{}{
 		"id":      idVal,
