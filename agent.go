@@ -159,48 +159,58 @@ var tools = map[string]Tool{}
 // summarizeToolResponse moved to utility_misc.go
 // maskToken moved to utility_misc.go
 
+// Cached allowlist of origins for WebSocket upgrades
+var (
+	allowedOrigins     map[string]struct{}
+	allowedOriginsOnce sync.Once
+)
+
 // WebSocket upgrader for shell streaming
 // Secure origin check: allow only configured origins or same-origin by default.
 var wsUpgrader = websocket.Upgrader{
-    CheckOrigin: isAllowedWSOrigin,
+	CheckOrigin: isAllowedWSOrigin,
 }
 
 // isAllowedWSOrigin restricts WebSocket connections to trusted origins to prevent CSWSH.
 // Allowed origins can be configured via [default] ALLOWED_ORIGINS in the INI config (comma-separated full origins).
 // If not configured, we allow only same-origin based on the request's Host and scheme.
 func isAllowedWSOrigin(r *http.Request) bool {
-    origin := r.Header.Get("Origin")
-    if strings.TrimSpace(origin) == "" {
-        return false
-    }
-    if _, err := url.Parse(origin); err != nil {
-        return false
-    }
+	origin := r.Header.Get("Origin")
+	if strings.TrimSpace(origin) == "" {
+		return false
+	}
+	if _, err := url.Parse(origin); err != nil {
+		return false
+	}
 
-    // Try config-driven allowlist first
-    if cfg, err := utility.LoadConfig(); err == nil && cfg != nil {
-        if raw := strings.TrimSpace(cfg["ALLOWED_ORIGINS"]); raw != "" {
-            for _, item := range strings.Split(raw, ",") {
-                a := strings.TrimSpace(item)
-                if a == "" {
-                    continue
-                }
-                if origin == a {
-                    return true
-                }
-            }
-            // Config present but no match -> deny
-            return false
-        }
-    }
+	// Parse and cache allowed origins on first run
+	allowedOriginsOnce.Do(func() {
+		allowedOrigins = make(map[string]struct{})
+		if cfg, err := utility.LoadConfig(); err == nil && cfg != nil {
+			if raw := strings.TrimSpace(cfg["ALLOWED_ORIGINS"]); raw != "" {
+				for _, item := range strings.Split(raw, ",") {
+					a := strings.TrimSpace(item)
+					if a != "" {
+						allowedOrigins[a] = struct{}{}
+					}
+				}
+			}
+		}
+	})
 
-    // Fallback: allow same-origin only
-    scheme := "http"
-    if r.TLS != nil {
-        scheme = "https"
-    }
-    sameOrigin := fmt.Sprintf("%s://%s", scheme, r.Host)
-    return origin == sameOrigin
+	// If an allowlist is configured, use it exclusively.
+	if len(allowedOrigins) > 0 {
+		_, ok := allowedOrigins[origin]
+		return ok
+	}
+
+	// Fallback: allow same-origin only
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	sameOrigin := fmt.Sprintf("%s://%s", scheme, r.Host)
+	return origin == sameOrigin
 }
 
 func main() {
