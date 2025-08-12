@@ -179,11 +179,11 @@ func isAllowedWSOrigin(r *http.Request) bool {
 	if strings.TrimSpace(origin) == "" {
 		return false
 	}
- ️	if u, err := url.Parse(origin); err != nil {
- 		return false
- 	} else if u.Scheme != "http" && u.Scheme != "https" {
- 		return false
- 	}
+	if u, err := url.Parse(origin); err != nil {
+		return false
+	} else if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
 
 	// Parse and cache allowed origins on first run
 	allowedOriginsOnce.Do(func() {
@@ -197,6 +197,8 @@ func isAllowedWSOrigin(r *http.Request) bool {
 					}
 				}
 			}
+		} else if err != nil {
+			log.Printf("[ShellWS] failed to load config for allowed origins: %v. Falling back to same-origin policy.", err)
 		}
 	})
 
