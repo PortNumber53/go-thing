@@ -157,6 +157,16 @@ func (s *ShellSession) Subscribe() chan []byte {
 	ch := make(chan []byte, 256)
 	s.subsMu.Lock()
 	defer s.subsMu.Unlock()
+
+	// If session is already closing, return a closed channel immediately
+	// to prevent new subscribers from attaching to a defunct session.
+	select {
+	case <-s.closed:
+		close(ch)
+		return ch
+	default:
+	}
+
 	s.subscribers[ch] = struct{}{}
 	return ch
 }
