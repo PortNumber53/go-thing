@@ -134,7 +134,8 @@ func executeShellSessionTool(args map[string]interface{}) (*ToolResponse, error)
 	)
 	sess.Enqueue([]byte(wrapped))
 
-	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	deadlineTimer := time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+	defer deadlineTimer.Stop()
 	var outBuf bytes.Buffer
 	var cwdDetected string
 	// Accumulator to handle sentinel split across reads
@@ -151,12 +152,9 @@ func executeShellSessionTool(args map[string]interface{}) (*ToolResponse, error)
 	}
 ReadLoop:
 	for {
-		if time.Now().After(deadline) {
-			break
-		}
 		select {
 		case data, ok := <-outCh:
-			if !ok { break }
+			if !ok { break ReadLoop }
 			// Append to accumulator and operate on the full buffer
 			acc.WriteString(normalize(data))
 			cur := acc.String()
@@ -195,30 +193,30 @@ ReadLoop:
 				break ReadLoop
 			}
 			// Not found yet; keep a small tail for upcoming endMark detection.
-            // To avoid losing data for large outputs, write the truncated prefix to outBuf.
-            tailKeep := len(endMark) + 512
-            if acc.Len() > tailKeep {
-                s := acc.String()
-                if len(s) > tailKeep {
-                    toWrite := s[:len(s)-tailKeep]
-                    tail := s[len(s)-tailKeep:]
-                    outBuf.WriteString(toWrite)
-                    acc.Reset()
-                    acc.WriteString(tail)
-                }
-            }
-		case <-time.After(50 * time.Millisecond):
-			// poll
+			// To avoid losing data for large outputs, write the truncated prefix to outBuf.
+			tailKeep := len(endMark) + 512
+			if acc.Len() > tailKeep {
+				s := acc.String()
+				if len(s) > tailKeep {
+					toWrite := s[:len(s)-tailKeep]
+					tail := s[len(s)-tailKeep:]
+					outBuf.WriteString(toWrite)
+					acc.Reset()
+					acc.WriteString(tail)
+				}
+			}
+		case <-deadlineTimer.C:
+			break ReadLoop
 		}
 	}
-    // Post-loop finalization: combine remaining accumulator and process output
-    // Combine the main buffer and the accumulator's remaining content to get the full output.
-    outBuf.WriteString(acc.String())
-    // Extract cwd from the captured segment, removing the PWD line from output if present.
-    seg := outBuf.String()
-    seg, cwd := extractCwdAndTrim(seg, pwdMark)
-    if cwdDetected == "" && cwd != "" { cwdDetected = cwd }
-    out := strings.TrimSpace(seg)
+	// Post-loop finalization: combine remaining accumulator and process output
+	// Combine the main buffer and the accumulator's remaining content to get the full output.
+	outBuf.WriteString(acc.String())
+	// Extract cwd from the captured segment, removing the PWD line from output if present.
+	seg := outBuf.String()
+	seg, cwd := extractCwdAndTrim(seg, pwdMark)
+	if cwdDetected == "" && cwd != "" { cwdDetected = cwd }
+	out := strings.TrimSpace(seg)
 	if cwdDetected == "" { cwdDetected = sess.Workdir }
 	return &ToolResponse{Success: true, Data: map[string]interface{}{
 		"id":      idVal,

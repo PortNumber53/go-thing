@@ -48,6 +48,7 @@ type ShellSession struct {
 	tty         io.ReadWriteCloser
 	inputQueue  chan []byte
 	subsMu      sync.Mutex
+	writeMu     sync.Mutex
 	subscribers map[chan []byte]struct{}
 	closed      chan struct{}
 	onceClose   sync.Once
@@ -187,6 +188,8 @@ func (s *ShellSession) run() {
 }
 
 func (s *ShellSession) write(data []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	// Avoid partial writes; add CR if writing single lines without newline
 	if len(data) > 0 {
 		if !bytes.HasSuffix(data, []byte("\n")) {
