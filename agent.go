@@ -297,6 +297,10 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 			return
 		}
+ 		if strings.TrimSpace(req.ID) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "session id cannot be empty"})
+			return
+		}
 		if _, err := toolsrv.GetShellBroker().CreateOrGet(req.ID, req.Subdir); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
