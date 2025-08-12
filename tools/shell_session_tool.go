@@ -178,7 +178,7 @@ ReadLoop:
 					// Keep acc bounded
 					if acc.Len() > 8192 {
 						s := acc.String()
-						if len(s) > 1024 { s = s[len(s)-1024:] }
+						s = s[len(s)-1024:]
 						acc.Reset(); acc.WriteString(s)
 					}
 					continue
