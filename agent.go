@@ -334,22 +334,24 @@ func main() {
 		done := make(chan struct{})
 		var once sync.Once
 		closeDone := func() { once.Do(func() { close(done) }) }
+		var writeMu sync.Mutex
 		go func() {
 			for {
 				select {
 				case data, ok := <-outCh:
 					if !ok {
-						// NOTE: gorilla/websocket forbids concurrent writes. This WriteMessage
-						// may race with writes from other goroutines (e.g., the reader loop below)
-						// unless all writes share a sync.Mutex. Consider introducing:
-						//   var writeMu sync.Mutex
-						// and guarding every conn.WriteMessage with writeMu.Lock()/Unlock().
+						// Serialize WebSocket writes with a shared mutex to avoid concurrent writer issues.
+						writeMu.Lock()
 						_ = conn.WriteMessage(websocket.TextMessage, []byte("[session closed]\n"))
+						writeMu.Unlock()
 						_ = conn.Close()
 						closeDone()
 						return
 					}
-					if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+					writeMu.Lock()
+					err := conn.WriteMessage(websocket.BinaryMessage, data)
+					writeMu.Unlock()
+					if err != nil {
 						log.Printf("[ShellWS %s] write error: %v", id, err)
 						_ = conn.Close()
 						closeDone()
@@ -381,13 +383,9 @@ func main() {
 			if mt == websocket.TextMessage || mt == websocket.BinaryMessage {
 				if !sess.Enqueue(msg) {
 					log.Printf("[ShellWS %s] input queue is full, closing connection.", id)
-					// NOTE: Serialize all WebSocket writes with a shared sync.Mutex to avoid
-					// concurrent writer panics/data corruption in gorilla/websocket.
-					// Example:
-					//   writeMu.Lock()
-					//   _ = conn.WriteMessage(...)
-					//   writeMu.Unlock()
+					writeMu.Lock()
 					_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "Input queue full"))
+					writeMu.Unlock()
 					break ReadLoop
 				}
 			}
