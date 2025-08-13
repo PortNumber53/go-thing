@@ -240,7 +240,7 @@ func (l *loginRateLimiter) cleanup() {
     // Rebuild user failure map with non-expired entries
     newUserFails := make(map[string]*userFail, len(snapUserFails))
     for user, fail := range snapUserFails {
-        if !(now.After(fail.lockUntil) && now.Sub(fail.last) > userFailExpiry) {
+        if !now.After(fail.lockUntil) || now.Sub(fail.last) <= userFailExpiry {
             newUserFails[user] = fail
         }
     }
