@@ -520,6 +520,9 @@ func main() {
     // Initialize session secret
     if iniErr == nil {
         if v := strings.TrimSpace(cfgIni.Section("default").Key("SESSION_SECRET").String()); v != "" {
+            if len(v) < 32 {
+                log.Printf("[Auth] WARNING: SESSION_SECRET is %d bytes long, which is less than the recommended 32 bytes for production.", len(v))
+            }
             sessionSecret = []byte(v)
         }
     }
