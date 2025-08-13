@@ -63,10 +63,13 @@ func emailRegex() *regexp.Regexp {
 // sessionSecret holds the HMAC key for signing session cookies
 var sessionSecret []byte
 
+// sessionDuration defines how long a session is valid
+const sessionDuration = 7 * 24 * time.Hour
+
 // setSessionCookie sets an HttpOnly cookie with a signed token for the user id.
 func setSessionCookie(c *gin.Context, userID int64) {
-    // 7 days expiry
-    exp := time.Now().Add(7 * 24 * time.Hour)
+    // session expiry
+    exp := time.Now().Add(sessionDuration)
     base := fmt.Sprintf("%d.%d", userID, exp.Unix())
     mac := hmac.New(sha256.New, sessionSecret)
     mac.Write([]byte(base))
