@@ -372,9 +372,7 @@ func main() {
         // generate ephemeral secret
         b := make([]byte, 32)
         if _, err := rand.Read(b); err != nil {
-            // fallback constant (not ideal, but prevents crash)
-            sessionSecret = []byte("dev-temp-secret")
-            log.Printf("[Auth] WARNING: failed to generate session secret: %v; using insecure default", err)
+            log.Fatalf("[Auth] CRITICAL: failed to generate a random session secret, cannot start: %v", err)
         } else {
             sessionSecret = b
             log.Printf("[Auth] Using ephemeral session secret; set SESSION_SECRET in config for persistence")
