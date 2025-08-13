@@ -96,9 +96,21 @@ export default function App() {
 
   async function logout() {
     try {
-      await fetch('/logout', { method: 'POST' })
-    } catch (_) {
-      // ignore
+      // Fetch CSRF token first
+      const csrfRes = await fetch('/csrf', { credentials: 'include' })
+      if (!csrfRes.ok) throw new Error('Failed to get CSRF token')
+      const { token } = await csrfRes.json()
+
+      await fetch('/logout', {
+        method: 'POST',
+        headers: {
+          'X-CSRF-Token': token,
+        },
+        credentials: 'include', // ensure cookies (incl. csrf_token) are sent
+      })
+    } catch (err) {
+      console.error('Logout failed:', err)
+      // Optionally show a toast; silent failure can be acceptable for logout
     } finally {
       setMe(null)
     }

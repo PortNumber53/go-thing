@@ -33,9 +33,25 @@ export default function LoginModal({ open, onClose, onSuccess }: LoginModalProps
     }
     setSubmitting(true)
     try {
+      // Fetch CSRF token first
+      const csrfRes = await fetch('/csrf', { credentials: 'include' })
+      if (!csrfRes.ok) {
+        setMsg(`Login failed: Could not get CSRF token (HTTP ${csrfRes.status})`)
+        return
+      }
+      const { token: csrfToken } = await csrfRes.json()
+      if (!csrfToken) {
+        setMsg('Login failed: Invalid CSRF token received.')
+        return
+      }
+
       const res = await fetch('/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+        },
+        credentials: 'include', // send cookies for double-submit check
         body: JSON.stringify({ username: e, password: p }),
       })
       const data: unknown = await res.json()
