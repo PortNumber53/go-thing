@@ -77,7 +77,7 @@ func validateCSRF(c *gin.Context) bool {
     // Same-origin check when Origin is present
     if origin := c.Request.Header.Get("Origin"); strings.TrimSpace(origin) != "" {
         scheme := "http"
-        if c.Request.TLS != nil || strings.EqualFold(c.Request.Header.Get("X-Forwarded-Proto"), "https") {
+        if isSecureRequest(c) {
             scheme = "https"
         }
         sameOrigin := fmt.Sprintf("%s://%s", scheme, c.Request.Host)
