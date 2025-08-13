@@ -23,8 +23,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"strconv"
-	"maps"
-
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/slack-go/slack"
@@ -217,40 +215,27 @@ func (l *loginRateLimiter) cleanup() {
     const ipExpiry = 24 * time.Hour
     const userFailExpiry = 30 * time.Minute // lockout 15m + 15m grace
 
-    // Snapshot current maps under lock
+    // Perform pruning under a single lock to avoid dropping concurrent updates.
     l.mu.Lock()
+    defer l.mu.Unlock()
+
     now := time.Now()
-    snapIPSeen := maps.Clone(l.ipSeen)
-    snapIP := maps.Clone(l.ip)
-    snapUserFails := maps.Clone(l.userFails)
-    l.mu.Unlock()
 
-    // Rebuild IP maps with non-expired entries without holding the lock
-    newIPs := make(map[string]*rate.Limiter, len(snapIP))
-    newIPSeen := make(map[string]time.Time, len(snapIPSeen))
-    for ip, seen := range snapIPSeen {
-        if now.Sub(seen) <= ipExpiry {
-            if lim, ok := snapIP[ip]; ok {
-                newIPs[ip] = lim
-                newIPSeen[ip] = seen
-            }
+    // Prune stale IP entries
+    for ip, seen := range l.ipSeen {
+        if now.Sub(seen) > ipExpiry {
+            delete(l.ip, ip)
+            delete(l.ipSeen, ip)
         }
     }
 
-    // Rebuild user failure map with non-expired entries
-    newUserFails := make(map[string]*userFail, len(snapUserFails))
-    for user, fail := range snapUserFails {
-        if !now.After(fail.lockUntil) || now.Sub(fail.last) <= userFailExpiry {
-            newUserFails[user] = fail
+    // Prune stale user failure entries
+    for user, fail := range l.userFails {
+        // Delete if not locked and last failure was sufficiently old
+        if now.After(fail.lockUntil) && now.Sub(fail.last) > userFailExpiry {
+            delete(l.userFails, user)
         }
     }
-
-    // Swap maps under lock
-    l.mu.Lock()
-    l.ip = newIPs
-    l.ipSeen = newIPSeen
-    l.userFails = newUserFails
-    l.mu.Unlock()
 }
 
 // isSecureRequest determines if the request is effectively HTTPS (directly or via proxy header)
