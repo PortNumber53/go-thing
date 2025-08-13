@@ -40,7 +40,7 @@ export default function LoginModal({ open, onClose, onSuccess }: LoginModalProps
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: e, password: p }),
       })
-      const data: unknown = await res.json().catch(() => ({}))
+      const data: unknown = await res.json()
       if (!res.ok) {
         setMsg((data as LoginError).error ?? `Login failed (HTTP ${res.status})`)
         return

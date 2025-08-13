@@ -41,7 +41,7 @@ export default function SignupModal({ open, onClose, onSuccess }: SignupModalPro
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: e, name: n, password: p }),
       })
-      const data: unknown = await res.json().catch(() => ({}))
+      const data: unknown = await res.json()
       if (!res.ok) {
         setMsg((data as SignupError).error ?? `Signup failed (HTTP ${res.status})`)
         return

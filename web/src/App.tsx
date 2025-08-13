@@ -7,6 +7,15 @@ marked.setOptions({ async: false })
 
 type Who = 'You' | 'Agent' | 'System'
 type Msg = { id: string; who: Who; text: string }
+type User = { id: number; username: string; name: string }
+
+function isUser(o: unknown): o is User {
+  return !!o &&
+    typeof o === 'object' &&
+    'id' in o && typeof (o as User).id === 'number' &&
+    'name' in o && typeof (o as User).name === 'string' &&
+    'username' in o && typeof (o as User).username === 'string'
+}
 
 export default function App() {
   const [messages, setMessages] = React.useState<Msg[]>([])
@@ -17,7 +26,7 @@ export default function App() {
   // Signup/Login modal visibility
   const [showSignup, setShowSignup] = React.useState(false)
   const [showLogin, setShowLogin] = React.useState(false)
-  const [me, setMe] = React.useState<{ id: number; username: string; name: string } | null>(null)
+  const [me, setMe] = React.useState<User | null>(null)
 
   React.useEffect(() => {
     autoResize()
@@ -37,14 +46,8 @@ export default function App() {
         const res = await fetch('/me', { signal: controller.signal })
         if (!res.ok) return
         const data: unknown = await res.json()
-        if (
-          data &&
-          typeof data === 'object' &&
-          'id' in data && typeof (data as any).id === 'number' &&
-          'name' in data && typeof (data as any).name === 'string' &&
-          'username' in data && typeof (data as any).username === 'string'
-        ) {
-          setMe(data as { id: number; username: string; name: string })
+        if (isUser(data)) {
+          setMe(data)
         }
       } catch (_) {
         /* ignore, including abort */

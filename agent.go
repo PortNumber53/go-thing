@@ -29,6 +29,7 @@ import (
 	"github.com/slack-go/slack"
 	"github.com/jackc/pgx/v5/pgconn"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/time/rate"
 	"gopkg.in/ini.v1"
 
 	toolsrv "go-thing/tools"
@@ -66,6 +67,87 @@ var sessionSecret []byte
 // sessionDuration defines how long a session is valid
 const sessionDuration = 7 * 24 * time.Hour
 
+// loginRateLimiter provides basic IP-based throttling and per-user lockouts for /login
+type loginRateLimiter struct {
+    mu        sync.Mutex
+    ip        map[string]*rate.Limiter
+    ipSeen    map[string]time.Time
+    userFails map[string]*userFail
+}
+
+type userFail struct {
+    count     int
+    lockUntil time.Time
+    last      time.Time
+}
+
+var lr = &loginRateLimiter{
+    ip:        make(map[string]*rate.Limiter),
+    ipSeen:    make(map[string]time.Time),
+    userFails: make(map[string]*userFail),
+}
+
+// getLimiter returns the IP limiter, creating one if needed.
+func (l *loginRateLimiter) getLimiter(ip string) *rate.Limiter {
+    l.mu.Lock()
+    defer l.mu.Unlock()
+    lim, ok := l.ip[ip]
+    if !ok {
+        // ~10 requests/minute with burst of 5
+        lim = rate.NewLimiter(rate.Every(6*time.Second), 5)
+        l.ip[ip] = lim
+    }
+    l.ipSeen[ip] = time.Now()
+    return lim
+}
+
+// isLocked returns remaining lockout if the user is locked.
+func (l *loginRateLimiter) isLocked(user string) (bool, time.Duration) {
+    l.mu.Lock()
+    defer l.mu.Unlock()
+    if st, ok := l.userFails[strings.ToLower(strings.TrimSpace(user))]; ok {
+        if time.Now().Before(st.lockUntil) {
+            return true, time.Until(st.lockUntil)
+        }
+    }
+    return false, 0
+}
+
+// recordFailure increments failure count and applies lockout on threshold.
+func (l *loginRateLimiter) recordFailure(user string) {
+    const threshold = 5
+    const lockDur = 15 * time.Minute
+    u := strings.ToLower(strings.TrimSpace(user))
+    l.mu.Lock()
+    defer l.mu.Unlock()
+    st := l.userFails[u]
+    if st == nil {
+        st = &userFail{}
+        l.userFails[u] = st
+    }
+    st.count++
+    st.last = time.Now()
+    if st.count >= threshold {
+        st.lockUntil = time.Now().Add(lockDur)
+    }
+}
+
+// recordSuccess clears failure state on successful login.
+func (l *loginRateLimiter) recordSuccess(user string) {
+    u := strings.ToLower(strings.TrimSpace(user))
+    l.mu.Lock()
+    defer l.mu.Unlock()
+    delete(l.userFails, u)
+}
+
+// isSecureRequest determines if the request is effectively HTTPS (directly or via proxy header)
+func isSecureRequest(c *gin.Context) bool {
+    if c.Request.TLS != nil {
+        return true
+    }
+    return strings.EqualFold(c.Request.Header.Get("X-Forwarded-Proto"), "https")
+}
+
 // setSessionCookie sets an HttpOnly cookie with a signed token for the user id.
 func setSessionCookie(c *gin.Context, userID int64) {
     // session expiry
@@ -84,9 +166,7 @@ func setSessionCookie(c *gin.Context, userID int64) {
         Expires:  exp,
     }
     // If request came over HTTPS (directly or via proxy header), set Secure
-    if c.Request.TLS != nil || strings.EqualFold(c.Request.Header.Get("X-Forwarded-Proto"), "https") {
-        cookie.Secure = true
-    }
+    if isSecureRequest(c) { cookie.Secure = true }
     http.SetCookie(c.Writer, cookie)
 }
 
@@ -102,9 +182,7 @@ func clearSessionCookie(c *gin.Context) {
         SameSite: http.SameSiteLaxMode,
     }
     // If request came over HTTPS (directly or via proxy header), set Secure
-    if c.Request.TLS != nil || strings.EqualFold(c.Request.Header.Get("X-Forwarded-Proto"), "https") {
-        cookie.Secure = true
-    }
+    if isSecureRequest(c) { cookie.Secure = true }
     http.SetCookie(c.Writer, cookie)
 }
 
@@ -317,62 +395,62 @@ func isAllowedWSOrigin(r *http.Request) bool {
 	})
 
 	// If an allowlist is configured, use it exclusively.
-	if len(allowedOrigins) > 0 {
-		_, ok := allowedOrigins[origin]
-		return ok
-	}
+    if len(allowedOrigins) > 0 {
+        _, ok := allowedOrigins[origin]
+        return ok
+    }
 
-	// Fallback: allow same-origin only
-	// NOTE: r.TLS indicates whether THIS hop used TLS. When running behind a
-	// reverse proxy that terminates TLS, r.TLS will be nil even if the client
-	// connected via HTTPS. In that case the Origin header may be "https://…" but
-	// the computed sameOrigin below would be "http://…", causing a false
-	// mismatch. Consider honoring standard proxy headers (e.g. X-Forwarded-Proto)
-	// or configuring Gin trusted proxies so scheme detection is proxy-aware.
-	// Example (pseudo):
-	//   proto := r.Header.Get("X-Forwarded-Proto")
-	//   if proto == "https" { scheme = "https" }
-scheme := "http"
-if r.Header.Get("X-Forwarded-Proto") == "https" || r.TLS != nil {
-	scheme = "https"
-}
-	sameOrigin := fmt.Sprintf("%s://%s", scheme, r.Host)
-	return origin == sameOrigin
+    // Fallback: allow same-origin only
+    // NOTE: r.TLS indicates whether THIS hop used TLS. When running behind a
+    // reverse proxy that terminates TLS, r.TLS will be nil even if the client
+    // connected via HTTPS. In that case the Origin header may be "https://…" but
+    // the computed sameOrigin below would be "http://…", causing a false
+    // mismatch. Consider honoring standard proxy headers (e.g. X-Forwarded-Proto)
+    // or configuring Gin trusted proxies so scheme detection is proxy-aware.
+    // Example (pseudo):
+    //   proto := r.Header.Get("X-Forwarded-Proto")
+    //   if proto == "https" { scheme = "https" }
+    scheme := "http"
+    if r.Header.Get("X-Forwarded-Proto") == "https" || r.TLS != nil {
+        scheme = "https"
+    }
+    sameOrigin := fmt.Sprintf("%s://%s", scheme, r.Host)
+    return origin == sameOrigin
 }
 
 func main() {
-	// Setup logging
-	f, err := logging.Setup()
-	if err != nil {
-		log.Printf("[Startup] Failed to setup logging: %v", err)
-	} else if f != nil {
-		defer f.Close()
-	}
-	log.Printf("[Startup] Starting go-thing agent")
+    // Setup logging
+    f, err := logging.Setup()
+    if err != nil {
+        log.Printf("[Startup] Failed to setup logging: %v", err)
+    } else if f != nil {
+        defer f.Close()
+    }
+    log.Printf("[Startup] Starting go-thing agent")
 
-	// CLI migrate
-	if len(os.Args) > 1 && os.Args[1] == "migrate" {
-		os.Exit(runMigrateCLI(os.Args[2:]))
-		return
-	}
+    // CLI migrate
+    if len(os.Args) > 1 && os.Args[1] == "migrate" {
+        os.Exit(runMigrateCLI(os.Args[2:]))
+        return
+    }
 
-	// Load config and init DB/migrations if possible
-	cfgPath := os.ExpandEnv(config.ConfigFilePath)
-	cfgIni, iniErr := ini.Load(cfgPath)
-	if iniErr == nil {
-		if dbConn, pgcfg, derr := db.Init(cfgIni); derr != nil {
-			log.Printf("[Postgres] Init failed: %v (continuing without DB)", derr)
-		} else {
-			defer func() { _ = dbConn.Close() }()
-			if merr := db.RunMigrations(dbConn, pgcfg.MigrationsDir); merr != nil {
-				log.Printf("[Postgres] Migrations error: %v", merr)
-			} else {
-				log.Printf("[Postgres] Migrations applied from %s", pgcfg.MigrationsDir)
-			}
-		}
-	} else {
-		log.Printf("[Config] Load failed (%v); continuing with defaults", iniErr)
-	}
+    // Load config and init DB/migrations if possible
+    cfgPath := os.ExpandEnv(config.ConfigFilePath)
+    cfgIni, iniErr := ini.Load(cfgPath)
+    if iniErr == nil {
+        if dbConn, pgcfg, derr := db.Init(cfgIni); derr != nil {
+            log.Printf("[Postgres] Init failed: %v (continuing without DB)", derr)
+        } else {
+            defer func() { _ = dbConn.Close() }()
+            if merr := db.RunMigrations(dbConn, pgcfg.MigrationsDir); merr != nil {
+                log.Printf("[Postgres] Migrations error: %v", merr)
+            } else {
+                log.Printf("[Postgres] Migrations applied from %s", pgcfg.MigrationsDir)
+            }
+        }
+    } else {
+        log.Printf("[Config] Load failed (%v); continuing with defaults", iniErr)
+    }
 
     // Initialize session secret
     if iniErr == nil {
@@ -473,7 +551,7 @@ func main() {
         c.JSON(http.StatusOK, gin.H{"ok": true})
     })
 
-    // Login endpoint
+    // Login endpoint with basic rate limiting and lockouts
     r.POST("/login", func(c *gin.Context) {
         type loginReq struct {
             Username string `json:"username" binding:"required"`
@@ -484,10 +562,24 @@ func main() {
             c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
             return
         }
+        // IP-based throttling
+        ip := c.ClientIP()
+        if !lr.getLimiter(ip).Allow() {
+            // Avoid leaking whether the user exists; generic message
+            c.Header("Retry-After", "30")
+            c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many requests, slow down"})
+            return
+        }
         u := strings.TrimSpace(req.Username)
         p := req.Password
         if u == "" || p == "" {
             c.JSON(http.StatusBadRequest, gin.H{"error": "username and password are required"})
+            return
+        }
+        // Per-user temporary lockout on repeated failures
+        if locked, rem := lr.isLocked(u); locked {
+            c.Header("Retry-After", fmt.Sprintf("%d", int(rem.Seconds())))
+            c.JSON(http.StatusTooManyRequests, gin.H{"error": "account temporarily locked due to failed attempts"})
             return
         }
         dbc := db.Get()
@@ -501,6 +593,7 @@ func main() {
         err := dbc.QueryRow(q, u).Scan(&id, &username, &name, &hash)
         if err != nil {
             if err == sql.ErrNoRows {
+                lr.recordFailure(u)
                 c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid username or password"})
                 return
             }
@@ -509,9 +602,12 @@ func main() {
             return
         }
         if bcrypt.CompareHashAndPassword([]byte(hash), []byte(p)) != nil {
+            lr.recordFailure(u)
             c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid username or password"})
             return
         }
+        // Success: clear failure state
+        lr.recordSuccess(u)
         setSessionCookie(c, id)
         c.JSON(http.StatusOK, gin.H{"ok": true, "user": gin.H{"id": id, "username": username, "name": name}})
     })
