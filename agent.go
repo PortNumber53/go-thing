@@ -718,10 +718,6 @@ func main() {
         }
         u := strings.TrimSpace(req.Username)
         p := req.Password
-        if u == "" || p == "" {
-            c.JSON(http.StatusBadRequest, gin.H{"error": "username and password are required"})
-            return
-        }
         // Per-user temporary lockout on repeated failures
         if locked, rem := lr.isLocked(u); locked {
             c.Header("Retry-After", fmt.Sprintf("%d", int(rem.Seconds())))
