@@ -49,8 +49,9 @@ export default function SignupModal({ open, onClose, onSuccess }: SignupModalPro
       setMsg('Account created! You can now log in.')
       onSuccess?.()
       setTimeout(() => onClose(), 900)
-    } catch (err: any) {
-      setMsg(`Signup failed: ${err?.message ?? err}`)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      setMsg(`Signup failed: ${message}`)
     } finally {
       setSubmitting(false)
     }

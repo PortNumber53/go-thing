@@ -48,8 +48,9 @@ export default function LoginModal({ open, onClose, onSuccess }: LoginModalProps
       onSuccess((data as LoginSuccess).user)
       setMsg('Logged in!')
       setTimeout(() => onClose(), 500)
-    } catch (err: any) {
-      setMsg(`Login failed: ${err?.message ?? err}`)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      setMsg(`Login failed: ${message}`)
     } finally {
       setSubmitting(false)
     }

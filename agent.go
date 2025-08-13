@@ -117,8 +117,12 @@ func parseSession(r *http.Request) (int64, bool) {
     base := userStr + "." + expStr
     mac := hmac.New(sha256.New, sessionSecret)
     mac.Write([]byte(base))
-    expected := hex.EncodeToString(mac.Sum(nil))
-    if !hmac.Equal([]byte(sig), []byte(expected)) {
+    expectedMAC := mac.Sum(nil)
+    sigBytes, err := hex.DecodeString(sig)
+    if err != nil {
+        return 0, false
+    }
+    if !hmac.Equal(sigBytes, expectedMAC) {
         return 0, false
     }
     // Check expiry
@@ -155,7 +159,7 @@ func getOrCreateAnyThread() (int64, error) {
 	if err == nil {
 		return id, nil
 	}
-	if err != nil && err != sql.ErrNoRows {
+	if err != sql.ErrNoRows {
 		return 0, err
 	}
 	// No rows, create the first thread
@@ -376,10 +380,9 @@ func main() {
         b := make([]byte, 32)
         if _, err := rand.Read(b); err != nil {
             log.Fatalf("[Auth] CRITICAL: failed to generate a random session secret, cannot start: %v", err)
-        } else {
-            sessionSecret = b
-            log.Printf("[Auth] Using ephemeral session secret; set SESSION_SECRET in config for persistence")
         }
+        sessionSecret = b
+        log.Printf("[Auth] Using ephemeral session secret; set SESSION_SECRET in config for persistence")
     }
 
 	// Determine addresses
