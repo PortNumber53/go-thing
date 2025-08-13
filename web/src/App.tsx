@@ -37,7 +37,13 @@ export default function App() {
         const res = await fetch('/me', { signal: controller.signal })
         if (!res.ok) return
         const data: unknown = await res.json()
-        if (data && typeof (data as any).id === 'number') {
+        if (
+          data &&
+          typeof data === 'object' &&
+          'id' in data && typeof (data as any).id === 'number' &&
+          'name' in data && typeof (data as any).name === 'string' &&
+          'username' in data && typeof (data as any).username === 'string'
+        ) {
           setMe(data as { id: number; username: string; name: string })
         }
       } catch (_) {
