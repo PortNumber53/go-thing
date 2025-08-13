@@ -39,16 +39,18 @@ export default function App() {
 
   // Load session
   React.useEffect(() => {
+    const controller = new AbortController()
     ;(async () => {
       try {
-        const res = await fetch('/me')
+        const res = await fetch('/me', { signal: controller.signal })
         if (!res.ok) return
         const data = await res.json()
         if (data && typeof data.id === 'number') setMe({ id: data.id, username: data.username, name: data.name })
       } catch (_) {
-        /* ignore */
+        /* ignore, including abort */
       }
     })()
+    return () => controller.abort()
   }, [])
 
   function autoResize() {
