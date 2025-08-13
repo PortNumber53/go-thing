@@ -140,6 +140,32 @@ func (l *loginRateLimiter) recordSuccess(user string) {
     delete(l.userFails, u)
 }
 
+// cleanup prunes stale IP and user failure entries to bound memory usage.
+func (l *loginRateLimiter) cleanup() {
+    const ipExpiry = 24 * time.Hour
+    const userFailExpiry = 30 * time.Minute // lockout 15m + 15m grace
+
+    l.mu.Lock()
+    defer l.mu.Unlock()
+
+    now := time.Now()
+
+    // Remove old IP entries
+    for ip, seen := range l.ipSeen {
+        if now.Sub(seen) > ipExpiry {
+            delete(l.ip, ip)
+            delete(l.ipSeen, ip)
+        }
+    }
+
+    // Remove stale user failure entries (not locked and last failure long ago)
+    for user, fail := range l.userFails {
+        if now.After(fail.lockUntil) && now.Sub(fail.last) > userFailExpiry {
+            delete(l.userFails, user)
+        }
+    }
+}
+
 // isSecureRequest determines if the request is effectively HTTPS (directly or via proxy header)
 func isSecureRequest(c *gin.Context) bool {
     if c.Request.TLS != nil {
@@ -483,6 +509,21 @@ func main() {
 		log.Printf("[Tools] Starting tool server on %s", utility.GetToolsAddr())
 		if err := toolServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("[Tools] Tool server error: %v", err)
+		}
+	}()
+
+	// Periodic cleanup for login rate limiter to bound memory usage
+	cleanupStop := make(chan struct{})
+	cleanupTicker := time.NewTicker(10 * time.Minute)
+	go func() {
+		for {
+			select {
+			case <-cleanupTicker.C:
+				lr.cleanup()
+			case <-cleanupStop:
+				cleanupTicker.Stop()
+				return
+			}
 		}
 	}()
 
@@ -849,6 +890,8 @@ func main() {
 	}()
 	sig := <-quit
 	log.Printf("[Shutdown] Signal: %v", sig)
+	// Stop background cleanup ticker
+	close(cleanupStop)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = apiServer.Shutdown(ctx)
