@@ -1,5 +1,7 @@
 import React from 'react'
 import { marked } from 'marked'
+import LoginModal from './components/LoginModal'
+import SignupModal from './components/SignupModal'
 // Ensure marked.parse returns string (not Promise<string>)
 marked.setOptions({ async: false })
 
@@ -12,19 +14,9 @@ export default function App() {
   const [sending, setSending] = React.useState(false)
   const chatRef = React.useRef<HTMLDivElement | null>(null)
   const taRef = React.useRef<HTMLTextAreaElement | null>(null)
-  // Signup modal state
+  // Signup/Login modal visibility
   const [showSignup, setShowSignup] = React.useState(false)
-  const [suEmail, setSuEmail] = React.useState('')
-  const [suName, setSuName] = React.useState('')
-  const [suPass, setSuPass] = React.useState('')
-  const [suSubmitting, setSuSubmitting] = React.useState(false)
-  const [suMsg, setSuMsg] = React.useState<string | null>(null)
-  // Login/session state
   const [showLogin, setShowLogin] = React.useState(false)
-  const [liEmail, setLiEmail] = React.useState('')
-  const [liPass, setLiPass] = React.useState('')
-  const [liSubmitting, setLiSubmitting] = React.useState(false)
-  const [liMsg, setLiMsg] = React.useState<string | null>(null)
   const [me, setMe] = React.useState<{ id: number; username: string; name: string } | null>(null)
 
   React.useEffect(() => {
@@ -97,37 +89,7 @@ export default function App() {
     }
   }
 
-  async function login() {
-    const email = liEmail.trim()
-    const pass = liPass
-    setLiMsg(null)
-    if (!email || !pass) {
-      setLiMsg('Please enter email and password.')
-      return
-    }
-    setLiSubmitting(true)
-    try {
-      const res = await fetch('/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: email, password: pass }),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        setLiMsg(typeof data.error === 'string' ? data.error : `Login failed (HTTP ${res.status})`)
-        return
-      }
-      setMe(data.user)
-      setLiMsg('Logged in!')
-      setLiEmail('')
-      setLiPass('')
-      setTimeout(() => setShowLogin(false), 500)
-    } catch (e: any) {
-      setLiMsg(`Login failed: ${e?.message ?? e}`)
-    } finally {
-      setLiSubmitting(false)
-    }
-  }
+  // login handled in LoginModal; on success we setMe and close modal
 
   async function logout() {
     try {
@@ -146,40 +108,7 @@ export default function App() {
     }
   }
 
-  async function signup() {
-    const email = suEmail.trim()
-    const name = suName.trim()
-    const pass = suPass
-    setSuMsg(null)
-    if (!email || !name || !pass) {
-      setSuMsg('Please fill in all fields.')
-      return
-    }
-    setSuSubmitting(true)
-    try {
-      const res = await fetch('/signup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: email, name, password: pass }),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        setSuMsg(typeof data.error === 'string' ? data.error : `Signup failed (HTTP ${res.status})`)
-        return
-      }
-      setSuMsg('Account created! You can now log in.')
-      // simple reset
-      setSuEmail('')
-      setSuName('')
-      setSuPass('')
-      // Close modal after short delay
-      setTimeout(() => setShowSignup(false), 900)
-    } catch (e: any) {
-      setSuMsg(`Signup failed: ${e?.message ?? e}`)
-    } finally {
-      setSuSubmitting(false)
-    }
-  }
+  // signup handled in SignupModal; on success we may show a toast or just close
 
   return (
     <div className="chat-container">
@@ -238,59 +167,9 @@ export default function App() {
         </div>
       </div>
 
-      {showSignup && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Sign up">
-          <div className="modal">
-            <div className="modal-header">
-              <div className="modal-title">Create your account</div>
-              <button className="icon" onClick={() => setShowSignup(false)} aria-label="Close">×</button>
-            </div>
-            <div className="modal-body">
-              <label>
-                Email
-                <input type="email" value={suEmail} onChange={(e) => setSuEmail(e.target.value)} placeholder="you@example.com" />
-              </label>
-              <label>
-                Name
-                <input type="text" value={suName} onChange={(e) => setSuName(e.target.value)} placeholder="Your name" />
-              </label>
-              <label>
-                Password
-                <input type="password" value={suPass} onChange={(e) => setSuPass(e.target.value)} placeholder="••••••••" />
-              </label>
-              {suMsg && <div className="system-msg" style={{ marginTop: 8 }}>{suMsg}</div>}
-            </div>
-            <div className="modal-footer">
-              <button className="btn" onClick={signup} disabled={suSubmitting}>Create account</button>
-            </div>
-          </div>
-        </div>
-      )}
+      <SignupModal open={showSignup} onClose={() => setShowSignup(false)} />
 
-      {showLogin && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Log in">
-          <div className="modal">
-            <div className="modal-header">
-              <div className="modal-title">Log in</div>
-              <button className="icon" onClick={() => setShowLogin(false)} aria-label="Close">×</button>
-            </div>
-            <div className="modal-body">
-              <label>
-                Email
-                <input type="email" value={liEmail} onChange={(e) => setLiEmail(e.target.value)} placeholder="you@example.com" />
-              </label>
-              <label>
-                Password
-                <input type="password" value={liPass} onChange={(e) => setLiPass(e.target.value)} placeholder="••••••••" />
-              </label>
-              {liMsg && <div className="system-msg" style={{ marginTop: 8 }}>{liMsg}</div>}
-            </div>
-            <div className="modal-footer">
-              <button className="btn" onClick={login} disabled={liSubmitting}>Log in</button>
-            </div>
-          </div>
-        </div>
-      )}
+      <LoginModal open={showLogin} onClose={() => setShowLogin(false)} onSuccess={(user) => { setMe(user) }} />
     </div>
   )
 }
