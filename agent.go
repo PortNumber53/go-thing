@@ -87,6 +87,31 @@ var lr = &loginRateLimiter{
     userFails: make(map[string]*userFail),
 }
 
+// dummyBcryptCompare performs a bcrypt comparison against a dummy hash to
+// normalize timing between "user not found" and "wrong password" cases.
+// The dummy hash is generated once at runtime to avoid shipping a hardcoded hash.
+var (
+    dummyHashOnce sync.Once
+    dummyHash     []byte
+)
+
+func dummyBcryptCompare(password string) {
+    dummyHashOnce.Do(func() {
+        // Generate a hash once; cost matches default user hashing cost.
+        h, err := bcrypt.GenerateFromPassword([]byte("dummy-password-for-timing-only"), bcrypt.DefaultCost)
+        if err == nil {
+            dummyHash = h
+        }
+    })
+    if len(dummyHash) > 0 {
+        _ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))
+    } else {
+        // Extremely unlikely path: if hash generation failed, add a tiny sleep to avoid
+        // creating a clear timing discrepancy.
+        time.Sleep(10 * time.Millisecond)
+    }
+}
+
 // getLimiter returns the IP limiter, creating one if needed.
 func (l *loginRateLimiter) getLimiter(ip string) *rate.Limiter {
     l.mu.Lock()
@@ -634,6 +659,8 @@ func main() {
         err := dbc.QueryRow(q, u).Scan(&id, &username, &name, &hash)
         if err != nil {
             if err == sql.ErrNoRows {
+                // Normalize timing between unknown user and wrong password cases.
+                dummyBcryptCompare(p)
                 lr.recordFailure(u)
                 c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid username or password"})
                 return
