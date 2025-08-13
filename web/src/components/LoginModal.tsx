@@ -1,7 +1,5 @@
 import React from 'react'
-
-type User = { id: number; username: string; name: string }
- type LoginSuccess = { user: User }
+import { User, LoginSuccess, isLoginSuccess } from '../types'
  type LoginError = { error?: string }
  
 interface LoginModalProps {
@@ -49,18 +47,8 @@ export default function LoginModal({ open, onClose, onSuccess }: LoginModalProps
         setMsg(err)
         return
       }
-      const maybe = data as any
-      if (
-        maybe &&
-        typeof maybe === 'object' &&
-        'user' in maybe &&
-        maybe.user &&
-        typeof maybe.user === 'object' &&
-        typeof maybe.user.id === 'number' &&
-        typeof maybe.user.username === 'string' &&
-        typeof maybe.user.name === 'string'
-      ) {
-        onSuccess(maybe.user as User)
+      if (isLoginSuccess(data)) {
+        onSuccess(data.user)
         setMsg('Logged in!')
         setTimeout(() => onClose(), 500)
       } else {

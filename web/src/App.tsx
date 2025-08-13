@@ -2,20 +2,12 @@ import React from 'react'
 import { marked } from 'marked'
 import LoginModal from './components/LoginModal'
 import SignupModal from './components/SignupModal'
+import { User, isUser } from './types'
 // Ensure marked.parse returns string (not Promise<string>)
 marked.setOptions({ async: false })
 
 type Who = 'You' | 'Agent' | 'System'
 type Msg = { id: string; who: Who; text: string }
-type User = { id: number; username: string; name: string }
-
-function isUser(o: unknown): o is User {
-  return !!o &&
-    typeof o === 'object' &&
-    'id' in o && typeof (o as User).id === 'number' &&
-    'name' in o && typeof (o as User).name === 'string' &&
-    'username' in o && typeof (o as User).username === 'string'
-}
 
 export default function App() {
   const [messages, setMessages] = React.useState<Msg[]>([])
