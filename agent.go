@@ -366,8 +366,8 @@ func main() {
 	}
 
     // Initialize session secret
-    if cfg, err := utility.LoadConfig(); err == nil {
-        if v := strings.TrimSpace(cfg["SESSION_SECRET"]); v != "" {
+    if iniErr == nil {
+        if v := strings.TrimSpace(cfgIni.Section("default").Key("SESSION_SECRET").String()); v != "" {
             sessionSecret = []byte(v)
         }
     }
