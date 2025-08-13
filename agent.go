@@ -95,16 +95,7 @@ func validateCSRF(c *gin.Context) bool {
         return false
     }
     // Constant-time compare
-    hb := []byte(headerTok)
-    cb := []byte(ck.Value)
-    if len(hb) != len(cb) {
-        return false
-    }
-    var acc byte
-    for i := range hb {
-        acc |= hb[i] ^ cb[i]
-    }
-    return acc == 0
+    return hmac.Equal([]byte(headerTok), []byte(ck.Value))
 }
 
 // emailRegex caches a simple email validation regex.
