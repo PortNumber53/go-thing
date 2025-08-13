@@ -673,7 +673,10 @@ func main() {
         err := dbc.QueryRow(q, u).Scan(&id, &username, &name, &hash)
         if err != nil {
             if err == sql.ErrNoRows {
-                // Normalize timing between unknown user and wrong password cases.
+                // To mitigate timing attacks that attempt to enumerate valid usernames,
+                // perform a dummy bcrypt comparison even when the user does not exist.
+                // This makes the response time similar to the case of an existing user
+                // with an incorrect password. See dummyBcryptCompare for details.
                 dummyBcryptCompare(p)
                 lr.recordFailure(u)
                 c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid username or password"})
