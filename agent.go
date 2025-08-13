@@ -99,17 +99,13 @@ func dummyBcryptCompare(password string) {
     dummyHashOnce.Do(func() {
         // Generate a hash once; cost matches default user hashing cost.
         h, err := bcrypt.GenerateFromPassword([]byte("dummy-password-for-timing-only"), bcrypt.DefaultCost)
-        if err == nil {
-            dummyHash = h
+        if err != nil {
+            log.Fatalf("[Auth] CRITICAL: failed to generate dummy bcrypt hash for timing attack mitigation: %v", err)
         }
+        dummyHash = h
     })
-    if len(dummyHash) > 0 {
-        _ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))
-    } else {
-        // Extremely unlikely path: if hash generation failed, add a tiny sleep to avoid
-        // creating a clear timing discrepancy.
-        time.Sleep(10 * time.Millisecond)
-    }
+    // The dummyHash is guaranteed to be non-empty here due to log.Fatalf on error.
+    _ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))
 }
 
 // getLimiter returns the IP limiter, creating one if needed.
@@ -170,25 +166,43 @@ func (l *loginRateLimiter) cleanup() {
     const ipExpiry = 24 * time.Hour
     const userFailExpiry = 30 * time.Minute // lockout 15m + 15m grace
 
+    // Snapshot current maps under lock
     l.mu.Lock()
-    defer l.mu.Unlock()
-
     now := time.Now()
+    snapIPSeen := make(map[string]time.Time, len(l.ipSeen))
+    for k, v := range l.ipSeen { snapIPSeen[k] = v }
+    snapIP := make(map[string]*rate.Limiter, len(l.ip))
+    for k, v := range l.ip { snapIP[k] = v }
+    snapUserFails := make(map[string]*userFail, len(l.userFails))
+    for k, v := range l.userFails { snapUserFails[k] = v }
+    l.mu.Unlock()
 
-    // Remove old IP entries
-    for ip, seen := range l.ipSeen {
-        if now.Sub(seen) > ipExpiry {
-            delete(l.ip, ip)
-            delete(l.ipSeen, ip)
+    // Rebuild IP maps with non-expired entries without holding the lock
+    newIPs := make(map[string]*rate.Limiter, len(snapIP))
+    newIPSeen := make(map[string]time.Time, len(snapIPSeen))
+    for ip, seen := range snapIPSeen {
+        if now.Sub(seen) <= ipExpiry {
+            if lim, ok := snapIP[ip]; ok {
+                newIPs[ip] = lim
+                newIPSeen[ip] = seen
+            }
         }
     }
 
-    // Remove stale user failure entries (not locked and last failure long ago)
-    for user, fail := range l.userFails {
-        if now.After(fail.lockUntil) && now.Sub(fail.last) > userFailExpiry {
-            delete(l.userFails, user)
+    // Rebuild user failure map with non-expired entries
+    newUserFails := make(map[string]*userFail, len(snapUserFails))
+    for user, fail := range snapUserFails {
+        if !(now.After(fail.lockUntil) && now.Sub(fail.last) > userFailExpiry) {
+            newUserFails[user] = fail
         }
     }
+
+    // Swap maps under lock
+    l.mu.Lock()
+    l.ip = newIPs
+    l.ipSeen = newIPSeen
+    l.userFails = newUserFails
+    l.mu.Unlock()
 }
 
 // isSecureRequest determines if the request is effectively HTTPS (directly or via proxy header)
