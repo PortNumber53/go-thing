@@ -15,5 +15,10 @@ export function isUser(o: unknown): o is User {
 }
 
 export function isLoginSuccess(d: unknown): d is LoginSuccess {
-  return !!d && typeof d === 'object' && 'user' in (d as any) && isUser((d as any).user)
+  return (
+    typeof d === 'object' &&
+    d !== null &&
+    'user' in d &&
+    isUser((d as { user: unknown }).user)
+  );
 }
