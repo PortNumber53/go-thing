@@ -3,11 +3,15 @@ export type User = { id: number; username: string; name: string }
 export type LoginSuccess = { user: User }
 
 export function isUser(o: unknown): o is User {
-  return !!o &&
-    typeof o === 'object' &&
-    'id' in (o as any) && typeof (o as any).id === 'number' &&
-    'name' in (o as any) && typeof (o as any).name === 'string' &&
-    'username' in (o as any) && typeof (o as any).username === 'string'
+  if (typeof o !== 'object' || o === null) {
+    return false;
+  }
+  const obj = o as Record<string, unknown>;
+  return (
+    typeof obj.id === 'number' &&
+    typeof obj.name === 'string' &&
+    typeof obj.username === 'string'
+  );
 }
 
 export function isLoginSuccess(d: unknown): d is LoginSuccess {
