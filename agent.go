@@ -23,6 +23,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"strconv"
+	"maps"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -45,6 +46,65 @@ type ToolResponse struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data,omitempty"`
 	Error   string      `json:"error,omitempty"`
+}
+
+// newCSRFToken generates a random token (hex) for CSRF protection
+func newCSRFToken() (string, error) {
+    b := make([]byte, 32)
+    if _, err := rand.Read(b); err != nil {
+        return "", err
+    }
+    return hex.EncodeToString(b), nil
+}
+
+// setCSRFCookie sets the CSRF cookie. We also return the token to the client via JSON from /csrf
+func setCSRFCookie(c *gin.Context, token string) {
+    ck := &http.Cookie{
+        Name:     "csrf_token",
+        Value:    token,
+        Path:     "/",
+        // HttpOnly true is acceptable because clients obtain the token from GET /csrf response body
+        HttpOnly: true,
+        SameSite: http.SameSiteStrictMode,
+        // Session cookie is fine; rotate by calling /csrf as needed
+    }
+    if isSecureRequest(c) { ck.Secure = true }
+    http.SetCookie(c.Writer, ck)
+}
+
+// validateCSRF verifies the Origin/Referer (if present) and double-submit cookie/header token
+func validateCSRF(c *gin.Context) bool {
+    // Same-origin check when Origin is present
+    if origin := c.Request.Header.Get("Origin"); strings.TrimSpace(origin) != "" {
+        scheme := "http"
+        if c.Request.TLS != nil || strings.EqualFold(c.Request.Header.Get("X-Forwarded-Proto"), "https") {
+            scheme = "https"
+        }
+        sameOrigin := fmt.Sprintf("%s://%s", scheme, c.Request.Host)
+        if origin != sameOrigin {
+            return false
+        }
+    }
+    // Double submit: header must equal cookie
+    headerTok := c.Request.Header.Get("X-CSRF-Token")
+    if strings.TrimSpace(headerTok) == "" {
+        return false
+    }
+    ck, err := c.Request.Cookie("csrf_token")
+    if err != nil || ck == nil || strings.TrimSpace(ck.Value) == "" {
+        return false
+    }
+    // Constant-time compare
+    hb := []byte(headerTok)
+    cb := []byte(ck.Value)
+    if len(hb) != len(cb) {
+        return false
+    }
+    var acc byte
+    for i := range hb {
+        acc |= hb[i] ^ cb[i]
+    }
+    return acc == 0
 }
 
 // emailRegex caches a simple email validation regex.
@@ -169,12 +229,9 @@ func (l *loginRateLimiter) cleanup() {
     // Snapshot current maps under lock
     l.mu.Lock()
     now := time.Now()
-    snapIPSeen := make(map[string]time.Time, len(l.ipSeen))
-    for k, v := range l.ipSeen { snapIPSeen[k] = v }
-    snapIP := make(map[string]*rate.Limiter, len(l.ip))
-    for k, v := range l.ip { snapIP[k] = v }
-    snapUserFails := make(map[string]*userFail, len(l.userFails))
-    for k, v := range l.userFails { snapUserFails[k] = v }
+    snapIPSeen := maps.Clone(l.ipSeen)
+    snapIP := maps.Clone(l.ip)
+    snapUserFails := maps.Clone(l.userFails)
     l.mu.Unlock()
 
     // Rebuild IP maps with non-expired entries without holding the lock
@@ -574,6 +631,17 @@ func main() {
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "go-thing agent API"})
 	})
+    // CSRF token issuer. Returns {token} and sets csrf_token cookie.
+    r.GET("/csrf", func(c *gin.Context) {
+        tok, err := newCSRFToken()
+        if err != nil {
+            log.Printf("[CSRF] token gen error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+            return
+        }
+        setCSRFCookie(c, tok)
+        c.JSON(http.StatusOK, gin.H{"token": tok})
+    })
     // Sign up endpoint
     r.POST("/signup", func(c *gin.Context) {
         type signupReq struct {
@@ -634,8 +702,12 @@ func main() {
         c.JSON(http.StatusOK, gin.H{"ok": true})
     })
 
-    // Login endpoint with basic rate limiting and lockouts
+    // Login endpoint with basic rate limiting and lockouts (CSRF protected)
     r.POST("/login", func(c *gin.Context) {
+        if !validateCSRF(c) {
+            c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+            return
+        }
         type loginReq struct {
             Username string `json:"username" binding:"required"`
             Password string `json:"password" binding:"required"`
@@ -700,8 +772,12 @@ func main() {
         c.JSON(http.StatusOK, gin.H{"ok": true, "user": gin.H{"id": id, "username": username, "name": name}})
     })
 
-    // Logout endpoint
+    // Logout endpoint (CSRF protected)
     r.POST("/logout", func(c *gin.Context) {
+        if !validateCSRF(c) {
+            c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+            return
+        }
         clearSessionCookie(c)
         c.JSON(http.StatusOK, gin.H{"ok": true})
     })
