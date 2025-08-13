@@ -19,6 +19,13 @@ export default function App() {
   const [suPass, setSuPass] = React.useState('')
   const [suSubmitting, setSuSubmitting] = React.useState(false)
   const [suMsg, setSuMsg] = React.useState<string | null>(null)
+  // Login/session state
+  const [showLogin, setShowLogin] = React.useState(false)
+  const [liEmail, setLiEmail] = React.useState('')
+  const [liPass, setLiPass] = React.useState('')
+  const [liSubmitting, setLiSubmitting] = React.useState(false)
+  const [liMsg, setLiMsg] = React.useState<string | null>(null)
+  const [me, setMe] = React.useState<{ id: number; username: string; name: string } | null>(null)
 
   React.useEffect(() => {
     autoResize()
@@ -29,6 +36,20 @@ export default function App() {
       chatRef.current.scrollTop = chatRef.current.scrollHeight
     }
   }, [messages, sending])
+
+  // Load session
+  React.useEffect(() => {
+    ;(async () => {
+      try {
+        const res = await fetch('/me')
+        if (!res.ok) return
+        const data = await res.json()
+        if (data && typeof data.id === 'number') setMe({ id: data.id, username: data.username, name: data.name })
+      } catch (_) {
+        /* ignore */
+      }
+    })()
+  }, [])
 
   function autoResize() {
     const el = taRef.current
@@ -71,6 +92,48 @@ export default function App() {
     } finally {
       setSending(false)
       autoResize()
+    }
+  }
+
+  async function login() {
+    const email = liEmail.trim()
+    const pass = liPass
+    setLiMsg(null)
+    if (!email || !pass) {
+      setLiMsg('Please enter email and password.')
+      return
+    }
+    setLiSubmitting(true)
+    try {
+      const res = await fetch('/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: email, password: pass }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setLiMsg(typeof data.error === 'string' ? data.error : `Login failed (HTTP ${res.status})`)
+        return
+      }
+      setMe(data.user)
+      setLiMsg('Logged in!')
+      setLiEmail('')
+      setLiPass('')
+      setTimeout(() => setShowLogin(false), 500)
+    } catch (e: any) {
+      setLiMsg(`Login failed: ${e?.message ?? e}`)
+    } finally {
+      setLiSubmitting(false)
+    }
+  }
+
+  async function logout() {
+    try {
+      await fetch('/logout', { method: 'POST' })
+    } catch (_) {
+      // ignore
+    } finally {
+      setMe(null)
     }
   }
 
@@ -122,8 +185,17 @@ export default function App() {
         <div className="nav">
           <div className="brand">AI Agent Chat</div>
           <nav className="actions">
-            <button className="link" type="button" onClick={() => setShowSignup(true)}>Sign Up</button>
-            <button className="link" type="button" onClick={() => alert('Login coming soon')}>Log In</button>
+            {me ? (
+              <>
+                <span className="user">Hello, {me.name}</span>
+                <button className="link" type="button" onClick={logout}>Log Out</button>
+              </>
+            ) : (
+              <>
+                <button className="link" type="button" onClick={() => setShowSignup(true)}>Sign Up</button>
+                <button className="link" type="button" onClick={() => setShowLogin(true)}>Log In</button>
+              </>
+            )}
           </nav>
         </div>
       </header>
@@ -188,6 +260,31 @@ export default function App() {
             </div>
             <div className="modal-footer">
               <button className="btn" onClick={signup} disabled={suSubmitting}>Create account</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showLogin && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Log in">
+          <div className="modal">
+            <div className="modal-header">
+              <div className="modal-title">Log in</div>
+              <button className="icon" onClick={() => setShowLogin(false)} aria-label="Close">×</button>
+            </div>
+            <div className="modal-body">
+              <label>
+                Email
+                <input type="email" value={liEmail} onChange={(e) => setLiEmail(e.target.value)} placeholder="you@example.com" />
+              </label>
+              <label>
+                Password
+                <input type="password" value={liPass} onChange={(e) => setLiPass(e.target.value)} placeholder="••••••••" />
+              </label>
+              {liMsg && <div className="system-msg" style={{ marginTop: 8 }}>{liMsg}</div>}
+            </div>
+            <div className="modal-footer">
+              <button className="btn" onClick={login} disabled={liSubmitting}>Log in</button>
             </div>
           </div>
         </div>

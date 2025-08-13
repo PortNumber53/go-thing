@@ -18,6 +18,11 @@ import (
 	"syscall"
 	"time"
 	"regexp"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/rand"
+	"encoding/hex"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -53,6 +58,76 @@ func emailRegex() *regexp.Regexp {
 		emailRegexCompiled = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 	})
 	return emailRegexCompiled
+}
+
+// sessionSecret holds the HMAC key for signing session cookies
+var sessionSecret []byte
+
+// setSessionCookie sets an HttpOnly cookie with a signed token for the user id.
+func setSessionCookie(c *gin.Context, userID int64) {
+    // 7 days expiry
+    exp := time.Now().Add(7 * 24 * time.Hour)
+    base := fmt.Sprintf("%d.%d", userID, exp.Unix())
+    mac := hmac.New(sha256.New, sessionSecret)
+    mac.Write([]byte(base))
+    sig := hex.EncodeToString(mac.Sum(nil))
+    token := base + "." + sig
+    cookie := &http.Cookie{
+        Name:     "session",
+        Value:    token,
+        Path:     "/",
+        HttpOnly: true,
+        SameSite: http.SameSiteLaxMode,
+        Expires:  exp,
+    }
+    // If request came over HTTPS (directly or via proxy header), set Secure
+    if c.Request.TLS != nil || strings.EqualFold(c.Request.Header.Get("X-Forwarded-Proto"), "https") {
+        cookie.Secure = true
+    }
+    http.SetCookie(c.Writer, cookie)
+}
+
+// clearSessionCookie expires the session cookie
+func clearSessionCookie(c *gin.Context) {
+    http.SetCookie(c.Writer, &http.Cookie{
+        Name:     "session",
+        Value:    "",
+        Path:     "/",
+        Expires:  time.Unix(0, 0),
+        MaxAge:   -1,
+        HttpOnly: true,
+        SameSite: http.SameSiteLaxMode,
+    })
+}
+
+// parseSession verifies the cookie and returns userID if valid
+func parseSession(r *http.Request) (int64, bool) {
+    ck, err := r.Cookie("session")
+    if err != nil || ck == nil || strings.TrimSpace(ck.Value) == "" {
+        return 0, false
+    }
+    parts := strings.Split(ck.Value, ".")
+    if len(parts) != 3 {
+        return 0, false
+    }
+    userStr, expStr, sig := parts[0], parts[1], parts[2]
+    base := userStr + "." + expStr
+    mac := hmac.New(sha256.New, sessionSecret)
+    mac.Write([]byte(base))
+    expected := hex.EncodeToString(mac.Sum(nil))
+    if !hmac.Equal([]byte(sig), []byte(expected)) {
+        return 0, false
+    }
+    // Check expiry
+    expUnix, err := strconv.ParseInt(expStr, 10, 64)
+    if err != nil || time.Now().After(time.Unix(expUnix, 0)) {
+        return 0, false
+    }
+    uid, err := strconv.ParseInt(userStr, 10, 64)
+    if err != nil {
+        return 0, false
+    }
+    return uid, true
 }
 
 // isUniqueViolation returns true when err is a Postgres unique constraint violation (SQLSTATE 23505).
@@ -287,6 +362,25 @@ func main() {
 		log.Printf("[Config] Load failed (%v); continuing with defaults", iniErr)
 	}
 
+    // Initialize session secret
+    if cfg, err := utility.LoadConfig(); err == nil {
+        if v := strings.TrimSpace(cfg["SESSION_SECRET"]); v != "" {
+            sessionSecret = []byte(v)
+        }
+    }
+    if len(sessionSecret) == 0 {
+        // generate ephemeral secret
+        b := make([]byte, 32)
+        if _, err := rand.Read(b); err != nil {
+            // fallback constant (not ideal, but prevents crash)
+            sessionSecret = []byte("dev-temp-secret")
+            log.Printf("[Auth] WARNING: failed to generate session secret: %v; using insecure default", err)
+        } else {
+            sessionSecret = b
+            log.Printf("[Auth] Using ephemeral session secret; set SESSION_SECRET in config for persistence")
+        }
+    }
+
 	// Determine addresses
 	apiAddr := "0.0.0.0:7866"
 	if cfg, err := utility.LoadConfig(); err == nil {
@@ -368,6 +462,81 @@ func main() {
             return
         }
         c.JSON(http.StatusOK, gin.H{"ok": true})
+    })
+
+    // Login endpoint
+    r.POST("/login", func(c *gin.Context) {
+        type loginReq struct {
+            Username string `json:"username" binding:"required"`
+            Password string `json:"password" binding:"required"`
+        }
+        var req loginReq
+        if err := c.ShouldBindJSON(&req); err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+            return
+        }
+        u := strings.TrimSpace(req.Username)
+        p := req.Password
+        if u == "" || p == "" {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "username and password are required"})
+            return
+        }
+        dbc := db.Get()
+        if dbc == nil {
+            c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+            return
+        }
+        var id int64
+        var username, name, hash string
+        const q = `SELECT id, username, name, password_hash FROM users WHERE username = $1`
+        err := dbc.QueryRow(q, u).Scan(&id, &username, &name, &hash)
+        if err != nil {
+            if err == sql.ErrNoRows {
+                c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid username or password"})
+                return
+            }
+            log.Printf("[Login] query error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "login failed"})
+            return
+        }
+        if bcrypt.CompareHashAndPassword([]byte(hash), []byte(p)) != nil {
+            c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid username or password"})
+            return
+        }
+        setSessionCookie(c, id)
+        c.JSON(http.StatusOK, gin.H{"ok": true, "user": gin.H{"id": id, "username": username, "name": name}})
+    })
+
+    // Logout endpoint
+    r.POST("/logout", func(c *gin.Context) {
+        clearSessionCookie(c)
+        c.JSON(http.StatusOK, gin.H{"ok": true})
+    })
+
+    // Current user endpoint
+    r.GET("/me", func(c *gin.Context) {
+        uid, ok := parseSession(c.Request)
+        if !ok {
+            c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+            return
+        }
+        dbc := db.Get()
+        if dbc == nil {
+            c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+            return
+        }
+        var username, name string
+        if err := dbc.QueryRow(`SELECT username, name FROM users WHERE id=$1`, uid).Scan(&username, &name); err != nil {
+            if err == sql.ErrNoRows {
+                clearSessionCookie(c)
+                c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+                return
+            }
+            log.Printf("[Me] query error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+            return
+        }
+        c.JSON(http.StatusOK, gin.H{"id": uid, "username": username, "name": name})
     })
 	// Shell session management endpoints
 	r.GET("/shell/sessions", func(c *gin.Context) {

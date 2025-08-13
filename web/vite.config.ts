@@ -20,6 +20,18 @@ export default defineConfig({
         target: 'http://127.0.0.1:7866',
         changeOrigin: true,
       },
+      '/login': {
+        target: 'http://127.0.0.1:7866',
+        changeOrigin: true,
+      },
+      '/logout': {
+        target: 'http://127.0.0.1:7866',
+        changeOrigin: true,
+      },
+      '/me': {
+        target: 'http://127.0.0.1:7866',
+        changeOrigin: true,
+      },
     },
   },
 })
