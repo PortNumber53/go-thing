@@ -92,7 +92,7 @@ func setSessionCookie(c *gin.Context, userID int64) {
 
 // clearSessionCookie expires the session cookie
 func clearSessionCookie(c *gin.Context) {
-    http.SetCookie(c.Writer, &http.Cookie{
+    cookie := &http.Cookie{
         Name:     "session",
         Value:    "",
         Path:     "/",
@@ -100,7 +100,12 @@ func clearSessionCookie(c *gin.Context) {
         MaxAge:   -1,
         HttpOnly: true,
         SameSite: http.SameSiteLaxMode,
-    })
+    }
+    // If request came over HTTPS (directly or via proxy header), set Secure
+    if c.Request.TLS != nil || strings.EqualFold(c.Request.Header.Get("X-Forwarded-Proto"), "https") {
+        cookie.Secure = true
+    }
+    http.SetCookie(c.Writer, cookie)
 }
 
 // parseSession verifies the cookie and returns userID if valid
