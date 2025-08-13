@@ -1,5 +1,7 @@
 import React from 'react'
 
+ type SignupError = { error?: string }
+ 
 interface SignupModalProps {
   open: boolean
   onClose: () => void
@@ -39,9 +41,9 @@ export default function SignupModal({ open, onClose, onSuccess }: SignupModalPro
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: e, name: n, password: p }),
       })
-      const data = await res.json().catch(() => ({} as any))
+      const data: unknown = await res.json().catch(() => ({}))
       if (!res.ok) {
-        setMsg(typeof (data as any).error === 'string' ? (data as any).error : `Signup failed (HTTP ${res.status})`)
+        setMsg((data as SignupError).error ?? `Signup failed (HTTP ${res.status})`)
         return
       }
       setMsg('Account created! You can now log in.')

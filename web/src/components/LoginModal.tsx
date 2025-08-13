@@ -1,7 +1,9 @@
 import React from 'react'
 
 type User = { id: number; username: string; name: string }
-
+ type LoginSuccess = { user: User }
+ type LoginError = { error?: string }
+ 
 interface LoginModalProps {
   open: boolean
   onClose: () => void
@@ -38,12 +40,12 @@ export default function LoginModal({ open, onClose, onSuccess }: LoginModalProps
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: e, password: p }),
       })
-      const data = await res.json().catch(() => ({} as any))
+      const data: unknown = await res.json().catch(() => ({}))
       if (!res.ok) {
-        setMsg(typeof (data as any).error === 'string' ? (data as any).error : `Login failed (HTTP ${res.status})`)
+        setMsg((data as LoginError).error ?? `Login failed (HTTP ${res.status})`)
         return
       }
-      onSuccess((data as any).user as User)
+      onSuccess((data as LoginSuccess).user)
       setMsg('Logged in!')
       setTimeout(() => onClose(), 500)
     } catch (err: any) {
