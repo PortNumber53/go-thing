@@ -537,6 +537,7 @@ func main() {
         var username, name string
         if err := dbc.QueryRow(`SELECT username, name FROM users WHERE id=$1`, uid).Scan(&username, &name); err != nil {
             if err == sql.ErrNoRows {
+                log.Printf("[Me] WARN: valid session for non-existent user ID %d", uid)
                 clearSessionCookie(c)
                 c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
                 return
