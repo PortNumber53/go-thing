@@ -16,6 +16,10 @@ export default defineConfig({
         target: 'http://127.0.0.1:7866',
         changeOrigin: true,
       },
+      '/signup': {
+        target: 'http://127.0.0.1:7866',
+        changeOrigin: true,
+      },
     },
   },
 })

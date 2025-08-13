@@ -18,15 +18,31 @@ body {
 }
 .chat-container { height: 100dvh; display: flex; flex-direction: column; }
 header { position: sticky; top: 0; background: var(--bg); border-bottom: 1px solid var(--border); padding: 12px 16px; z-index: 2; }
-header h2 { margin: 0; font-size: 1.25rem; }
+.nav { display: flex; align-items: center; justify-content: space-between; max-width: 1100px; margin: 0 auto; }
+.brand { font-size: 1.1rem; font-weight: 700; letter-spacing: 0.2px; }
+.actions { display: flex; gap: 10px; }
+.link { background: transparent; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+.link:hover { background: rgba(255,255,255,0.04); }
 #chat { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 16px; }
-.bubble { padding: 10px 12px; border-radius: 10px; margin: 8px 0; line-height: 1.4; }
-.agent-msg { background: var(--agent); border: 1px solid var(--border); }
-.user-msg { background: var(--user); border: 1px solid var(--border); text-align: right; }
+.chat-inner { max-width: 1100px; margin: 0 auto; display: flex; flex-direction: column; }
+.bubble { padding: 10px 12px; border-radius: 10px; margin: 8px 0; line-height: 1.4; max-width: min(80ch, 100%); }
+.agent-msg { background: var(--agent); border: 1px solid var(--border); align-self: flex-start; }
+.user-msg { background: var(--user); border: 1px solid var(--border); text-align: right; align-self: flex-end; }
 .system-msg { color: var(--muted); font-size: 0.95em; }
 .composer { position: sticky; bottom: 0; background: linear-gradient(180deg, rgba(11,12,15,0.6), var(--bg)); border-top: 1px solid var(--border); padding: env(safe-area-inset-bottom) 12px 12px 12px; }
 .row { display: grid; grid-template-columns: 1fr auto; gap: 8px; max-width: 1100px; margin: 0 auto; }
 textarea#input { width: 100%; min-height: 42px; max-height: 35vh; resize: none; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--panel); color: var(--text); }
 button#sendBtn { align-self: end; height: 42px; padding: 0 16px; border-radius: 10px; border: 1px solid var(--border); background: var(--primary); color: white; font-weight: 600; cursor: pointer; }
 button#sendBtn:disabled { opacity: 0.6; cursor: not-allowed; }
-@media (max-width: 640px) { header h2 { font-size: 1.1rem; } .row { grid-template-columns: 1fr auto; gap: 6px; } button#sendBtn { height: 40px; padding: 0 14px; } }
+/* Modal */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 10; }
+.modal { width: 100%; max-width: 440px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+.modal-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.modal-title { font-weight: 700; }
+.modal-body { display: grid; gap: 10px; padding: 14px; }
+.modal-body label { display: grid; gap: 6px; font-size: 0.95rem; }
+.modal-body input { height: 38px; border-radius: 8px; border: 1px solid var(--border); background: #0d0f14; color: var(--text); padding: 0 10px; }
+.modal-footer { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 14px; border-top: 1px solid var(--border); }
+.btn { background: var(--primary); border: 1px solid var(--border); color: white; border-radius: 8px; padding: 8px 12px; cursor: pointer; font-weight: 600; }
+.icon { background: transparent; border: none; color: var(--text); font-size: 1.2rem; cursor: pointer; }
+@media (max-width: 640px) { .row { grid-template-columns: 1fr auto; gap: 6px; } button#sendBtn { height: 40px; padding: 0 14px; } }

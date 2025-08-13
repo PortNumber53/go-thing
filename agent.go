@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,10 +17,13 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"regexp"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/slack-go/slack"
+	"github.com/jackc/pgx/v5/pgconn"
+	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/ini.v1"
 
 	toolsrv "go-thing/tools"
@@ -35,6 +39,29 @@ type ToolResponse struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data,omitempty"`
 	Error   string      `json:"error,omitempty"`
+}
+
+// emailRegex caches a simple email validation regex.
+var (
+	emailRegexOnce     sync.Once
+	emailRegexCompiled *regexp.Regexp
+)
+
+func emailRegex() *regexp.Regexp {
+	emailRegexOnce.Do(func() {
+		// Simple pattern: non-space/non-@ local, @, non-space/non-@ domain, dot, tld
+		emailRegexCompiled = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+	})
+	return emailRegexCompiled
+}
+
+// isUniqueViolation returns true when err is a Postgres unique constraint violation (SQLSTATE 23505).
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	return false
 }
 
 // getOrCreateAnyThread returns the most recently updated thread id if one exists,
@@ -283,6 +310,65 @@ func main() {
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "go-thing agent API"})
 	})
+    // Sign up endpoint
+    r.POST("/signup", func(c *gin.Context) {
+        type signupReq struct {
+            Username string `json:"username" binding:"required"`
+            Name     string `json:"name" binding:"required"`
+            Password string `json:"password" binding:"required"`
+        }
+        var req signupReq
+        if err := c.ShouldBindJSON(&req); err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+            return
+        }
+        u := strings.TrimSpace(req.Username)
+        n := strings.TrimSpace(req.Name)
+        p := req.Password
+        if u == "" || n == "" || p == "" {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "all fields are required"})
+            return
+        }
+        // simple email regex: local@domain.tld
+        if !emailRegex().MatchString(u) {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "username must be a valid email"})
+            return
+        }
+        if len(p) < 8 {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 8 characters"})
+            return
+        }
+        hash, err := bcrypt.GenerateFromPassword([]byte(p), bcrypt.DefaultCost)
+        if err != nil {
+            log.Printf("[Signup] bcrypt error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to process password"})
+            return
+        }
+        dbc := db.Get()
+        if dbc == nil {
+            c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+            return
+        }
+        // insert user
+        const q = `INSERT INTO users (username, name, password_hash) VALUES ($1, $2, $3)`
+        if _, err := dbc.Exec(q, u, n, string(hash)); err != nil {
+            // Robust duplicate detection: SQLSTATE 23505 unique_violation
+            if isUniqueViolation(err) {
+                c.JSON(http.StatusConflict, gin.H{"error": "user already exists"})
+                return
+            }
+            // Fallback string check
+            le := strings.ToLower(err.Error())
+            if strings.Contains(le, "unique") || strings.Contains(le, "duplicate") || strings.Contains(le, "23505") {
+                c.JSON(http.StatusConflict, gin.H{"error": "user already exists"})
+                return
+            }
+            log.Printf("[Signup] insert error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
+            return
+        }
+        c.JSON(http.StatusOK, gin.H{"ok": true})
+    })
 	// Shell session management endpoints
 	r.GET("/shell/sessions", func(c *gin.Context) {
 		ids := toolsrv.GetShellBroker().List()
