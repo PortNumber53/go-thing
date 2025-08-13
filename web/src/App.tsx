@@ -184,7 +184,7 @@ export default function App() {
 
       <SignupModal open={showSignup} onClose={() => setShowSignup(false)} />
 
-      <LoginModal open={showLogin} onClose={() => setShowLogin(false)} onSuccess={(user) => { setMe(user) }} />
+      <LoginModal open={showLogin} onClose={() => setShowLogin(false)} onSuccess={setMe} />
     </div>
   )
 }
