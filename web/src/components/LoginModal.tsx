@@ -42,12 +42,30 @@ export default function LoginModal({ open, onClose, onSuccess }: LoginModalProps
       })
       const data: unknown = await res.json()
       if (!res.ok) {
-        setMsg((data as LoginError).error ?? `Login failed (HTTP ${res.status})`)
+        const maybe = data as any
+        const err = maybe && typeof maybe === 'object' && typeof maybe.error === 'string'
+          ? maybe.error
+          : `Login failed (HTTP ${res.status})`
+        setMsg(err)
         return
       }
-      onSuccess((data as LoginSuccess).user)
-      setMsg('Logged in!')
-      setTimeout(() => onClose(), 500)
+      const maybe = data as any
+      if (
+        maybe &&
+        typeof maybe === 'object' &&
+        'user' in maybe &&
+        maybe.user &&
+        typeof maybe.user === 'object' &&
+        typeof maybe.user.id === 'number' &&
+        typeof maybe.user.username === 'string' &&
+        typeof maybe.user.name === 'string'
+      ) {
+        onSuccess(maybe.user as User)
+        setMsg('Logged in!')
+        setTimeout(() => onClose(), 500)
+      } else {
+        setMsg('Login failed: Invalid response from server.')
+      }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
       setMsg(`Login failed: ${message}`)
