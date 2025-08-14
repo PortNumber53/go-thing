@@ -1,5 +1,9 @@
 import React from 'react'
 import { marked } from 'marked'
+import { fetchCSRFToken } from './utils/csrf'
+import LoginModal from './components/LoginModal'
+import SignupModal from './components/SignupModal'
+import { User, isUser } from './types'
 // Ensure marked.parse returns string (not Promise<string>)
 marked.setOptions({ async: false })
 
@@ -12,13 +16,10 @@ export default function App() {
   const [sending, setSending] = React.useState(false)
   const chatRef = React.useRef<HTMLDivElement | null>(null)
   const taRef = React.useRef<HTMLTextAreaElement | null>(null)
-  // Signup modal state
+  // Signup/Login modal visibility
   const [showSignup, setShowSignup] = React.useState(false)
-  const [suEmail, setSuEmail] = React.useState('')
-  const [suName, setSuName] = React.useState('')
-  const [suPass, setSuPass] = React.useState('')
-  const [suSubmitting, setSuSubmitting] = React.useState(false)
-  const [suMsg, setSuMsg] = React.useState<string | null>(null)
+  const [showLogin, setShowLogin] = React.useState(false)
+  const [me, setMe] = React.useState<User | null>(null)
 
   React.useEffect(() => {
     autoResize()
@@ -29,6 +30,24 @@ export default function App() {
       chatRef.current.scrollTop = chatRef.current.scrollHeight
     }
   }, [messages, sending])
+
+  // Load session
+  React.useEffect(() => {
+    const controller = new AbortController()
+    ;(async () => {
+      try {
+        const res = await fetch('/me', { signal: controller.signal })
+        if (!res.ok) return
+        const data: unknown = await res.json()
+        if (isUser(data)) {
+          setMe(data)
+        }
+      } catch (_) {
+        /* ignore, including abort */
+      }
+    })()
+    return () => controller.abort()
+  }, [])
 
   function autoResize() {
     const el = taRef.current
@@ -74,6 +93,28 @@ export default function App() {
     }
   }
 
+  // login handled in LoginModal; on success we setMe and close modal
+
+  async function logout() {
+    try {
+      // Fetch CSRF token first (validated)
+      const token = await fetchCSRFToken()
+
+      await fetch('/logout', {
+        method: 'POST',
+        headers: {
+          'X-CSRF-Token': token,
+        },
+        credentials: 'include', // ensure cookies (incl. csrf_token) are sent
+      })
+    } catch (err) {
+      console.error('Logout failed:', err)
+      // Optionally show a toast; silent failure can be acceptable for logout
+    } finally {
+      setMe(null)
+    }
+  }
+
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -81,40 +122,7 @@ export default function App() {
     }
   }
 
-  async function signup() {
-    const email = suEmail.trim()
-    const name = suName.trim()
-    const pass = suPass
-    setSuMsg(null)
-    if (!email || !name || !pass) {
-      setSuMsg('Please fill in all fields.')
-      return
-    }
-    setSuSubmitting(true)
-    try {
-      const res = await fetch('/signup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: email, name, password: pass }),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        setSuMsg(typeof data.error === 'string' ? data.error : `Signup failed (HTTP ${res.status})`)
-        return
-      }
-      setSuMsg('Account created! You can now log in.')
-      // simple reset
-      setSuEmail('')
-      setSuName('')
-      setSuPass('')
-      // Close modal after short delay
-      setTimeout(() => setShowSignup(false), 900)
-    } catch (e: any) {
-      setSuMsg(`Signup failed: ${e?.message ?? e}`)
-    } finally {
-      setSuSubmitting(false)
-    }
-  }
+  // signup handled in SignupModal; on success we may show a toast or just close
 
   return (
     <div className="chat-container">
@@ -122,8 +130,17 @@ export default function App() {
         <div className="nav">
           <div className="brand">AI Agent Chat</div>
           <nav className="actions">
-            <button className="link" type="button" onClick={() => setShowSignup(true)}>Sign Up</button>
-            <button className="link" type="button" onClick={() => alert('Login coming soon')}>Log In</button>
+            {me ? (
+              <>
+                <span className="user">Hello, {me.name}</span>
+                <button className="link" type="button" onClick={logout}>Log Out</button>
+              </>
+            ) : (
+              <>
+                <button className="link" type="button" onClick={() => setShowSignup(true)}>Sign Up</button>
+                <button className="link" type="button" onClick={() => setShowLogin(true)}>Log In</button>
+              </>
+            )}
           </nav>
         </div>
       </header>
@@ -164,34 +181,9 @@ export default function App() {
         </div>
       </div>
 
-      {showSignup && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Sign up">
-          <div className="modal">
-            <div className="modal-header">
-              <div className="modal-title">Create your account</div>
-              <button className="icon" onClick={() => setShowSignup(false)} aria-label="Close">×</button>
-            </div>
-            <div className="modal-body">
-              <label>
-                Email
-                <input type="email" value={suEmail} onChange={(e) => setSuEmail(e.target.value)} placeholder="you@example.com" />
-              </label>
-              <label>
-                Name
-                <input type="text" value={suName} onChange={(e) => setSuName(e.target.value)} placeholder="Your name" />
-              </label>
-              <label>
-                Password
-                <input type="password" value={suPass} onChange={(e) => setSuPass(e.target.value)} placeholder="••••••••" />
-              </label>
-              {suMsg && <div className="system-msg" style={{ marginTop: 8 }}>{suMsg}</div>}
-            </div>
-            <div className="modal-footer">
-              <button className="btn" onClick={signup} disabled={suSubmitting}>Create account</button>
-            </div>
-          </div>
-        </div>
-      )}
+      <SignupModal open={showSignup} onClose={() => setShowSignup(false)} />
+
+      <LoginModal open={showLogin} onClose={() => setShowLogin(false)} onSuccess={setMe} />
     </div>
   )
 }
