@@ -36,9 +36,25 @@ export default function SignupModal({ open, onClose, onSuccess }: SignupModalPro
     }
     setSubmitting(true)
     try {
+      // Fetch CSRF token first
+      const csrfRes = await fetch('/csrf', { credentials: 'include' })
+      if (!csrfRes.ok) {
+        setMsg(`Signup failed: Could not get CSRF token (HTTP ${csrfRes.status})`)
+        return
+      }
+      const { token: csrfToken } = await csrfRes.json() as { token?: string }
+      if (!csrfToken) {
+        setMsg('Signup failed: Invalid CSRF token received.')
+        return
+      }
+
       const res = await fetch('/signup', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+        },
+        credentials: 'include',
         body: JSON.stringify({ username: e, name: n, password: p }),
       })
       const data: unknown = await res.json()

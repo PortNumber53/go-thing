@@ -238,12 +238,17 @@ func (l *loginRateLimiter) cleanup() {
     }
 }
 
-// isSecureRequest determines if the request is effectively HTTPS (directly or via proxy header)
-func isSecureRequest(c *gin.Context) bool {
-    if c.Request.TLS != nil {
+// isSecure determines if the request is effectively HTTPS (directly or via proxy header)
+func isSecure(r *http.Request) bool {
+    if r.TLS != nil {
         return true
     }
-    return strings.EqualFold(c.Request.Header.Get("X-Forwarded-Proto"), "https")
+    return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+// isSecureRequest determines if the request is effectively HTTPS (directly or via proxy header)
+func isSecureRequest(c *gin.Context) bool {
+    return isSecure(c.Request)
 }
 
 // setSessionCookie sets an HttpOnly cookie with a signed token for the user id.
@@ -499,17 +504,9 @@ func isAllowedWSOrigin(r *http.Request) bool {
     }
 
     // Fallback: allow same-origin only
-    // NOTE: r.TLS indicates whether THIS hop used TLS. When running behind a
-    // reverse proxy that terminates TLS, r.TLS will be nil even if the client
-    // connected via HTTPS. In that case the Origin header may be "https://…" but
-    // the computed sameOrigin below would be "http://…", causing a false
-    // mismatch. Consider honoring standard proxy headers (e.g. X-Forwarded-Proto)
-    // or configuring Gin trusted proxies so scheme detection is proxy-aware.
-    // Example (pseudo):
-    //   proto := r.Header.Get("X-Forwarded-Proto")
-    //   if proto == "https" { scheme = "https" }
+    // Use shared isSecure(*http.Request) to determine scheme (TLS or proxy-aware).
     scheme := "http"
-    if r.Header.Get("X-Forwarded-Proto") == "https" || r.TLS != nil {
+    if isSecure(r) {
         scheme = "https"
     }
     sameOrigin := fmt.Sprintf("%s://%s", scheme, r.Host)
@@ -618,8 +615,12 @@ func main() {
         setCSRFCookie(c, tok)
         c.JSON(http.StatusOK, gin.H{"token": tok})
     })
-    // Sign up endpoint
+    // Sign up endpoint (CSRF protected)
     r.POST("/signup", func(c *gin.Context) {
+        if !validateCSRF(c) {
+            c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+            return
+        }
         type signupReq struct {
             Username string `json:"username" binding:"required"`
             Name     string `json:"name" binding:"required"`
@@ -630,7 +631,7 @@ func main() {
             c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
             return
         }
-        u := strings.TrimSpace(req.Username)
+        u := strings.ToLower(strings.TrimSpace(req.Username))
         n := strings.TrimSpace(req.Name)
         p := req.Password
         if u == "" || n == "" || p == "" {
@@ -701,7 +702,7 @@ func main() {
             c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many requests, slow down"})
             return
         }
-        u := strings.TrimSpace(req.Username)
+        u := strings.ToLower(strings.TrimSpace(req.Username))
         p := req.Password
         // Per-user temporary lockout on repeated failures
         if locked, rem := lr.isLocked(u); locked {
