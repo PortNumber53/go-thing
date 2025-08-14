@@ -72,28 +72,62 @@ func setCSRFCookie(c *gin.Context, token string) {
 
 // validateCSRF verifies the Origin/Referer (if present) and double-submit cookie/header token
 func validateCSRF(c *gin.Context) bool {
-    // Same-origin check when Origin is present
-    if origin := c.Request.Header.Get("Origin"); strings.TrimSpace(origin) != "" {
-        scheme := "http"
-        if isSecureRequest(c) {
-            scheme = "https"
-        }
-        sameOrigin := fmt.Sprintf("%s://%s", scheme, c.Request.Host)
-        if !strings.EqualFold(origin, sameOrigin) {
-            return false
+    // --- Origin allowlist or same-origin check ---
+    origin := strings.TrimSpace(c.Request.Header.Get("Origin"))
+    if origin != "" {
+        // Lazy-load ALLOWED_ORIGINS from config once
+        allowedOriginsOnce.Do(func() {
+            allowedOrigins = make(map[string]struct{})
+            if cfg, err := utility.LoadConfig(); err == nil && cfg != nil {
+                if raw := strings.TrimSpace(cfg["ALLOWED_ORIGINS"]); raw != "" {
+                    for _, item := range strings.Split(raw, ",") {
+                        a := strings.TrimSpace(item)
+                        if a != "" {
+                            allowedOrigins[a] = struct{}{}
+                        }
+                    }
+                }
+            } else if err != nil {
+                log.Printf("[CSRF] failed to load config for allowed origins: %v. Falling back to same-origin policy.", err)
+            }
+        })
+        if len(allowedOrigins) > 0 {
+            if _, ok := allowedOrigins[origin]; !ok {
+                log.Printf("[CSRF] reject: origin not in allowlist: origin=%q", origin)
+                return false
+            }
+            log.Printf("[CSRF] origin allowed via allowlist: %s", origin)
+        } else {
+            scheme := "http"
+            if isSecureRequest(c) {
+                scheme = "https"
+            }
+            sameOrigin := fmt.Sprintf("%s://%s", scheme, c.Request.Host)
+            if !strings.EqualFold(origin, sameOrigin) {
+                log.Printf("[CSRF] reject: origin mismatch: origin=%q sameOrigin=%q", origin, sameOrigin)
+                return false
+            }
+            log.Printf("[CSRF] origin allowed via same-origin: %s", origin)
         }
     }
-    // Double submit: header must equal cookie
-    headerTok := c.Request.Header.Get("X-CSRF-Token")
-    if strings.TrimSpace(headerTok) == "" {
+
+    // --- Double submit: header must equal cookie ---
+    headerTok := strings.TrimSpace(c.Request.Header.Get("X-CSRF-Token"))
+    if headerTok == "" {
+        log.Printf("[CSRF] reject: missing X-CSRF-Token header")
         return false
     }
     ck, err := c.Request.Cookie("csrf_token")
     if err != nil || ck == nil || strings.TrimSpace(ck.Value) == "" {
+        log.Printf("[CSRF] reject: missing csrf_token cookie (err=%v)", err)
         return false
     }
-    // Constant-time compare
-    return hmac.Equal([]byte(headerTok), []byte(ck.Value))
+    if !hmac.Equal([]byte(headerTok), []byte(strings.TrimSpace(ck.Value))) {
+        log.Printf("[CSRF] reject: token mismatch (header vs cookie)")
+        return false
+    }
+    log.Printf("[CSRF] passed: origin and token validated")
+    return true
 }
 
 // emailRegex caches a simple email validation regex.
