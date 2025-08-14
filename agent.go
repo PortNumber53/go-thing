@@ -633,7 +633,7 @@ func main() {
         }
         u := strings.ToLower(strings.TrimSpace(req.Username))
         n := strings.TrimSpace(req.Name)
-        p := req.Password
+        p := strings.TrimSpace(req.Password)
         if u == "" || n == "" || p == "" {
             c.JSON(http.StatusBadRequest, gin.H{"error": "all fields are required"})
             return
