@@ -18,12 +18,17 @@ import (
 	"syscall"
 	"time"
 	"regexp"
-
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/rand"
+	"encoding/hex"
+	"strconv"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/slack-go/slack"
 	"github.com/jackc/pgx/v5/pgconn"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/time/rate"
 	"gopkg.in/ini.v1"
 
 	toolsrv "go-thing/tools"
@@ -41,6 +46,56 @@ type ToolResponse struct {
 	Error   string      `json:"error,omitempty"`
 }
 
+// newCSRFToken generates a random token (hex) for CSRF protection
+func newCSRFToken() (string, error) {
+    b := make([]byte, 32)
+    if _, err := rand.Read(b); err != nil {
+        return "", err
+    }
+    return hex.EncodeToString(b), nil
+}
+
+// setCSRFCookie sets the CSRF cookie. We also return the token to the client via JSON from /csrf
+func setCSRFCookie(c *gin.Context, token string) {
+    ck := &http.Cookie{
+        Name:     "csrf_token",
+        Value:    token,
+        Path:     "/",
+        // HttpOnly true is acceptable because clients obtain the token from GET /csrf response body
+        HttpOnly: true,
+        SameSite: http.SameSiteStrictMode,
+        // Session cookie is fine; rotate by calling /csrf as needed
+    }
+    if isSecureRequest(c) { ck.Secure = true }
+    http.SetCookie(c.Writer, ck)
+}
+
+// validateCSRF verifies the Origin/Referer (if present) and double-submit cookie/header token
+func validateCSRF(c *gin.Context) bool {
+    // Same-origin check when Origin is present
+    if origin := c.Request.Header.Get("Origin"); strings.TrimSpace(origin) != "" {
+        scheme := "http"
+        if isSecureRequest(c) {
+            scheme = "https"
+        }
+        sameOrigin := fmt.Sprintf("%s://%s", scheme, c.Request.Host)
+        if !strings.EqualFold(origin, sameOrigin) {
+            return false
+        }
+    }
+    // Double submit: header must equal cookie
+    headerTok := c.Request.Header.Get("X-CSRF-Token")
+    if strings.TrimSpace(headerTok) == "" {
+        return false
+    }
+    ck, err := c.Request.Cookie("csrf_token")
+    if err != nil || ck == nil || strings.TrimSpace(ck.Value) == "" {
+        return false
+    }
+    // Constant-time compare
+    return hmac.Equal([]byte(headerTok), []byte(ck.Value))
+}
+
 // emailRegex caches a simple email validation regex.
 var (
 	emailRegexOnce     sync.Once
@@ -53,6 +108,219 @@ func emailRegex() *regexp.Regexp {
 		emailRegexCompiled = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 	})
 	return emailRegexCompiled
+}
+
+// sessionSecret holds the HMAC key for signing session cookies
+var sessionSecret []byte
+
+// sessionDuration defines how long a session is valid
+const sessionDuration = 7 * 24 * time.Hour
+
+// loginRateLimiter provides basic IP-based throttling and per-user lockouts for /login
+type loginRateLimiter struct {
+    mu        sync.Mutex
+    ip        map[string]*rate.Limiter
+    ipSeen    map[string]time.Time
+    userFails map[string]*userFail
+}
+
+type userFail struct {
+    count     int
+    lockUntil time.Time
+    last      time.Time
+}
+
+var lr = &loginRateLimiter{
+    ip:        make(map[string]*rate.Limiter),
+    ipSeen:    make(map[string]time.Time),
+    userFails: make(map[string]*userFail),
+}
+
+// dummyBcryptCompare performs a bcrypt comparison against a dummy hash to
+// normalize timing between "user not found" and "wrong password" cases.
+// The dummy hash is generated once at runtime to avoid shipping a hardcoded hash.
+var (
+    dummyHashOnce sync.Once
+    dummyHash     []byte
+)
+
+func dummyBcryptCompare(password string) {
+    dummyHashOnce.Do(func() {
+        // Generate a hash once; cost matches default user hashing cost.
+        h, err := bcrypt.GenerateFromPassword([]byte("dummy-password-for-timing-only"), bcrypt.DefaultCost)
+        if err != nil {
+            log.Fatalf("[Auth] CRITICAL: failed to generate dummy bcrypt hash for timing attack mitigation: %v", err)
+        }
+        dummyHash = h
+    })
+    // The dummyHash is guaranteed to be non-empty here due to log.Fatalf on error.
+    _ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))
+}
+
+// getLimiter returns the IP limiter, creating one if needed.
+func (l *loginRateLimiter) getLimiter(ip string) *rate.Limiter {
+    l.mu.Lock()
+    defer l.mu.Unlock()
+    lim, ok := l.ip[ip]
+    if !ok {
+        // ~10 requests/minute with burst of 5
+        lim = rate.NewLimiter(rate.Every(6*time.Second), 5)
+        l.ip[ip] = lim
+    }
+    l.ipSeen[ip] = time.Now()
+    return lim
+}
+
+// isLocked returns remaining lockout if the user is locked.
+func (l *loginRateLimiter) isLocked(user string) (bool, time.Duration) {
+    l.mu.Lock()
+    defer l.mu.Unlock()
+    if st, ok := l.userFails[strings.ToLower(strings.TrimSpace(user))]; ok {
+        if time.Now().Before(st.lockUntil) {
+            return true, time.Until(st.lockUntil)
+        }
+    }
+    return false, 0
+}
+
+// recordFailure increments failure count and applies lockout on threshold.
+func (l *loginRateLimiter) recordFailure(user string) {
+    const threshold = 5
+    const lockDur = 15 * time.Minute
+    u := strings.ToLower(strings.TrimSpace(user))
+    l.mu.Lock()
+    defer l.mu.Unlock()
+    st := l.userFails[u]
+    if st == nil {
+        st = &userFail{}
+        l.userFails[u] = st
+    }
+    st.count++
+    st.last = time.Now()
+    if st.count >= threshold {
+        st.lockUntil = time.Now().Add(lockDur)
+    }
+}
+
+// recordSuccess clears failure state on successful login.
+func (l *loginRateLimiter) recordSuccess(user string) {
+    u := strings.ToLower(strings.TrimSpace(user))
+    l.mu.Lock()
+    defer l.mu.Unlock()
+    delete(l.userFails, u)
+}
+
+// cleanup prunes stale IP and user failure entries to bound memory usage.
+func (l *loginRateLimiter) cleanup() {
+    const ipExpiry = 24 * time.Hour
+    const userFailExpiry = 30 * time.Minute // lockout 15m + 15m grace
+
+    // Perform pruning under a single lock to avoid dropping concurrent updates.
+    l.mu.Lock()
+    defer l.mu.Unlock()
+
+    now := time.Now()
+
+    // Prune stale IP entries
+    for ip, seen := range l.ipSeen {
+        if now.Sub(seen) > ipExpiry {
+            delete(l.ip, ip)
+            delete(l.ipSeen, ip)
+        }
+    }
+
+    // Prune stale user failure entries
+    for user, fail := range l.userFails {
+        // Delete if not locked and last failure was sufficiently old
+        if now.After(fail.lockUntil) && now.Sub(fail.last) > userFailExpiry {
+            delete(l.userFails, user)
+        }
+    }
+}
+
+// isSecure determines if the request is effectively HTTPS (directly or via proxy header)
+func isSecure(r *http.Request) bool {
+    if r.TLS != nil {
+        return true
+    }
+    return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+// isSecureRequest determines if the request is effectively HTTPS (directly or via proxy header)
+func isSecureRequest(c *gin.Context) bool {
+    return isSecure(c.Request)
+}
+
+// setSessionCookie sets an HttpOnly cookie with a signed token for the user id.
+func setSessionCookie(c *gin.Context, userID int64) {
+    // session expiry
+    exp := time.Now().Add(sessionDuration)
+    base := fmt.Sprintf("%d.%d", userID, exp.Unix())
+    mac := hmac.New(sha256.New, sessionSecret)
+    mac.Write([]byte(base))
+    sig := hex.EncodeToString(mac.Sum(nil))
+    token := base + "." + sig
+    cookie := &http.Cookie{
+        Name:     "session",
+        Value:    token,
+        Path:     "/",
+        HttpOnly: true,
+        SameSite: http.SameSiteLaxMode,
+        Expires:  exp,
+    }
+    // If request came over HTTPS (directly or via proxy header), set Secure
+    if isSecureRequest(c) { cookie.Secure = true }
+    http.SetCookie(c.Writer, cookie)
+}
+
+// clearSessionCookie expires the session cookie
+func clearSessionCookie(c *gin.Context) {
+    cookie := &http.Cookie{
+        Name:     "session",
+        Value:    "",
+        Path:     "/",
+        Expires:  time.Unix(0, 0),
+        MaxAge:   -1,
+        HttpOnly: true,
+        SameSite: http.SameSiteLaxMode,
+    }
+    // If request came over HTTPS (directly or via proxy header), set Secure
+    if isSecureRequest(c) { cookie.Secure = true }
+    http.SetCookie(c.Writer, cookie)
+}
+
+// parseSession verifies the cookie and returns userID if valid
+func parseSession(r *http.Request) (int64, bool) {
+    ck, err := r.Cookie("session")
+    if err != nil || ck == nil || strings.TrimSpace(ck.Value) == "" {
+        return 0, false
+    }
+    parts := strings.Split(ck.Value, ".")
+    if len(parts) != 3 {
+        return 0, false
+    }
+    userStr, expStr, sig := parts[0], parts[1], parts[2]
+    base := userStr + "." + expStr
+    mac := hmac.New(sha256.New, sessionSecret)
+    mac.Write([]byte(base))
+    expectedMAC := mac.Sum(nil)
+    sigBytes, err := hex.DecodeString(sig)
+    if err != nil {
+        return 0, false
+    }
+    if !hmac.Equal(sigBytes, expectedMAC) {
+        return 0, false
+    }
+    // Check expiry
+    expUnix, err := strconv.ParseInt(expStr, 10, 64)
+    if err != nil || time.Now().After(time.Unix(expUnix, 0)) {
+        return 0, false
+    }
+    uid, err := strconv.ParseInt(userStr, 10, 64)
+    if err != nil {
+        return 0, false
+    }
+    return uid, true
 }
 
 // isUniqueViolation returns true when err is a Postgres unique constraint violation (SQLSTATE 23505).
@@ -77,7 +345,7 @@ func getOrCreateAnyThread() (int64, error) {
 	if err == nil {
 		return id, nil
 	}
-	if err != nil && err != sql.ErrNoRows {
+	if err != sql.ErrNoRows {
 		return 0, err
 	}
 	// No rows, create the first thread
@@ -230,62 +498,73 @@ func isAllowedWSOrigin(r *http.Request) bool {
 	})
 
 	// If an allowlist is configured, use it exclusively.
-	if len(allowedOrigins) > 0 {
-		_, ok := allowedOrigins[origin]
-		return ok
-	}
+    if len(allowedOrigins) > 0 {
+        _, ok := allowedOrigins[origin]
+        return ok
+    }
 
-	// Fallback: allow same-origin only
-	// NOTE: r.TLS indicates whether THIS hop used TLS. When running behind a
-	// reverse proxy that terminates TLS, r.TLS will be nil even if the client
-	// connected via HTTPS. In that case the Origin header may be "https://…" but
-	// the computed sameOrigin below would be "http://…", causing a false
-	// mismatch. Consider honoring standard proxy headers (e.g. X-Forwarded-Proto)
-	// or configuring Gin trusted proxies so scheme detection is proxy-aware.
-	// Example (pseudo):
-	//   proto := r.Header.Get("X-Forwarded-Proto")
-	//   if proto == "https" { scheme = "https" }
-scheme := "http"
-if r.Header.Get("X-Forwarded-Proto") == "https" || r.TLS != nil {
-	scheme = "https"
-}
-	sameOrigin := fmt.Sprintf("%s://%s", scheme, r.Host)
-	return origin == sameOrigin
+    // Fallback: allow same-origin only
+    // Use shared isSecure(*http.Request) to determine scheme (TLS or proxy-aware).
+    scheme := "http"
+    if isSecure(r) {
+        scheme = "https"
+    }
+    sameOrigin := fmt.Sprintf("%s://%s", scheme, r.Host)
+    return origin == sameOrigin
 }
 
 func main() {
-	// Setup logging
-	f, err := logging.Setup()
-	if err != nil {
-		log.Printf("[Startup] Failed to setup logging: %v", err)
-	} else if f != nil {
-		defer f.Close()
-	}
-	log.Printf("[Startup] Starting go-thing agent")
+    // Setup logging
+    f, err := logging.Setup()
+    if err != nil {
+        log.Printf("[Startup] Failed to setup logging: %v", err)
+    } else if f != nil {
+        defer f.Close()
+    }
+    log.Printf("[Startup] Starting go-thing agent")
 
-	// CLI migrate
-	if len(os.Args) > 1 && os.Args[1] == "migrate" {
-		os.Exit(runMigrateCLI(os.Args[2:]))
-		return
-	}
+    // CLI migrate
+    if len(os.Args) > 1 && os.Args[1] == "migrate" {
+        os.Exit(runMigrateCLI(os.Args[2:]))
+        return
+    }
 
-	// Load config and init DB/migrations if possible
-	cfgPath := os.ExpandEnv(config.ConfigFilePath)
-	cfgIni, iniErr := ini.Load(cfgPath)
-	if iniErr == nil {
-		if dbConn, pgcfg, derr := db.Init(cfgIni); derr != nil {
-			log.Printf("[Postgres] Init failed: %v (continuing without DB)", derr)
-		} else {
-			defer func() { _ = dbConn.Close() }()
-			if merr := db.RunMigrations(dbConn, pgcfg.MigrationsDir); merr != nil {
-				log.Printf("[Postgres] Migrations error: %v", merr)
-			} else {
-				log.Printf("[Postgres] Migrations applied from %s", pgcfg.MigrationsDir)
-			}
-		}
-	} else {
-		log.Printf("[Config] Load failed (%v); continuing with defaults", iniErr)
-	}
+    // Load config and init DB/migrations if possible
+    cfgPath := os.ExpandEnv(config.ConfigFilePath)
+    cfgIni, iniErr := ini.Load(cfgPath)
+    if iniErr == nil {
+        if dbConn, pgcfg, derr := db.Init(cfgIni); derr != nil {
+            log.Printf("[Postgres] Init failed: %v (continuing without DB)", derr)
+        } else {
+            defer func() { _ = dbConn.Close() }()
+            if merr := db.RunMigrations(dbConn, pgcfg.MigrationsDir); merr != nil {
+                log.Printf("[Postgres] Migrations error: %v", merr)
+            } else {
+                log.Printf("[Postgres] Migrations applied from %s", pgcfg.MigrationsDir)
+            }
+        }
+    } else {
+        log.Printf("[Config] Load failed (%v); continuing with defaults", iniErr)
+    }
+
+    // Initialize session secret
+    if iniErr == nil {
+        if v := strings.TrimSpace(cfgIni.Section("default").Key("SESSION_SECRET").String()); v != "" {
+            if len(v) < 32 {
+                log.Printf("[Auth] WARNING: SESSION_SECRET is %d bytes long, which is less than the recommended 32 bytes for production.", len(v))
+            }
+            sessionSecret = []byte(v)
+        }
+    }
+    if len(sessionSecret) == 0 {
+        // generate ephemeral secret
+        b := make([]byte, 32)
+        if _, err := rand.Read(b); err != nil {
+            log.Fatalf("[Auth] CRITICAL: failed to generate a random session secret, cannot start: %v", err)
+        }
+        sessionSecret = b
+        log.Printf("[Auth] Using ephemeral session secret; set SESSION_SECRET in config for persistence")
+    }
 
 	// Determine addresses
 	apiAddr := "0.0.0.0:7866"
@@ -305,13 +584,43 @@ func main() {
 		}
 	}()
 
+	// Periodic cleanup for login rate limiter to bound memory usage
+	cleanupStop := make(chan struct{})
+	cleanupTicker := time.NewTicker(10 * time.Minute)
+	go func() {
+		for {
+			select {
+			case <-cleanupTicker.C:
+				lr.cleanup()
+			case <-cleanupStop:
+				cleanupTicker.Stop()
+				return
+			}
+		}
+	}()
+
 	// Gin router and routes
 	r := gin.Default()
 	r.GET("/", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "go-thing agent API"})
 	})
-    // Sign up endpoint
+    // CSRF token issuer. Returns {token} and sets csrf_token cookie.
+    r.GET("/csrf", func(c *gin.Context) {
+        tok, err := newCSRFToken()
+        if err != nil {
+            log.Printf("[CSRF] token gen error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+            return
+        }
+        setCSRFCookie(c, tok)
+        c.JSON(http.StatusOK, gin.H{"token": tok})
+    })
+    // Sign up endpoint (CSRF protected)
     r.POST("/signup", func(c *gin.Context) {
+        if !validateCSRF(c) {
+            c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+            return
+        }
         type signupReq struct {
             Username string `json:"username" binding:"required"`
             Name     string `json:"name" binding:"required"`
@@ -322,7 +631,7 @@ func main() {
             c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
             return
         }
-        u := strings.TrimSpace(req.Username)
+        u := strings.ToLower(strings.TrimSpace(req.Username))
         n := strings.TrimSpace(req.Name)
         p := req.Password
         if u == "" || n == "" || p == "" {
@@ -368,6 +677,109 @@ func main() {
             return
         }
         c.JSON(http.StatusOK, gin.H{"ok": true})
+    })
+
+    // Login endpoint with basic rate limiting and lockouts (CSRF protected)
+    r.POST("/login", func(c *gin.Context) {
+        if !validateCSRF(c) {
+            c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+            return
+        }
+        type loginReq struct {
+            Username string `json:"username" binding:"required"`
+            Password string `json:"password" binding:"required"`
+        }
+        var req loginReq
+        if err := c.ShouldBindJSON(&req); err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+            return
+        }
+        // IP-based throttling
+        ip := c.ClientIP()
+        if !lr.getLimiter(ip).Allow() {
+            // Avoid leaking whether the user exists; generic message
+            c.Header("Retry-After", "30")
+            c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many requests, slow down"})
+            return
+        }
+        u := strings.ToLower(strings.TrimSpace(req.Username))
+        p := req.Password
+        // Per-user temporary lockout on repeated failures
+        if locked, rem := lr.isLocked(u); locked {
+            c.Header("Retry-After", fmt.Sprintf("%d", int(rem.Seconds())))
+            c.JSON(http.StatusTooManyRequests, gin.H{"error": "account temporarily locked due to failed attempts"})
+            return
+        }
+        dbc := db.Get()
+        if dbc == nil {
+            c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+            return
+        }
+        var id int64
+        var username, name, hash string
+        const q = `SELECT id, username, name, password_hash FROM users WHERE username = $1`
+        err := dbc.QueryRow(q, u).Scan(&id, &username, &name, &hash)
+        if err != nil {
+            if err == sql.ErrNoRows {
+                // To mitigate timing attacks that attempt to enumerate valid usernames,
+                // perform a dummy bcrypt comparison even when the user does not exist.
+                // This makes the response time similar to the case of an existing user
+                // with an incorrect password. See dummyBcryptCompare for details.
+                dummyBcryptCompare(p)
+                lr.recordFailure(u)
+                c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid username or password"})
+                return
+            }
+            log.Printf("[Login] query error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "login failed"})
+            return
+        }
+        if bcrypt.CompareHashAndPassword([]byte(hash), []byte(p)) != nil {
+            lr.recordFailure(u)
+            c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid username or password"})
+            return
+        }
+        // Success: clear failure state
+        lr.recordSuccess(u)
+        setSessionCookie(c, id)
+        c.JSON(http.StatusOK, gin.H{"ok": true, "user": gin.H{"id": id, "username": username, "name": name}})
+    })
+
+    // Logout endpoint (CSRF protected)
+    r.POST("/logout", func(c *gin.Context) {
+        if !validateCSRF(c) {
+            c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+            return
+        }
+        clearSessionCookie(c)
+        c.JSON(http.StatusOK, gin.H{"ok": true})
+    })
+
+    // Current user endpoint
+    r.GET("/me", func(c *gin.Context) {
+        uid, ok := parseSession(c.Request)
+        if !ok {
+            c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+            return
+        }
+        dbc := db.Get()
+        if dbc == nil {
+            c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+            return
+        }
+        var username, name string
+        if err := dbc.QueryRow(`SELECT username, name FROM users WHERE id=$1`, uid).Scan(&username, &name); err != nil {
+            if err == sql.ErrNoRows {
+                log.Printf("[Me] WARN: valid session for non-existent user ID %d", uid)
+                clearSessionCookie(c)
+                c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+                return
+            }
+            log.Printf("[Me] query error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+            return
+        }
+        c.JSON(http.StatusOK, gin.H{"id": uid, "username": username, "name": name})
     })
 	// Shell session management endpoints
 	r.GET("/shell/sessions", func(c *gin.Context) {
@@ -574,6 +986,8 @@ func main() {
 	}()
 	sig := <-quit
 	log.Printf("[Shutdown] Signal: %v", sig)
+	// Stop background cleanup ticker
+	close(cleanupStop)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = apiServer.Shutdown(ctx)
