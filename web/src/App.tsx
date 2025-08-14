@@ -30,13 +30,20 @@ export default function App() {
   }, [])
 
   // Close Account menu on outside click or Escape
+  // NOTE: This is a common pattern. Consider extracting into a reusable hook, e.g.:
+  //   useOutsideClick([accountBtnRef, accountMenuRef], () => setShowAccountMenu(false))
+  // and handle the Escape key inside that hook as well. This would reduce duplication
+  // if other components (modals/menus) need the same behavior.
   React.useEffect(() => {
     if (!showAccountMenu) {
       return
     }
 
     function onDocClick(e: MouseEvent) {
-      const target = e.target as Node
+      if (!(e.target instanceof Node)) {
+        return
+      }
+      const target = e.target
       if (
         accountBtnRef.current?.contains(target) ||
         accountMenuRef.current?.contains(target)
@@ -185,7 +192,7 @@ export default function App() {
                     role="menu"
                     className="account-menu"
                   >
-                    <div className="menu-section" aria-hidden>Account</div>
+                    <div className="menu-section">Account</div>
                     {/* Placeholder for future account/settings pages */}
                     <button role="menuitem" className="menu-item" onClick={() => { setShowAccountMenu(false); logout(); }}>Log out</button>
                   </div>
