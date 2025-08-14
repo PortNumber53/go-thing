@@ -79,7 +79,7 @@ func validateCSRF(c *gin.Context) bool {
             scheme = "https"
         }
         sameOrigin := fmt.Sprintf("%s://%s", scheme, c.Request.Host)
-        if origin != sameOrigin {
+        if !strings.EqualFold(origin, sameOrigin) {
             return false
         }
     }
