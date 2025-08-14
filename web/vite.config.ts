@@ -2,7 +2,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
 // https://vitejs.dev/config/
-const proxyPaths = ['/chat', '/webhook', '/signup', '/login', '/logout', '/me'] as const
+const proxyPaths = ['/chat', '/webhook', '/signup', '/login', '/logout', '/me', '/csrf'] as const
 const proxyConfig = proxyPaths.reduce<Record<string, { target: string; changeOrigin: boolean }>>((acc, path) => {
   acc[path] = {
     target: 'http://127.0.0.1:7866',
