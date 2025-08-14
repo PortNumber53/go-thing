@@ -39,7 +39,8 @@ export default function LoginModal({ open, onClose, onSuccess }: LoginModalProps
         setMsg(`Login failed: Could not get CSRF token (HTTP ${csrfRes.status})`)
         return
       }
-      const { token: csrfToken } = await csrfRes.json()
+      const csrfPayload = await csrfRes.json().catch(() => null) as { token?: string } | null
+      const csrfToken = csrfPayload?.token
       if (!csrfToken) {
         setMsg('Login failed: Invalid CSRF token received.')
         return

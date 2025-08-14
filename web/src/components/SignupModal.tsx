@@ -42,7 +42,8 @@ export default function SignupModal({ open, onClose, onSuccess }: SignupModalPro
         setMsg(`Signup failed: Could not get CSRF token (HTTP ${csrfRes.status})`)
         return
       }
-      const { token: csrfToken } = await csrfRes.json() as { token?: string }
+      const csrfPayload = await csrfRes.json().catch(() => null) as { token?: string } | null
+      const csrfToken = csrfPayload?.token
       if (!csrfToken) {
         setMsg('Signup failed: Invalid CSRF token received.')
         return
