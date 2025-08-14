@@ -1,5 +1,6 @@
 import React from 'react'
 import { marked } from 'marked'
+import { fetchCSRFToken } from './utils/csrf'
 import LoginModal from './components/LoginModal'
 import SignupModal from './components/SignupModal'
 import { User, isUser } from './types'
@@ -96,11 +97,8 @@ export default function App() {
 
   async function logout() {
     try {
-      // Fetch CSRF token first
-      const csrfRes = await fetch('/csrf', { credentials: 'include' })
-      if (!csrfRes.ok) throw new Error(`Failed to get CSRF token (HTTP ${csrfRes.status})`)
-      const { token } = ((await csrfRes.json().catch(() => null)) || {}) as { token?: string }
-      if (!token) throw new Error('Invalid CSRF token received')
+      // Fetch CSRF token first (validated)
+      const token = await fetchCSRFToken()
 
       await fetch('/logout', {
         method: 'POST',

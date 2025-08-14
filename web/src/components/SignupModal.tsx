@@ -1,4 +1,5 @@
 import React from 'react'
+import { fetchCSRFToken } from '../utils/csrf'
 
  type SignupError = { error?: string }
  
@@ -36,16 +37,13 @@ export default function SignupModal({ open, onClose, onSuccess }: SignupModalPro
     }
     setSubmitting(true)
     try {
-      // Fetch CSRF token first
-      const csrfRes = await fetch('/csrf', { credentials: 'include' })
-      if (!csrfRes.ok) {
-        setMsg(`Signup failed: Could not get CSRF token (HTTP ${csrfRes.status})`)
-        return
-      }
-      const csrfPayload = await csrfRes.json().catch(() => null) as { token?: string } | null
-      const csrfToken = csrfPayload?.token
-      if (!csrfToken) {
-        setMsg('Signup failed: Invalid CSRF token received.')
+      // Fetch CSRF token first (validated)
+      let csrfToken: string
+      try {
+        csrfToken = await fetchCSRFToken()
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e)
+        setMsg(`Signup failed: ${message}`)
         return
       }
 

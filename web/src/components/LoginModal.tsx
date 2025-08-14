@@ -1,5 +1,6 @@
 import React from 'react'
 import { User, LoginSuccess, isLoginSuccess } from '../types'
+import { fetchCSRFToken } from '../utils/csrf'
  type LoginError = { error?: string }
  
 interface LoginModalProps {
@@ -33,16 +34,13 @@ export default function LoginModal({ open, onClose, onSuccess }: LoginModalProps
     }
     setSubmitting(true)
     try {
-      // Fetch CSRF token first
-      const csrfRes = await fetch('/csrf', { credentials: 'include' })
-      if (!csrfRes.ok) {
-        setMsg(`Login failed: Could not get CSRF token (HTTP ${csrfRes.status})`)
-        return
-      }
-      const csrfPayload = await csrfRes.json().catch(() => null) as { token?: string } | null
-      const csrfToken = csrfPayload?.token
-      if (!csrfToken) {
-        setMsg('Login failed: Invalid CSRF token received.')
+      // Fetch CSRF token first (validated)
+      let csrfToken: string
+      try {
+        csrfToken = await fetchCSRFToken()
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e)
+        setMsg(`Login failed: ${message}`)
         return
       }
 
