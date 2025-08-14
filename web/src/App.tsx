@@ -187,7 +187,7 @@ export default function App() {
                   >
                     <div className="menu-section" aria-hidden>Account</div>
                     {/* Placeholder for future account/settings pages */}
-                    <button role="menuitem" className="menu-item" onClick={logout}>Log out</button>
+                    <button role="menuitem" className="menu-item" onClick={() => { setShowAccountMenu(false); logout(); }}>Log out</button>
                   </div>
                 )}
               </div>
