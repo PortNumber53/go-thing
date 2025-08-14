@@ -98,8 +98,9 @@ export default function App() {
     try {
       // Fetch CSRF token first
       const csrfRes = await fetch('/csrf', { credentials: 'include' })
-      if (!csrfRes.ok) throw new Error('Failed to get CSRF token')
-      const { token } = await csrfRes.json()
+      if (!csrfRes.ok) throw new Error(`Failed to get CSRF token (HTTP ${csrfRes.status})`)
+      const { token } = (await csrfRes.json().catch(() => ({}))) as { token?: string }
+      if (!token) throw new Error('Invalid CSRF token received')
 
       await fetch('/logout', {
         method: 'POST',
