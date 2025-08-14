@@ -31,28 +31,32 @@ export default function App() {
 
   // Close Account menu on outside click or Escape
   React.useEffect(() => {
+    if (!showAccountMenu) {
+      return
+    }
+
     function onDocClick(e: MouseEvent) {
-      if (!showAccountMenu) return
       const target = e.target as Node
       if (
-        accountBtnRef.current && accountBtnRef.current.contains(target)
-      ) {
-        return
-      }
-      if (
-        accountMenuRef.current && accountMenuRef.current.contains(target)
+        accountBtnRef.current?.contains(target) ||
+        accountMenuRef.current?.contains(target)
       ) {
         return
       }
       setShowAccountMenu(false)
     }
+
     function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setShowAccountMenu(false)
+      if (e.key === 'Escape') {
+        setShowAccountMenu(false)
+      }
     }
-    document.addEventListener('click', onDocClick)
+
+    document.addEventListener('mousedown', onDocClick)
     document.addEventListener('keydown', onKey)
+
     return () => {
-      document.removeEventListener('click', onDocClick)
+      document.removeEventListener('mousedown', onDocClick)
       document.removeEventListener('keydown', onKey)
     }
   }, [showAccountMenu])
