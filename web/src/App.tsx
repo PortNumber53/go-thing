@@ -20,10 +20,42 @@ export default function App() {
   const [showSignup, setShowSignup] = React.useState(false)
   const [showLogin, setShowLogin] = React.useState(false)
   const [me, setMe] = React.useState<User | null>(null)
+  // Account dropdown menu state
+  const [showAccountMenu, setShowAccountMenu] = React.useState(false)
+  const accountBtnRef = React.useRef<HTMLButtonElement | null>(null)
+  const accountMenuRef = React.useRef<HTMLDivElement | null>(null)
 
   React.useEffect(() => {
     autoResize()
   }, [])
+
+  // Close Account menu on outside click or Escape
+  React.useEffect(() => {
+    function onDocClick(e: MouseEvent) {
+      if (!showAccountMenu) return
+      const target = e.target as Node
+      if (
+        accountBtnRef.current && accountBtnRef.current.contains(target)
+      ) {
+        return
+      }
+      if (
+        accountMenuRef.current && accountMenuRef.current.contains(target)
+      ) {
+        return
+      }
+      setShowAccountMenu(false)
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setShowAccountMenu(false)
+    }
+    document.addEventListener('click', onDocClick)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('click', onDocClick)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [showAccountMenu])
 
   React.useEffect(() => {
     if (chatRef.current) {
@@ -131,10 +163,30 @@ export default function App() {
           <div className="brand">AI Agent Chat</div>
           <nav className="actions">
             {me ? (
-              <>
-                <span className="user">Hello, {me.name}</span>
-                <button className="link" type="button" onClick={logout}>Log Out</button>
-              </>
+              <div className="account">
+                <button
+                  ref={accountBtnRef}
+                  className="account-btn link"
+                  type="button"
+                  aria-haspopup="menu"
+                  aria-expanded={showAccountMenu}
+                  onClick={() => setShowAccountMenu(v => !v)}
+                >
+                  <span className="user">{me.name}</span>
+                  <span aria-hidden>▾</span>
+                </button>
+                {showAccountMenu && (
+                  <div
+                    ref={accountMenuRef}
+                    role="menu"
+                    className="account-menu"
+                  >
+                    <div className="menu-section" aria-hidden>Account</div>
+                    {/* Placeholder for future account/settings pages */}
+                    <button role="menuitem" className="menu-item" onClick={logout}>Log out</button>
+                  </div>
+                )}
+              </div>
             ) : (
               <>
                 <button className="link" type="button" onClick={() => setShowSignup(true)}>Sign Up</button>
