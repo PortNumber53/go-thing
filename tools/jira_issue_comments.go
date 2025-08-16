@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // ----------------- Helper: coerce bool -----------------
@@ -83,7 +84,25 @@ func executeJiraAddCommentTool(args map[string]interface{}) (*ToolResponse, erro
 
 	body := map[string]interface{}{}
 	if v, ok := args["body"].(map[string]interface{}); ok { body["body"] = v }
-	if v, ok := args["body"].(string); ok && v != "" { body["body"] = v }
+	if v, ok := args["body"].(string); ok && v != "" {
+		// Jira Cloud v3 requires Atlassian Document Format (ADF). If a plain string is supplied,
+		// wrap it into a minimal ADF document to avoid 400 errors.
+		body["body"] = map[string]interface{}{
+			"type":    "doc",
+			"version": 1,
+			"content": []interface{}{
+				map[string]interface{}{
+					"type": "paragraph",
+					"content": []interface{}{
+						map[string]interface{}{
+							"type": "text",
+							"text": v,
+						},
+					},
+				},
+			},
+		}
+	}
 	if v, ok := args["visibility"].(map[string]interface{}); ok { body["visibility"] = v }
 	if v, ok := args["properties"].([]interface{}); ok { body["properties"] = v }
 	if v, ok := args["expand"].(string); ok && v != "" { body["expand"] = v }
@@ -93,7 +112,23 @@ func executeJiraAddCommentTool(args map[string]interface{}) (*ToolResponse, erro
 	status, respBody, _, err := jiraDo("POST", "/rest/api/3/issue/"+url.PathEscape(issueIdOrKey)+"/comment", nil, body)
 	if err != nil { return &ToolResponse{Success: false, Error: err.Error()}, nil }
 	if status != http.StatusCreated && !(status >= 200 && status < 300) {
-		return &ToolResponse{Success: false, Error: fmt.Sprintf("jira add comment failed: %d", status)}, nil
+		// Try to extract Jira error details
+		var errObj struct{
+			ErrorMessages []string          `json:"errorMessages"`
+			Errors        map[string]string `json:"errors"`
+		}
+		detail := string(respBody)
+		if json.Unmarshal(respBody, &errObj) == nil {
+			var parts []string
+			if len(errObj.ErrorMessages) > 0 { parts = append(parts, strings.Join(errObj.ErrorMessages, "; ")) }
+			if len(errObj.Errors) > 0 {
+				kv := make([]string, 0, len(errObj.Errors))
+				for k, v := range errObj.Errors { kv = append(kv, fmt.Sprintf("%s: %s", k, v)) }
+				parts = append(parts, strings.Join(kv, "; "))
+			}
+			if len(parts) > 0 { detail = strings.Join(parts, " | ") }
+		}
+		return &ToolResponse{Success: false, Error: fmt.Sprintf("jira add comment failed: %d - %s", status, detail)}, nil
 	}
 	var obj interface{}
 	if err := json.Unmarshal(respBody, &obj); err != nil { return &ToolResponse{Success: false, Error: fmt.Sprintf("parse error: %v", err)}, nil }
