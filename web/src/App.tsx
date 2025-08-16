@@ -4,6 +4,7 @@ import { fetchCSRFToken } from './utils/csrf'
 import LoginModal from './components/LoginModal'
 import SignupModal from './components/SignupModal'
 import { User, isUser } from './types'
+import useOutsideDismiss from './hooks/useOutsideDismiss'
 // Ensure marked.parse returns string (not Promise<string>)
 marked.setOptions({ async: false })
 
@@ -29,44 +30,15 @@ export default function App() {
     autoResize()
   }, [])
 
-  // Close Account menu on outside click or Escape
-  // NOTE: This is a common pattern. Consider extracting into a reusable hook, e.g.:
-  //   useOutsideClick([accountBtnRef, accountMenuRef], () => setShowAccountMenu(false))
-  // and handle the Escape key inside that hook as well. This would reduce duplication
-  // if other components (modals/menus) need the same behavior.
-  React.useEffect(() => {
-    if (!showAccountMenu) {
-      return
-    }
-
-    function onDocClick(e: MouseEvent) {
-      if (!(e.target instanceof Node)) {
-        return
-      }
-      const target = e.target
-      if (
-        accountBtnRef.current?.contains(target) ||
-        accountMenuRef.current?.contains(target)
-      ) {
-        return
-      }
-      setShowAccountMenu(false)
-    }
-
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        setShowAccountMenu(false)
-      }
-    }
-
-    document.addEventListener('mousedown', onDocClick)
-    document.addEventListener('keydown', onKey)
-
-    return () => {
-      document.removeEventListener('mousedown', onDocClick)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [showAccountMenu])
+  // Close Account menu on outside click or Escape via reusable hook
+  useOutsideDismiss(
+    [
+      accountBtnRef as unknown as React.RefObject<HTMLElement | null>,
+      accountMenuRef as unknown as React.RefObject<HTMLElement | null>,
+    ],
+    () => setShowAccountMenu(false),
+    { enabled: showAccountMenu, restoreFocusTo: accountBtnRef as unknown as React.RefObject<HTMLElement | null> }
+  )
 
   React.useEffect(() => {
     if (chatRef.current) {
