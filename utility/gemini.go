@@ -26,7 +26,7 @@ func (tc *ToolCall) GetMergedContext() []string {
 }
 
 // callGeminiAPI sends the assembled system prompt and returns either a final text or a ToolCall.
-func callGeminiAPI(ctx context.Context, client *genai.Client, task string, persistedContext []string) (string, ToolCall, error) {
+func callGeminiAPI(ctx context.Context, client *genai.Client, task string, persistedContext []string, disableContext bool) (string, ToolCall, error) {
 	// Build Available Tools section dynamically
 	available, err := GetAvailableTools()
 	var toolsSection strings.Builder
@@ -50,7 +50,7 @@ func callGeminiAPI(ctx context.Context, client *genai.Client, task string, persi
 
 	// Persisted Context Section (emit as JSON so the model can easily ingest)
 	var contextSection strings.Builder
-	if len(persistedContext) > 0 {
+	if !disableContext && len(persistedContext) > 0 {
 		sanitized := SanitizeContextFacts(persistedContext)
 		b, err := json.Marshal(sanitized)
 		if err != nil {
@@ -62,7 +62,51 @@ func callGeminiAPI(ctx context.Context, client *genai.Client, task string, persi
 	}
 
 	maxItems := getContextMaxItems()
-	systemPrompt := fmt.Sprintf(`# Role
+	var instructions string
+	if disableContext {
+		instructions = fmt.Sprintf(`# Role
+You are a helpful assistant that executes tasks by calling tools.
+
+## Instructions
+1. Analyze the Request
+   - Review the "Original Task" and the "History of actions" to understand what has been done and what is left to do.
+2. Decide the Next Step
+   - If the task is not yet complete, determine the next tool to call.
+   - If the task is complete, prepare a final, user-facing response.
+3. Strict Output Format (ALWAYS JSON)
+   - Respond ONLY with a single JSON object, never Markdown or prose.
+   - Schema:
+     {
+       "tool": "tool_name" | "",
+       "args": {"arg1": "value1"},
+       "final": "Final Markdown response if no tool is needed, else empty string"
+     }
+   - When a tool call is needed, set "tool" and "args"; set "final" to "".
+   - When providing a final response, set "final" and leave "tool" as "".
+
+## Execution Environment (IMPORTANT)
+- All commands run inside a running Docker container with a chroot at /app.
+- Only paths under /app are valid. Never use host paths (e.g., /home/...); map them to /app equivalents.
+- Some state may be ephemeral and NOT persist between separate calls. Do not assume running processes or temporary files exist later.
+- If a step depends on prior results, restate the essential facts in current_context and re-create needed state deterministically.
+- Treat the working directory as /app unless otherwise noted; prefer relative project paths (e.g., crypto-trading-bot/frontend).
+- If a tool reports path/permission issues, adjust to remain within /app and avoid relying on host environment tools.
+
+### Shell Sessions (STATEFUL)
+- Use the persistent shell tool shell_session for any shell work that relies on state (e.g., cd, environment setup, long-running processes).
+- Pick a single session id (e.g., dev) and keep using it for the entire task. Include a note like "session_id=dev" in current_context so you reuse it on the next turn.
+- Do NOT use shell_exec for stateful operations; shell_exec creates a fresh, stateless process each time.
+
+%s
+
+%s
+
+---
+
+**Current Request:**
+%s`, toolsSection.String(), "", task)
+	} else {
+		instructions = fmt.Sprintf(`# Role
 You are a helpful assistant that executes tasks by calling tools.
 
 ## Instructions
@@ -108,6 +152,8 @@ You are a helpful assistant that executes tasks by calling tools.
 
 **Current Request:**
 %s`, maxItems, toolsSection.String(), contextSection.String(), task)
+	}
+	systemPrompt := instructions
 	log.Printf("[Gemini API] Sending prompt: %s", systemPrompt)
 	resp, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(systemPrompt), nil)
 	if err != nil {
@@ -133,8 +179,8 @@ You are a helpful assistant that executes tasks by calling tools.
 	var toolCall ToolCall
 	err = json.Unmarshal([]byte(cleanedResponse), &toolCall)
 	if err == nil {
-		// Log parsed context if present
-		if len(toolCall.CurrentContext) > 0 || len(toolCall.CurrentContent) > 0 {
+		// Log parsed context if present and not disabled
+		if !disableContext && (len(toolCall.CurrentContext) > 0 || len(toolCall.CurrentContent) > 0) {
 			merged := toolCall.GetMergedContext()
 			log.Printf("[Gemini API] current_json: current_context=%v current_content=%v merged=%v", toolCall.CurrentContext, toolCall.CurrentContent, merged)
 		}
@@ -164,6 +210,7 @@ func GeminiAPIHandler(ctx context.Context, task string, initialContext []string)
 	if err != nil {
 		return "", nil, err
 	}
+	disableContext := cfg["DISABLE_CONTEXT"] == "1" || cfg["JIRA_DISABLE_CONTEXT"] == "1"
 	apiKey := cfg["GEMINI_API_KEY"]
 	if apiKey == "" {
 		return "", nil, fmt.Errorf("GEMINI_API_KEY missing")
@@ -178,7 +225,7 @@ func GeminiAPIHandler(ctx context.Context, task string, initialContext []string)
 	var history []string
 	// Aggregated, rolling context provided by the model via current_context/current_content
 	var currentContext []string
-	if len(initialContext) > 0 {
+	if !disableContext && len(initialContext) > 0 {
 		currentContext = MergeStringSets(currentContext, initialContext)
 	}
 
@@ -188,13 +235,13 @@ func GeminiAPIHandler(ctx context.Context, task string, initialContext []string)
 			currentPrompt = fmt.Sprintf("Original Task: %s\n\nHistory of actions:\n%s", originalTask, strings.Join(history, "\n"))
 		}
 
-		responseText, toolCall, err := callGeminiAPI(ctx, client, currentPrompt, currentContext)
+		responseText, toolCall, err := callGeminiAPI(ctx, client, currentPrompt, currentContext, disableContext)
 		if err != nil {
 			log.Printf("[Gemini Loop] Error from Gemini: %v", err)
 			return "", currentContext, err
 		}
-		// Always merge model-provided current_context/current_content, whether tool or final
-		if len(toolCall.GetMergedContext()) > 0 {
+		// Merge model-provided context only when enabled
+		if !disableContext && len(toolCall.GetMergedContext()) > 0 {
 			log.Printf("[Context] From toolCall: current_context=%v current_content=%v", toolCall.CurrentContext, toolCall.CurrentContent)
 			incoming := SanitizeContextFacts(toolCall.GetMergedContext())
 			currentContext = MergeStringSets(currentContext, incoming)

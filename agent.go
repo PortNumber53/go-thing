@@ -815,6 +815,266 @@ func main() {
         }
         c.JSON(http.StatusOK, gin.H{"id": uid, "username": username, "name": name})
     })
+    // Jira webhook endpoint (no CSRF; external origin). Optional token validation via config JIRA_WEBHOOK_TOKEN.
+    r.POST("/webhook/jira", func(c *gin.Context) {
+        // Optional shared token check
+        var expectedToken string
+        if cfg, err := utility.LoadConfig(); err == nil && cfg != nil {
+            expectedToken = strings.TrimSpace(cfg["JIRA_WEBHOOK_TOKEN"])
+        }
+        if expectedToken != "" {
+            got := strings.TrimSpace(c.Request.Header.Get("X-Webhook-Token"))
+            if got == "" || got != expectedToken {
+                log.Printf("[JiraWebhook] reject: missing or invalid X-Webhook-Token")
+                c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+                return
+            }
+        }
+
+        // Read body with a reasonable limit
+        c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20) // 1MB
+        body, err := io.ReadAll(c.Request.Body)
+        if err != nil {
+            log.Printf("[JiraWebhook] read error: %v", err)
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+            return
+        }
+        // Log the raw body for debugging/analysis (body already limited to 1MB above)
+        log.Printf("[JiraWebhook] raw body: %s", string(body))
+
+        // Try to parse JSON for structured logging
+        var payload map[string]interface{}
+        if err := json.Unmarshal(body, &payload); err != nil {
+            // If not JSON, just log raw (truncated)
+            raw := string(body)
+            if len(raw) > 512 {
+                raw = raw[:512] + "…"
+            }
+            log.Printf("[JiraWebhook] non-JSON payload: %s", raw)
+            c.JSON(http.StatusOK, gin.H{"ok": true})
+            return
+        }
+
+        // Extract some common Jira fields for visibility
+        event := ""
+        if v, ok := payload["webhookEvent"].(string); ok {
+            event = v
+        } else if v, ok := payload["issue_event_type_name"].(string); ok {
+            event = v
+        }
+        issueKey := ""
+        issueID := ""
+        fields := map[string]interface{}{}
+        if issue, ok := payload["issue"].(map[string]interface{}); ok {
+            if k, ok := issue["key"].(string); ok {
+                issueKey = k
+            }
+            switch idv := issue["id"].(type) {
+            case string:
+                issueID = idv
+            case float64:
+                issueID = strconv.FormatInt(int64(idv), 10)
+            }
+            if f, ok := issue["fields"].(map[string]interface{}); ok {
+                fields = f
+            }
+        }
+        // Fallback to top-level for Jira payloads that provide fields/id/key at root
+        if issueKey == "" {
+            if k, ok := payload["key"].(string); ok { issueKey = k }
+        }
+        if issueID == "" {
+            switch idv := payload["id"].(type) {
+            case string:
+                issueID = idv
+            case float64:
+                issueID = strconv.FormatInt(int64(idv), 10)
+            case json.Number:
+                if iv, err := idv.Int64(); err == nil { issueID = strconv.FormatInt(iv, 10) }
+            }
+        }
+        if len(fields) == 0 {
+            if f, ok := payload["fields"].(map[string]interface{}); ok {
+                fields = f
+            }
+        }
+        log.Printf("[JiraWebhook] event=%q issue=%q id=%q", event, issueKey, issueID)
+
+        // Build system prompt for AI Agent using requested fields
+        projectKey := ""
+        if p, ok := fields["project"].(map[string]interface{}); ok {
+            if k, ok := p["key"].(string); ok { projectKey = k }
+        }
+        if projectKey == "" {
+            if p, ok := payload["project"].(map[string]interface{}); ok {
+                if k, ok := p["key"].(string); ok { projectKey = k }
+            }
+        }
+        var labels []string
+        if la, ok := fields["labels"].([]interface{}); ok {
+            for _, lv := range la {
+                if s, ok := lv.(string); ok && s != "" {
+                    // Normalize strings that look like serialized arrays e.g., "['test']"
+                    trimmed := strings.TrimSpace(s)
+                    if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+                        inner := strings.Trim(trimmed, "[]")
+                        parts := strings.Split(inner, ",")
+                        for _, p := range parts {
+                            v := strings.TrimSpace(p)
+                            v = strings.Trim(v, "'\"")
+                            if v != "" { labels = append(labels, v) }
+                        }
+                        continue
+                    }
+                    labels = append(labels, trimmed)
+                }
+            }
+        }
+        statusName := ""
+        if st, ok := fields["status"].(map[string]interface{}); ok {
+            if n, ok := st["name"].(string); ok { statusName = n }
+        }
+        if statusName == "" {
+            if st, ok := payload["status"].(map[string]interface{}); ok {
+                if n, ok := st["name"].(string); ok { statusName = n }
+            } else if s, ok := payload["status"].(string); ok { statusName = s }
+        }
+        summary := ""
+        if s, ok := fields["summary"].(string); ok { summary = s }
+        // Some webhooks may not include fields.summary; try top-level fallback if present
+        if summary == "" {
+            if s, ok := payload["summary"].(string); ok { summary = s }
+        }
+        // Optional description, if available; included as extra context
+        description := ""
+        if s, ok := fields["description"].(string); ok { description = s }
+        if description == "" {
+            if s, ok := payload["description"].(string); ok { description = s }
+        }
+        // comments
+        var comments []string
+        if cmt, ok := fields["comment"].(map[string]interface{}); ok {
+            if arr, ok := cmt["comments"].([]interface{}); ok {
+                for _, cv := range arr {
+                    if cm, ok := cv.(map[string]interface{}); ok {
+                        // Jira v2/v3 comment body may be string or structured; try common keys
+                        if b, ok := cm["body"].(string); ok && b != "" {
+                            comments = append(comments, b)
+                        } else if cbody, ok := cm["renderedBody"].(string); ok && cbody != "" {
+                            comments = append(comments, cbody)
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback for comment events which place the comment at the top-level
+        if len(comments) == 0 {
+            if cm, ok := payload["comment"].(map[string]interface{}); ok {
+                if b, ok := cm["body"].(string); ok && b != "" { comments = append(comments, b) }
+                if rb, ok := cm["renderedBody"].(string); ok && rb != "" { comments = append(comments, rb) }
+            }
+        }
+        // Fallback labels at top-level if fields missing
+        if len(labels) == 0 {
+            if la, ok := payload["labels"].([]interface{}); ok {
+                for _, lv := range la {
+                    if s, ok := lv.(string); ok && s != "" { labels = append(labels, s) }
+                }
+            }
+        }
+
+        // Compose system prompt
+        prompt := strings.Builder{}
+        prompt.WriteString("You are an AI project assistant that evaluates Jira issues for clarity and completeness, and plans execution.\n")
+        prompt.WriteString("Input fields (from Jira webhook):\n")
+        prompt.WriteString(fmt.Sprintf("- project_key: %s\n", projectKey))
+        prompt.WriteString(fmt.Sprintf("- issue_key: %s\n", issueKey))
+        prompt.WriteString(fmt.Sprintf("- issue_id: %s\n", issueID))
+        prompt.WriteString(fmt.Sprintf("- status: %s\n", statusName))
+        if len(labels) > 0 {
+            prompt.WriteString(fmt.Sprintf("- labels: %s\n", strings.Join(labels, ", ")))
+        } else {
+            prompt.WriteString("- labels: (none)\n")
+        }
+        prompt.WriteString(fmt.Sprintf("- summary: %s\n", summary))
+        if strings.TrimSpace(description) != "" {
+            prompt.WriteString("- description: |\n")
+            for _, line := range strings.Split(description, "\n") {
+                prompt.WriteString("  ")
+                prompt.WriteString(line)
+                prompt.WriteString("\n")
+            }
+        }
+        if len(comments) > 0 {
+            prompt.WriteString("- comments:\n")
+            for _, cmt := range comments {
+                // ensure multi-line comments are indented for readability
+                lines := strings.Split(cmt, "\n")
+                for _, line := range lines {
+                    prompt.WriteString("  - ")
+                    prompt.WriteString(line)
+                    prompt.WriteString("\n")
+                }
+            }
+        } else {
+            prompt.WriteString("- comments: (none)\n")
+        }
+        prompt.WriteString("\nTask:\n")
+        prompt.WriteString("1) Analyze whether the provided information is sufficient to complete the task described by the summary.\n")
+        prompt.WriteString("2) If information is missing or unclear, output a list of comments to request EACH missing piece of information (one comment per missing/unclear item).\n")
+        prompt.WriteString("3) If the summary is sufficiently clear and complete, output a list of concrete subtasks that, if executed, will complete the task.\n")
+        prompt.WriteString("4) Your output must be in Markdown with the following schema: either a '### Missing Information Requests' section with bullet points, OR a '### Subtasks' section with bullet points. Do not include both.\n")
+        prompt.WriteString("\n")
+        prompt.WriteString("Tooling you can use (call by setting tool and args in your JSON response):\n")
+        prompt.WriteString("- jira_add_comment(issueIdOrKey: string, body: string|AtlassianDoc) — add a comment to the Jira issue.\n")
+        prompt.WriteString("\n")
+        prompt.WriteString("After your analysis, PLAN concrete tool usage so the workflow continues automatically:\n")
+        prompt.WriteString("- If you produce Missing Information Requests: set tool=\"jira_add_comment\" with args { issueIdOrKey: '"+issueKey+"', body: the Markdown list of questions } to post the questions to the issue.\n")
+        prompt.WriteString("- If you produce Subtasks: set tool=\"jira_add_comment\" with args { issueIdOrKey: '"+issueKey+"', body: the Markdown list under '### Subtasks' } to post the plan to the issue.\n")
+        prompt.WriteString("\n")
+        prompt.WriteString("Response schema (JSON object as code block) expected by the agent:\n")
+        prompt.WriteString("{\n  \"current_context\": [ ... ],\n  \"tool\": \"<optional tool name, e.g., jira_add_comment>\",\n  \"args\": { <tool args if any> },\n  \"final\": \"<concise user-facing summary in Markdown>\"\n}\n")
+
+        systemPrompt := prompt.String()
+        log.Printf("[JiraWebhook] system prompt (issue %s):\n%s", issueKey, systemPrompt)
+
+        // Kick off background processing to avoid delaying Jira response
+        go func(promptStr, issueKey string) {
+            defer func() {
+                if r := recover(); r != nil {
+                    log.Printf("[JiraWebhook][goroutine] recovered from panic: %v", r)
+                }
+            }()
+            threadID, err := getOrCreateAnyThread()
+            if err != nil {
+                log.Printf("[JiraWebhook] thread ensure error: %v", err)
+                return
+            }
+            if err := utility.StoreMessage(threadID, "user", promptStr, map[string]interface{}{"source": "jira", "issue_key": issueKey}); err != nil {
+                log.Printf("[JiraWebhook][DB] store user message error: %v", err)
+                return
+            }
+            // Temporarily disable current_context while debugging comment tool
+            // Use a background context with timeout so it isn't canceled when the HTTP request finishes
+            ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+            defer cancel()
+            resp, _, err := utility.GeminiAPIHandler(ctx, promptStr, nil)
+            if err != nil {
+                log.Printf("[JiraWebhook][Gemini] error: %v", err)
+                return
+            }
+            if strings.TrimSpace(resp) == "" {
+                resp = "**No response available.**"
+            }
+            if err := utility.StoreMessage(threadID, "assistant", resp, map[string]interface{}{"source": "jira", "issue_key": issueKey}); err != nil {
+                log.Printf("[JiraWebhook][DB] store assistant message error: %v", err)
+                return
+            }
+        }(systemPrompt, issueKey)
+
+        // Respond immediately to Jira with empty 200
+        c.Status(http.StatusOK)
+    })
 	// Shell session management endpoints
 	r.GET("/shell/sessions", func(c *gin.Context) {
 		ids := toolsrv.GetShellBroker().List()
