@@ -994,15 +994,52 @@ func main() {
 			return
 		}
 		if ev.Type == "event_callback" {
-			var cb struct {
-				Event slack.MessageEvent `json:"event"`
+			// Envelope contains the inner event as raw JSON so we can branch by type
+			var envelope struct {
+				Event json.RawMessage `json:"event"`
 			}
-			if err := json.Unmarshal(body, &cb); err != nil {
+			if err := json.Unmarshal(body, &envelope); err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid callback"})
 				return
 			}
-			utility.HandleSlackMessage(c, &cb.Event, getOrCreateAnyThread, utility.GeminiAPIHandler)
-			return
+			// Detect inner event type
+			var meta struct{ Type string `json:"type"` }
+			if err := json.Unmarshal(envelope.Event, &meta); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid inner event"})
+				return
+			}
+			switch meta.Type {
+			case "message":
+				var msg slack.MessageEvent
+				if err := json.Unmarshal(envelope.Event, &msg); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message event"})
+					return
+				}
+				utility.HandleSlackMessage(c, &msg, getOrCreateAnyThread, utility.GeminiAPIHandler)
+				return
+			case "app_home_opened":
+				var ah struct{
+					User string `json:"user"`
+					Tab  string `json:"tab"`
+				}
+				if err := json.Unmarshal(envelope.Event, &ah); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid app_home_opened event"})
+					return
+				}
+				if strings.TrimSpace(ah.User) == "" {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Missing user in app_home_opened"})
+					return
+				}
+				if err := utility.PublishSlackHomeTab(ah.User); err != nil {
+					log.Printf("[Slack Home] publish failed: %v", err)
+				}
+				c.JSON(http.StatusOK, gin.H{"status": "home updated"})
+				return
+			default:
+				// Ignore other inner events for now
+				c.JSON(http.StatusOK, gin.H{"status": "event ignored", "event_type": meta.Type})
+				return
+			}
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "event received"})
 	})

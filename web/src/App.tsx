@@ -4,6 +4,7 @@ import { fetchCSRFToken } from './utils/csrf'
 import LoginModal from './components/LoginModal'
 import SignupModal from './components/SignupModal'
 import { User, isUser } from './types'
+import useOutsideDismiss from './hooks/useOutsideDismiss'
 // Ensure marked.parse returns string (not Promise<string>)
 marked.setOptions({ async: false })
 
@@ -20,10 +21,24 @@ export default function App() {
   const [showSignup, setShowSignup] = React.useState(false)
   const [showLogin, setShowLogin] = React.useState(false)
   const [me, setMe] = React.useState<User | null>(null)
+  // Account dropdown menu state
+  const [showAccountMenu, setShowAccountMenu] = React.useState(false)
+  const accountBtnRef = React.useRef<HTMLButtonElement | null>(null)
+  const accountMenuRef = React.useRef<HTMLDivElement | null>(null)
 
   React.useEffect(() => {
     autoResize()
   }, [])
+
+  // Close Account menu on outside click or Escape via reusable hook
+  useOutsideDismiss(
+    [
+      accountBtnRef as unknown as React.RefObject<HTMLElement | null>,
+      accountMenuRef as unknown as React.RefObject<HTMLElement | null>,
+    ],
+    () => setShowAccountMenu(false),
+    { enabled: showAccountMenu, restoreFocusTo: accountBtnRef as unknown as React.RefObject<HTMLElement | null> }
+  )
 
   React.useEffect(() => {
     if (chatRef.current) {
@@ -131,10 +146,30 @@ export default function App() {
           <div className="brand">AI Agent Chat</div>
           <nav className="actions">
             {me ? (
-              <>
-                <span className="user">Hello, {me.name}</span>
-                <button className="link" type="button" onClick={logout}>Log Out</button>
-              </>
+              <div className="account">
+                <button
+                  ref={accountBtnRef}
+                  className="account-btn link"
+                  type="button"
+                  aria-haspopup="menu"
+                  aria-expanded={showAccountMenu}
+                  onClick={() => setShowAccountMenu(v => !v)}
+                >
+                  <span className="user">{me.name}</span>
+                  <span aria-hidden>▾</span>
+                </button>
+                {showAccountMenu && (
+                  <div
+                    ref={accountMenuRef}
+                    role="menu"
+                    className="account-menu"
+                  >
+                    <div className="menu-section">Account</div>
+                    {/* Placeholder for future account/settings pages */}
+                    <button role="menuitem" className="menu-item" onClick={() => { setShowAccountMenu(false); logout(); }}>Log out</button>
+                  </div>
+                )}
+              </div>
             ) : (
               <>
                 <button className="link" type="button" onClick={() => setShowSignup(true)}>Sign Up</button>
