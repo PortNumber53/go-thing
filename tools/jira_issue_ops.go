@@ -74,137 +74,187 @@ func handleADFField(fields map[string]interface{}, args map[string]interface{}, 
     }
 }
 
-// ----------------- jira_create_issue -----------------
-// POST /rest/api/3/issue
-func executeJiraCreateIssueTool(args map[string]interface{}) (*ToolResponse, error) {
-    // Build body
-    body := map[string]interface{}{}
-    fields := map[string]interface{}{}
+// ---- create_issue refactor helpers ----
+type jiraCreateIssueParams struct {
+    // Raw passthrough fields object (if provided)
+    Fields map[string]interface{}
 
-    // Allow full passthrough of fields if provided
+    // Convenience params
+    ProjectID       string
+    ProjectKey      string
+    IssueTypeID     string
+    IssueTypeName   string
+    Summary         string
+    Description     interface{} // string or map[string]interface{} (handled via handleADFField at build time)
+    Environment     interface{} // string or map[string]interface{}
+    Labels          interface{} // []string | []interface{} | string
+    PriorityName    string
+    PriorityID      string
+    AssigneeAcctID  string
+    ReporterAcctID  string
+    ParentID        string
+    ParentKey       string
+
+    // Optional top-level keys
+    Update          interface{}
+    Properties      interface{}
+    HistoryMetadata interface{}
+    Transition      interface{}
+}
+
+// parseJiraCreateIssueArgs normalizes and validates args into jiraCreateIssueParams.
+// It preserves existing behavior including JSON validation for certain string inputs.
+func parseJiraCreateIssueArgs(args map[string]interface{}) (*jiraCreateIssueParams, *ToolResponse) {
+    p := &jiraCreateIssueParams{Fields: map[string]interface{}{}}
+
+    // fields passthrough may be JSON string or object
     if raw, ok := args["fields"]; ok {
         switch v := raw.(type) {
         case string:
             if strings.TrimSpace(v) != "" {
                 var obj map[string]interface{}
                 if err := json.Unmarshal([]byte(v), &obj); err == nil {
-                    fields = obj
+                    p.Fields = obj
                 } else {
-                    return &ToolResponse{Success: false, Error: fmt.Sprintf("invalid fields JSON: %v", err)}, nil
+                    return nil, &ToolResponse{Success: false, Error: fmt.Sprintf("invalid fields JSON: %v", err)}
                 }
             }
         case map[string]interface{}:
-            fields = v
+            p.Fields = v
         }
     }
 
-    // Convenience parameters (merged over existing fields without clobbering nested maps unexpectedly)
-    ensureMap := func(m map[string]interface{}, key string) map[string]interface{} {
-        if child, ok := m[key].(map[string]interface{}); ok {
-            return child
+    // Convenience params
+    if v, _ := args["projectId"].(string); v != "" { p.ProjectID = v }
+    if v, _ := args["projectKey"].(string); v != "" { p.ProjectKey = v }
+    if v, _ := args["issuetypeId"].(string); v != "" { p.IssueTypeID = v }
+    if v, _ := args["issuetypeName"].(string); v != "" { p.IssueTypeName = v }
+    if v, _ := args["summary"].(string); v != "" { p.Summary = v }
+    if v, ok := args["description"]; ok { p.Description = v }
+    if v, ok := args["environment"]; ok { p.Environment = v }
+    if v, ok := args["labels"]; ok { p.Labels = v }
+    if v, _ := args["priorityName"].(string); v != "" { p.PriorityName = v }
+    if v, _ := args["priorityId"].(string); v != "" { p.PriorityID = v }
+    if v, _ := args["assigneeAccountId"].(string); v != "" { p.AssigneeAcctID = v }
+    if v, _ := args["reporterAccountId"].(string); v != "" { p.ReporterAcctID = v }
+    if v, _ := args["parentId"].(string); v != "" { p.ParentID = v }
+    if v, _ := args["parentKey"].(string); v != "" { p.ParentKey = v }
+
+    // Optional top-level keys: if provided as JSON string, validate and unmarshal
+    validateJSONOrPass := func(name string) (interface{}, *ToolResponse) {
+        if v, ok := args[name]; ok {
+            if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+                var obj interface{}
+                if err := json.Unmarshal([]byte(s), &obj); err != nil {
+                    return nil, &ToolResponse{Success: false, Error: fmt.Sprintf("invalid JSON for parameter '%s': %v", name, err)}
+                }
+                return obj, nil
+            }
+            return v, nil
         }
+        return nil, nil
+    }
+    if v, tr := validateJSONOrPass("update"); tr != nil { return nil, tr } else { p.Update = v }
+    if v, tr := validateJSONOrPass("properties"); tr != nil { return nil, tr } else { p.Properties = v }
+    if v, tr := validateJSONOrPass("historyMetadata"); tr != nil { return nil, tr } else { p.HistoryMetadata = v }
+    if v, tr := validateJSONOrPass("transition"); tr != nil { return nil, tr } else { p.Transition = v }
+
+    return p, nil
+}
+
+// buildJiraCreateIssueBody produces the final request body with fields and optional sections.
+func buildJiraCreateIssueBody(p *jiraCreateIssueParams) (map[string]interface{}, *ToolResponse) {
+    body := map[string]interface{}{}
+    fields := p.Fields
+
+    // helper to ensure nested map
+    ensureMap := func(m map[string]interface{}, key string) map[string]interface{} {
+        if child, ok := m[key].(map[string]interface{}); ok { return child }
         child := map[string]interface{}{}
         m[key] = child
         return child
     }
 
-    // environment and description (ADF-capable fields)
-    handleADFField(fields, args, "environment")
+    // environment & description wrapping via existing helper (uses args view), so emulate args for these two keys
+    if p.Environment != nil { handleADFField(fields, map[string]interface{}{"environment": p.Environment}, "environment") }
 
-    // project: prefer id over key (avoid setting both)
-    if v, ok := args["projectId"].(string); ok && v != "" {
-        p := ensureMap(fields, "project")
-        p["id"] = v
-    } else if v, ok := args["projectKey"].(string); ok && v != "" {
-        p := ensureMap(fields, "project")
-        p["key"] = v
+    // project: prefer id over key
+    if p.ProjectID != "" {
+        ensureMap(fields, "project")["id"] = p.ProjectID
+    } else if p.ProjectKey != "" {
+        ensureMap(fields, "project")["key"] = p.ProjectKey
     }
 
-    // issuetype: prefer id over name (avoid setting both)
-    if v, ok := args["issuetypeId"].(string); ok && v != "" {
-        it := ensureMap(fields, "issuetype")
-        it["id"] = v
-    } else if v, ok := args["issuetypeName"].(string); ok && v != "" {
-        it := ensureMap(fields, "issuetype")
-        it["name"] = v
+    // issuetype: prefer id over name
+    if p.IssueTypeID != "" {
+        ensureMap(fields, "issuetype")["id"] = p.IssueTypeID
+    } else if p.IssueTypeName != "" {
+        ensureMap(fields, "issuetype")["name"] = p.IssueTypeName
     }
 
     // summary
-    if v, ok := args["summary"].(string); ok && v != "" {
-        fields["summary"] = v
-    }
+    if p.Summary != "" { fields["summary"] = p.Summary }
 
-    handleADFField(fields, args, "description")
+    // description (ADF-capable)
+    if p.Description != nil { handleADFField(fields, map[string]interface{}{"description": p.Description}, "description") }
 
-    // labels: accept []interface{}, []string, or comma-separated string
-    if raw, ok := args["labels"]; ok {
+    // labels parsing
+    if p.Labels != nil {
         var arr []string
-        switch v := raw.(type) {
+        switch v := p.Labels.(type) {
         case []interface{}:
-            for _, it := range v {
-                if s, ok := it.(string); ok && strings.TrimSpace(s) != "" {
-                    arr = append(arr, strings.TrimSpace(s))
-                }
-            }
+            for _, it := range v { if s, ok := it.(string); ok && strings.TrimSpace(s) != "" { arr = append(arr, strings.TrimSpace(s)) } }
         case []string:
-            for _, s := range v {
-                if strings.TrimSpace(s) != "" {
-                    arr = append(arr, strings.TrimSpace(s))
-                }
-            }
+            for _, s := range v { if strings.TrimSpace(s) != "" { arr = append(arr, strings.TrimSpace(s)) } }
         case string:
-            for _, s := range strings.Split(v, ",") {
-                if strings.TrimSpace(s) != "" {
-                    arr = append(arr, strings.TrimSpace(s))
-                }
-            }
+            for _, s := range strings.Split(v, ",") { if strings.TrimSpace(s) != "" { arr = append(arr, strings.TrimSpace(s)) } }
         }
         if len(arr) > 0 { fields["labels"] = arr }
     }
 
-    // priority by name or id
-    if v, ok := args["priorityName"].(string); ok && v != "" {
-        fields["priority"] = map[string]interface{}{"name": v}
-    }
-    if v, ok := args["priorityId"].(string); ok && v != "" {
-        fields["priority"] = map[string]interface{}{"id": v}
-    }
-
-    // assignee / reporter by accountId
-    if v, ok := args["assigneeAccountId"].(string); ok && v != "" {
-        fields["assignee"] = map[string]interface{}{"accountId": v}
-    }
-    if v, ok := args["reporterAccountId"].(string); ok && v != "" {
-        fields["reporter"] = map[string]interface{}{"accountId": v}
+    // priority: prefer id over name (avoid setting both)
+    if p.PriorityID != "" {
+        fields["priority"] = map[string]interface{}{"id": p.PriorityID}
+    } else if p.PriorityName != "" {
+        fields["priority"] = map[string]interface{}{"name": p.PriorityName}
     }
 
-    // parent (for subtasks): support id or key
-    if v, ok := args["parentId"].(string); ok && v != "" {
-        fields["parent"] = map[string]interface{}{"id": v}
-    } else if v, ok := args["parentKey"].(string); ok && v != "" {
-        fields["parent"] = map[string]interface{}{"key": v}
+    // assignee / reporter
+    if p.AssigneeAcctID != "" { fields["assignee"] = map[string]interface{}{"accountId": p.AssigneeAcctID} }
+    if p.ReporterAcctID != "" { fields["reporter"] = map[string]interface{}{"accountId": p.ReporterAcctID} }
+
+    // parent
+    if p.ParentID != "" {
+        fields["parent"] = map[string]interface{}{"id": p.ParentID}
+    } else if p.ParentKey != "" {
+        fields["parent"] = map[string]interface{}{"key": p.ParentKey}
     }
 
     if len(fields) == 0 {
-        return &ToolResponse{Success: false, Error: "fields are required (provide 'fields' or convenience params like projectKey/issuetypeId/summary)"}, nil
+        return nil, &ToolResponse{Success: false, Error: "fields are required (provide 'fields' or convenience params like projectKey/issuetypeId/summary)"}
     }
+
     body["fields"] = fields
 
-    // Optional: update/properties/historyMetadata/transition passthrough
-    for _, k := range []string{"update", "properties", "historyMetadata", "transition"} {
-        if v, ok := args[k]; ok {
-            // If provided as JSON string, it must be valid JSON.
-            if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-                var obj interface{}
-                if err := json.Unmarshal([]byte(s), &obj); err != nil {
-                    return &ToolResponse{Success: false, Error: fmt.Sprintf("invalid JSON for parameter '%s': %v", k, err)}, nil
-                }
-                body[k] = obj
-            } else {
-                body[k] = v
-            }
-        }
-    }
+    // Optional passthrough sections
+    if p.Update != nil { body["update"] = p.Update }
+    if p.Properties != nil { body["properties"] = p.Properties }
+    if p.HistoryMetadata != nil { body["historyMetadata"] = p.HistoryMetadata }
+    if p.Transition != nil { body["transition"] = p.Transition }
+
+    return body, nil
+}
+
+// ----------------- jira_create_issue -----------------
+// POST /rest/api/3/issue
+func executeJiraCreateIssueTool(args map[string]interface{}) (*ToolResponse, error) {
+    // Parse args
+    params, tr := parseJiraCreateIssueArgs(args)
+    if tr != nil { return tr, nil }
+
+    // Build body
+    body, tr2 := buildJiraCreateIssueBody(params)
+    if tr2 != nil { return tr2, nil }
 
     status, respBody, _, err := jiraDo("POST", "/rest/api/3/issue", nil, body)
     if err != nil {
