@@ -39,38 +39,37 @@ func jiraBuildRequest(method, fullURL, email, token string, body []byte) (*http.
 	return req, nil
 }
 
-// handleADFField reads args[fieldName] and sets fields[fieldName] appropriately.
-// It accepts either:
+// processADFValue handles an ADF-capable value which can be either:
 // - string: if JSON object, parse; otherwise wrap as minimal ADF doc
 // - map[string]interface{}: use as-is
-func handleADFField(fields map[string]interface{}, args map[string]interface{}, fieldName string) {
-    if raw, ok := args[fieldName]; ok {
-        switch v := raw.(type) {
-        case string:
-            s := strings.TrimSpace(v)
-            if s == "" {
-                return
-            }
-            if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
-                var obj map[string]interface{}
-                if err := json.Unmarshal([]byte(s), &obj); err == nil {
-                    fields[fieldName] = obj
-                    return
-                }
-            }
-            fields[fieldName] = map[string]interface{}{
-                "type":    "doc",
-                "version": 1,
-                "content": []interface{}{
-                    map[string]interface{}{
-                        "type":    "paragraph",
-                        "content": []interface{}{map[string]interface{}{"type": "text", "text": s}},
-                    },
-                },
-            }
-        case map[string]interface{}:
-            fields[fieldName] = v
+// It returns the processed value and a bool indicating whether it should be set.
+func processADFValue(raw interface{}) (interface{}, bool) {
+    switch v := raw.(type) {
+    case string:
+        s := strings.TrimSpace(v)
+        if s == "" {
+            return nil, false
         }
+        if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
+            var obj map[string]interface{}
+            if err := json.Unmarshal([]byte(s), &obj); err == nil {
+                return obj, true
+            }
+        }
+        return map[string]interface{}{
+            "type":    "doc",
+            "version": 1,
+            "content": []interface{}{
+                map[string]interface{}{
+                    "type":    "paragraph",
+                    "content": []interface{}{map[string]interface{}{"type": "text", "text": s}},
+                },
+            },
+        }, true
+    case map[string]interface{}:
+        return v, v != nil
+    default:
+        return nil, false
     }
 }
 
@@ -114,13 +113,19 @@ func parseJiraCreateIssueArgs(args map[string]interface{}) (*jiraCreateIssuePara
             if strings.TrimSpace(v) != "" {
                 var obj map[string]interface{}
                 if err := json.Unmarshal([]byte(v), &obj); err == nil {
-                    p.Fields = obj
+                    // Only assign if the decoded object is non-nil (avoid nil map)
+                    if obj != nil {
+                        p.Fields = obj
+                    }
                 } else {
                     return nil, &ToolResponse{Success: false, Error: fmt.Sprintf("invalid fields JSON: %v", err)}
                 }
             }
         case map[string]interface{}:
-            p.Fields = v
+            // Guard against assigning a nil map (e.g., from JSON null)
+            if v != nil {
+                p.Fields = v
+            }
         }
     }
 
@@ -198,8 +203,8 @@ func buildJiraCreateIssueBody(p *jiraCreateIssueParams) (map[string]interface{},
         return child
     }
 
-    // environment & description wrapping via existing helper (uses args view), so emulate args for these two keys
-    if p.Environment != nil { handleADFField(fields, map[string]interface{}{"environment": p.Environment}, "environment") }
+    // environment
+    if processedEnv, ok := processADFValue(p.Environment); ok { fields["environment"] = processedEnv }
 
     // project: prefer id over key
     if p.ProjectID != "" {
@@ -219,7 +224,7 @@ func buildJiraCreateIssueBody(p *jiraCreateIssueParams) (map[string]interface{},
     if p.Summary != "" { fields["summary"] = p.Summary }
 
     // description (ADF-capable)
-    if p.Description != nil { handleADFField(fields, map[string]interface{}{"description": p.Description}, "description") }
+    if processedDesc, ok := processADFValue(p.Description); ok { fields["description"] = processedDesc }
 
     // labels parsing
     if p.Labels != nil {
