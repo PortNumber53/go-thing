@@ -39,6 +39,41 @@ func jiraBuildRequest(method, fullURL, email, token string, body []byte) (*http.
 	return req, nil
 }
 
+// handleADFField reads args[fieldName] and sets fields[fieldName] appropriately.
+// It accepts either:
+// - string: if JSON object, parse; otherwise wrap as minimal ADF doc
+// - map[string]interface{}: use as-is
+func handleADFField(fields map[string]interface{}, args map[string]interface{}, fieldName string) {
+    if raw, ok := args[fieldName]; ok {
+        switch v := raw.(type) {
+        case string:
+            s := strings.TrimSpace(v)
+            if s == "" {
+                return
+            }
+            if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
+                var obj map[string]interface{}
+                if err := json.Unmarshal([]byte(s), &obj); err == nil {
+                    fields[fieldName] = obj
+                    return
+                }
+            }
+            fields[fieldName] = map[string]interface{}{
+                "type":    "doc",
+                "version": 1,
+                "content": []interface{}{
+                    map[string]interface{}{
+                        "type":    "paragraph",
+                        "content": []interface{}{map[string]interface{}{"type": "text", "text": s}},
+                    },
+                },
+            }
+        case map[string]interface{}:
+            fields[fieldName] = v
+        }
+    }
+}
+
 // ----------------- jira_create_issue -----------------
 // POST /rest/api/3/issue
 func executeJiraCreateIssueTool(args map[string]interface{}) (*ToolResponse, error) {
@@ -57,46 +92,6 @@ func executeJiraCreateIssueTool(args map[string]interface{}) (*ToolResponse, err
                 } else {
                     return &ToolResponse{Success: false, Error: fmt.Sprintf("invalid fields JSON: %v", err)}, nil
                 }
-
-    // environment: accept string and wrap to minimal ADF; or accept object JSON string
-    if raw, ok := args["environment"]; ok {
-        switch v := raw.(type) {
-        case string:
-            s := strings.TrimSpace(v)
-            if s != "" {
-                if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
-                    var obj map[string]interface{}
-                    if err := json.Unmarshal([]byte(s), &obj); err == nil {
-                        fields["environment"] = obj
-                    } else {
-                        fields["environment"] = map[string]interface{}{
-                            "type":    "doc",
-                            "version": 1,
-                            "content": []interface{}{
-                                map[string]interface{}{
-                                    "type":    "paragraph",
-                                    "content": []interface{}{map[string]interface{}{"type": "text", "text": s}},
-                                },
-                            },
-                        }
-                    }
-                } else {
-                    fields["environment"] = map[string]interface{}{
-                        "type":    "doc",
-                        "version": 1,
-                        "content": []interface{}{
-                            map[string]interface{}{
-                                "type":    "paragraph",
-                                "content": []interface{}{map[string]interface{}{"type": "text", "text": s}},
-                            },
-                        },
-                    }
-                }
-            }
-        case map[string]interface{}:
-            fields["environment"] = v
-        }
-    }
             }
         case map[string]interface{}:
             fields = v
@@ -112,6 +107,9 @@ func executeJiraCreateIssueTool(args map[string]interface{}) (*ToolResponse, err
         m[key] = child
         return child
     }
+
+    // environment and description (ADF-capable fields)
+    handleADFField(fields, args, "environment")
 
     // project: by key or id
     if v, ok := args["projectKey"].(string); ok && v != "" {
@@ -138,48 +136,7 @@ func executeJiraCreateIssueTool(args map[string]interface{}) (*ToolResponse, err
         fields["summary"] = v
     }
 
-    // description: accept string and wrap to minimal ADF; or accept object JSON string
-    if raw, ok := args["description"]; ok {
-        switch v := raw.(type) {
-        case string:
-            s := strings.TrimSpace(v)
-            if s != "" {
-                // If looks like JSON object, try to parse and use as-is
-                if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
-                    var obj map[string]interface{}
-                    if err := json.Unmarshal([]byte(s), &obj); err == nil {
-                        fields["description"] = obj
-                    } else {
-                        // fallback to ADF wrap
-                        fields["description"] = map[string]interface{}{
-                            "type":    "doc",
-                            "version": 1,
-                            "content": []interface{}{
-                                map[string]interface{}{
-                                    "type":    "paragraph",
-                                    "content": []interface{}{map[string]interface{}{"type": "text", "text": s}},
-                                },
-                            },
-                        }
-                    }
-                } else {
-                    // wrap plain string into ADF
-                    fields["description"] = map[string]interface{}{
-                        "type":    "doc",
-                        "version": 1,
-                        "content": []interface{}{
-                            map[string]interface{}{
-                                "type":    "paragraph",
-                                "content": []interface{}{map[string]interface{}{"type": "text", "text": s}},
-                            },
-                        },
-                    }
-                }
-            }
-        case map[string]interface{}:
-            fields["description"] = v
-        }
-    }
+    handleADFField(fields, args, "description")
 
     // labels: accept []interface{}, []string, or comma-separated string
     if raw, ok := args["labels"]; ok {
@@ -192,9 +149,17 @@ func executeJiraCreateIssueTool(args map[string]interface{}) (*ToolResponse, err
                 }
             }
         case []string:
-            for _, s := range v { if strings.TrimSpace(s) != "" { arr = append(arr, strings.TrimSpace(s)) } }
+            for _, s := range v {
+                if strings.TrimSpace(s) != "" {
+                    arr = append(arr, strings.TrimSpace(s))
+                }
+            }
         case string:
-            for _, s := range strings.Split(v, ",") { if strings.TrimSpace(s) != "" { arr = append(arr, strings.TrimSpace(s)) } }
+            for _, s := range strings.Split(v, ",") {
+                if strings.TrimSpace(s) != "" {
+                    arr = append(arr, strings.TrimSpace(s))
+                }
+            }
         }
         if len(arr) > 0 { fields["labels"] = arr }
     }
@@ -246,13 +211,7 @@ func executeJiraCreateIssueTool(args map[string]interface{}) (*ToolResponse, err
     if err != nil {
         return &ToolResponse{Success: false, Error: err.Error()}, nil
     }
-    if status == http.StatusCreated { // 201
-        var obj map[string]interface{}
-        if err := json.Unmarshal(respBody, &obj); err == nil {
-            return &ToolResponse{Success: true, Data: obj}, nil
-        }
-        return &ToolResponse{Success: true, Data: map[string]interface{}{"message": "issue created"}}, nil
-    }
+    // Handle non-2xx first
     if status < 200 || status >= 300 {
         // Try to parse Jira error details
         var eobj map[string]interface{}
@@ -270,7 +229,7 @@ func executeJiraCreateIssueTool(args map[string]interface{}) (*ToolResponse, err
         }
         return &ToolResponse{Success: false, Error: fmt.Sprintf("jira create issue failed: %d", status)}, nil
     }
-    // Other 2xx (rare)
+    // All 2xx success statuses
     var obj interface{}
     if len(respBody) > 0 && json.Unmarshal(respBody, &obj) == nil {
         return &ToolResponse{Success: true, Data: obj}, nil
