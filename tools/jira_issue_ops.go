@@ -125,20 +125,30 @@ func parseJiraCreateIssueArgs(args map[string]interface{}) (*jiraCreateIssuePara
     }
 
     // Convenience params
-    if v, _ := args["projectId"].(string); v != "" { p.ProjectID = v }
-    if v, _ := args["projectKey"].(string); v != "" { p.ProjectKey = v }
-    if v, _ := args["issuetypeId"].(string); v != "" { p.IssueTypeID = v }
-    if v, _ := args["issuetypeName"].(string); v != "" { p.IssueTypeName = v }
-    if v, _ := args["summary"].(string); v != "" { p.Summary = v }
+    // Centralize string-based convenience params for maintainability
+    stringParams := map[string]*string{
+        "projectId":         &p.ProjectID,
+        "projectKey":        &p.ProjectKey,
+        "issuetypeId":       &p.IssueTypeID,
+        "issuetypeName":     &p.IssueTypeName,
+        "summary":           &p.Summary,
+        "priorityName":      &p.PriorityName,
+        "priorityId":        &p.PriorityID,
+        "assigneeAccountId": &p.AssigneeAcctID,
+        "reporterAccountId": &p.ReporterAcctID,
+        "parentId":          &p.ParentID,
+        "parentKey":         &p.ParentKey,
+    }
+    for name, ptr := range stringParams {
+        if v, ok := args[name].(string); ok && v != "" {
+            *ptr = v
+        }
+    }
+
+    // Non-string or mixed-type convenience params
     if v, ok := args["description"]; ok { p.Description = v }
     if v, ok := args["environment"]; ok { p.Environment = v }
     if v, ok := args["labels"]; ok { p.Labels = v }
-    if v, _ := args["priorityName"].(string); v != "" { p.PriorityName = v }
-    if v, _ := args["priorityId"].(string); v != "" { p.PriorityID = v }
-    if v, _ := args["assigneeAccountId"].(string); v != "" { p.AssigneeAcctID = v }
-    if v, _ := args["reporterAccountId"].(string); v != "" { p.ReporterAcctID = v }
-    if v, _ := args["parentId"].(string); v != "" { p.ParentID = v }
-    if v, _ := args["parentKey"].(string); v != "" { p.ParentKey = v }
 
     // Optional top-level keys: if provided as JSON string, validate and unmarshal
     validateJSONOrPass := func(name string) (interface{}, *ToolResponse) {
@@ -154,10 +164,23 @@ func parseJiraCreateIssueArgs(args map[string]interface{}) (*jiraCreateIssuePara
         }
         return nil, nil
     }
-    if v, tr := validateJSONOrPass("update"); tr != nil { return nil, tr } else { p.Update = v }
-    if v, tr := validateJSONOrPass("properties"); tr != nil { return nil, tr } else { p.Properties = v }
-    if v, tr := validateJSONOrPass("historyMetadata"); tr != nil { return nil, tr } else { p.HistoryMetadata = v }
-    if v, tr := validateJSONOrPass("transition"); tr != nil { return nil, tr } else { p.Transition = v }
+    // DRY handling of optional top-level keys
+    optionalKeys := []struct {
+        name string
+        ptr  *interface{}
+    }{
+        {"update", &p.Update},
+        {"properties", &p.Properties},
+        {"historyMetadata", &p.HistoryMetadata},
+        {"transition", &p.Transition},
+    }
+    for _, key := range optionalKeys {
+        v, tr := validateJSONOrPass(key.name)
+        if tr != nil {
+            return nil, tr
+        }
+        *key.ptr = v
+    }
 
     return p, nil
 }
@@ -203,11 +226,23 @@ func buildJiraCreateIssueBody(p *jiraCreateIssueParams) (map[string]interface{},
         var arr []string
         switch v := p.Labels.(type) {
         case []interface{}:
-            for _, it := range v { if s, ok := it.(string); ok && strings.TrimSpace(s) != "" { arr = append(arr, strings.TrimSpace(s)) } }
+            for _, it := range v {
+                if s, ok := it.(string); ok && strings.TrimSpace(s) != "" {
+                    arr = append(arr, strings.TrimSpace(s))
+                }
+            }
         case []string:
-            for _, s := range v { if strings.TrimSpace(s) != "" { arr = append(arr, strings.TrimSpace(s)) } }
+            for _, s := range v {
+                if strings.TrimSpace(s) != "" {
+                    arr = append(arr, strings.TrimSpace(s))
+                }
+            }
         case string:
-            for _, s := range strings.Split(v, ",") { if strings.TrimSpace(s) != "" { arr = append(arr, strings.TrimSpace(s)) } }
+            for _, s := range strings.Split(v, ",") {
+                if strings.TrimSpace(s) != "" {
+                    arr = append(arr, strings.TrimSpace(s))
+                }
+            }
         }
         if len(arr) > 0 { fields["labels"] = arr }
     }
