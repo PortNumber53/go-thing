@@ -22,8 +22,12 @@ func GetLastContextForThread(threadID int64) ([]string, error) {
          WHERE thread_id=$1
            AND role = 'assistant'
            AND metadata ? 'current_context'
-           AND jsonb_typeof(metadata->'current_context') = 'array'
-           AND jsonb_array_length(metadata->'current_context') > 0
+           AND (
+             CASE WHEN jsonb_typeof(metadata->'current_context') = 'array'
+                  THEN jsonb_array_length(metadata->'current_context')
+                  ELSE 0
+             END
+           ) > 0
          ORDER BY id DESC LIMIT 1`, threadID,
 	).Scan(&metaBytes)
 	if err != nil {

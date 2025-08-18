@@ -39,6 +39,245 @@ func jiraBuildRequest(method, fullURL, email, token string, body []byte) (*http.
 	return req, nil
 }
 
+// ----------------- jira_create_issue -----------------
+// POST /rest/api/3/issue
+func executeJiraCreateIssueTool(args map[string]interface{}) (*ToolResponse, error) {
+    // Build body
+    body := map[string]interface{}{}
+    fields := map[string]interface{}{}
+
+    // Allow full passthrough of fields if provided
+    if raw, ok := args["fields"]; ok {
+        switch v := raw.(type) {
+        case string:
+            if strings.TrimSpace(v) != "" {
+                var obj map[string]interface{}
+                if err := json.Unmarshal([]byte(v), &obj); err == nil {
+                    fields = obj
+                } else {
+                    return &ToolResponse{Success: false, Error: fmt.Sprintf("invalid fields JSON: %v", err)}, nil
+                }
+
+    // environment: accept string and wrap to minimal ADF; or accept object JSON string
+    if raw, ok := args["environment"]; ok {
+        switch v := raw.(type) {
+        case string:
+            s := strings.TrimSpace(v)
+            if s != "" {
+                if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
+                    var obj map[string]interface{}
+                    if err := json.Unmarshal([]byte(s), &obj); err == nil {
+                        fields["environment"] = obj
+                    } else {
+                        fields["environment"] = map[string]interface{}{
+                            "type":    "doc",
+                            "version": 1,
+                            "content": []interface{}{
+                                map[string]interface{}{
+                                    "type":    "paragraph",
+                                    "content": []interface{}{map[string]interface{}{"type": "text", "text": s}},
+                                },
+                            },
+                        }
+                    }
+                } else {
+                    fields["environment"] = map[string]interface{}{
+                        "type":    "doc",
+                        "version": 1,
+                        "content": []interface{}{
+                            map[string]interface{}{
+                                "type":    "paragraph",
+                                "content": []interface{}{map[string]interface{}{"type": "text", "text": s}},
+                            },
+                        },
+                    }
+                }
+            }
+        case map[string]interface{}:
+            fields["environment"] = v
+        }
+    }
+            }
+        case map[string]interface{}:
+            fields = v
+        }
+    }
+
+    // Convenience parameters (merged over existing fields without clobbering nested maps unexpectedly)
+    ensureMap := func(m map[string]interface{}, key string) map[string]interface{} {
+        if child, ok := m[key].(map[string]interface{}); ok {
+            return child
+        }
+        child := map[string]interface{}{}
+        m[key] = child
+        return child
+    }
+
+    // project: by key or id
+    if v, ok := args["projectKey"].(string); ok && v != "" {
+        p := ensureMap(fields, "project")
+        p["key"] = v
+    }
+    if v, ok := args["projectId"].(string); ok && v != "" {
+        p := ensureMap(fields, "project")
+        p["id"] = v
+    }
+
+    // issuetype: by id or name
+    if v, ok := args["issuetypeId"].(string); ok && v != "" {
+        it := ensureMap(fields, "issuetype")
+        it["id"] = v
+    }
+    if v, ok := args["issuetypeName"].(string); ok && v != "" {
+        it := ensureMap(fields, "issuetype")
+        it["name"] = v
+    }
+
+    // summary
+    if v, ok := args["summary"].(string); ok && v != "" {
+        fields["summary"] = v
+    }
+
+    // description: accept string and wrap to minimal ADF; or accept object JSON string
+    if raw, ok := args["description"]; ok {
+        switch v := raw.(type) {
+        case string:
+            s := strings.TrimSpace(v)
+            if s != "" {
+                // If looks like JSON object, try to parse and use as-is
+                if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
+                    var obj map[string]interface{}
+                    if err := json.Unmarshal([]byte(s), &obj); err == nil {
+                        fields["description"] = obj
+                    } else {
+                        // fallback to ADF wrap
+                        fields["description"] = map[string]interface{}{
+                            "type":    "doc",
+                            "version": 1,
+                            "content": []interface{}{
+                                map[string]interface{}{
+                                    "type":    "paragraph",
+                                    "content": []interface{}{map[string]interface{}{"type": "text", "text": s}},
+                                },
+                            },
+                        }
+                    }
+                } else {
+                    // wrap plain string into ADF
+                    fields["description"] = map[string]interface{}{
+                        "type":    "doc",
+                        "version": 1,
+                        "content": []interface{}{
+                            map[string]interface{}{
+                                "type":    "paragraph",
+                                "content": []interface{}{map[string]interface{}{"type": "text", "text": s}},
+                            },
+                        },
+                    }
+                }
+            }
+        case map[string]interface{}:
+            fields["description"] = v
+        }
+    }
+
+    // labels: accept []interface{}, []string, or comma-separated string
+    if raw, ok := args["labels"]; ok {
+        var arr []string
+        switch v := raw.(type) {
+        case []interface{}:
+            for _, it := range v {
+                if s, ok := it.(string); ok && strings.TrimSpace(s) != "" {
+                    arr = append(arr, strings.TrimSpace(s))
+                }
+            }
+        case []string:
+            for _, s := range v { if strings.TrimSpace(s) != "" { arr = append(arr, strings.TrimSpace(s)) } }
+        case string:
+            for _, s := range strings.Split(v, ",") { if strings.TrimSpace(s) != "" { arr = append(arr, strings.TrimSpace(s)) } }
+        }
+        if len(arr) > 0 { fields["labels"] = arr }
+    }
+
+    // priority by name or id
+    if v, ok := args["priorityName"].(string); ok && v != "" {
+        fields["priority"] = map[string]interface{}{"name": v}
+    }
+    if v, ok := args["priorityId"].(string); ok && v != "" {
+        fields["priority"] = map[string]interface{}{"id": v}
+    }
+
+    // assignee / reporter by accountId
+    if v, ok := args["assigneeAccountId"].(string); ok && v != "" {
+        fields["assignee"] = map[string]interface{}{"accountId": v}
+    }
+    if v, ok := args["reporterAccountId"].(string); ok && v != "" {
+        fields["reporter"] = map[string]interface{}{"accountId": v}
+    }
+
+    // parent (for subtasks): support id or key
+    if v, ok := args["parentId"].(string); ok && v != "" {
+        fields["parent"] = map[string]interface{}{"id": v}
+    } else if v, ok := args["parentKey"].(string); ok && v != "" {
+        fields["parent"] = map[string]interface{}{"key": v}
+    }
+
+    if len(fields) == 0 {
+        return &ToolResponse{Success: false, Error: "fields are required (provide 'fields' or convenience params like projectKey/issuetypeId/summary)"}, nil
+    }
+    body["fields"] = fields
+
+    // Optional: update/properties/historyMetadata/transition passthrough
+    for _, k := range []string{"update", "properties", "historyMetadata", "transition"} {
+        if v, ok := args[k]; ok {
+            // If provided as JSON string, try to parse
+            if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+                var obj interface{}
+                if err := json.Unmarshal([]byte(s), &obj); err == nil {
+                    body[k] = obj
+                    continue
+                }
+            }
+            body[k] = v
+        }
+    }
+
+    status, respBody, _, err := jiraDo("POST", "/rest/api/3/issue", nil, body)
+    if err != nil {
+        return &ToolResponse{Success: false, Error: err.Error()}, nil
+    }
+    if status == http.StatusCreated { // 201
+        var obj map[string]interface{}
+        if err := json.Unmarshal(respBody, &obj); err == nil {
+            return &ToolResponse{Success: true, Data: obj}, nil
+        }
+        return &ToolResponse{Success: true, Data: map[string]interface{}{"message": "issue created"}}, nil
+    }
+    if status < 200 || status >= 300 {
+        // Try to parse Jira error details
+        var eobj map[string]interface{}
+        if len(respBody) > 0 && json.Unmarshal(respBody, &eobj) == nil {
+            var details []string
+            if msgs, ok := eobj["errorMessages"].([]interface{}); ok {
+                for _, m := range msgs { if s, ok := m.(string); ok { details = append(details, s) } }
+            }
+            if errs, ok := eobj["errors"].(map[string]interface{}); ok {
+                for k, v := range errs { details = append(details, fmt.Sprintf("%s: %v", k, v)) }
+            }
+            if len(details) > 0 {
+                return &ToolResponse{Success: false, Error: fmt.Sprintf("jira create issue failed: %d: %s", status, strings.Join(details, "; "))}, nil
+            }
+        }
+        return &ToolResponse{Success: false, Error: fmt.Sprintf("jira create issue failed: %d", status)}, nil
+    }
+    // Other 2xx (rare)
+    var obj interface{}
+    if len(respBody) > 0 && json.Unmarshal(respBody, &obj) == nil {
+        return &ToolResponse{Success: true, Data: obj}, nil
+    }
+    return &ToolResponse{Success: true, Data: map[string]interface{}{"message": "issue created"}}, nil
+}
+
 func jiraDo(method, pathWithParams string, query url.Values, bodyObj interface{}) (int, []byte, http.Header, error) {
 	// Read config
 	cfg, err := ini.Load(os.ExpandEnv(config.ConfigFilePath))
@@ -338,10 +577,10 @@ func executeJiraTransitionIssueTool(args map[string]interface{}) (*ToolResponse,
 }
 
 func init() {
-	tools["jira_get_issue"] = Tool{
-		Name:        "jira_get_issue",
-		Description: "Get Jira issue details by ID or key",
-		Help: `Usage: /tool jira_get_issue --issue <ID-or-KEY> [--fields <csv>] [--fieldsByKeys <bool>] [--expand <s>] [--properties <csv>] [--updateHistory <bool>] [--failFast <bool>]
+    tools["jira_get_issue"] = Tool{
+        Name:        "jira_get_issue",
+        Description: "Get Jira issue details by ID or key",
+        Help: `Usage: /tool jira_get_issue --issue <ID-or-KEY> [--fields <csv>] [--fieldsByKeys <bool>] [--expand <s>] [--properties <csv>] [--updateHistory <bool>] [--failFast <bool>]
 
 Parameters:
   --issue <ID-or-KEY>   Issue ID or key (alias: --issueIdOrKey)
@@ -354,47 +593,85 @@ Parameters:
 
 Examples:
   /tool jira_get_issue --issue PROJ-123`,
-		Parameters: map[string]string{
-			"issue":         "Issue ID or key (alias: issueIdOrKey)",
-			"fields":        "Comma-separated fields",
-			"fieldsByKeys":  "Boolean",
-			"expand":        "Expand parameter",
-			"properties":    "Comma-separated properties",
-			"updateHistory": "Boolean",
-			"failFast":      "Boolean",
-		},
-	}
-	toolExecutors["jira_get_issue"] = executeJiraGetIssueTool
+        Parameters: map[string]string{
+            "issue":         "Issue ID or key (alias: issueIdOrKey)",
+            "fields":        "Comma-separated fields",
+            "fieldsByKeys":  "Boolean",
+            "expand":        "Expand parameter",
+            "properties":    "Comma-separated properties",
+            "updateHistory": "Boolean",
+            "failFast":      "Boolean",
+        },
+    }
+    toolExecutors["jira_get_issue"] = executeJiraGetIssueTool
 
-	tools["jira_edit_issue"] = Tool{
-		Name:        "jira_edit_issue",
-		Description: "Edit Jira issue fields/properties",
-		Help: `Usage: /tool jira_edit_issue --issue <ID-or-KEY> [--notifyUsers <bool>] [--overrideScreenSecurity <bool>] [--overrideEditableFlag <bool>] [--returnIssue <bool>] [--expand <s>] --fields <json> --update <json>
+    // Create issue
+    tools["jira_create_issue"] = Tool{
+        Name:        "jira_create_issue",
+        Description: "Create a Jira issue (supports full fields JSON or convenience params)",
+        Help: `Usage: /tool jira_create_issue [--fields <json>] [--projectKey <key> | --projectId <id>] [--issuetypeId <id> | --issuetypeName <name>] [--summary <text>] [--description <text|json>] [--environment <text|json>] [--labels <csv|json>] [--priorityName <name>] [--priorityId <id>] [--assigneeAccountId <id>] [--reporterAccountId <id>] [--parentId <id> | --parentKey <key>] [--update <json>] [--properties <json>] [--historyMetadata <json>] [--transition <json>]
+
+Notes:
+  - If --fields is provided, it is used as the request fields object.
+  - If --description or --environment is a plain string, it will be wrapped into Atlassian Document Format (ADF) automatically (as required by Jira for textarea fields).
+  - You may pass --transition as a JSON object to move the issue to a different workflow step on creation.
+
+Examples:
+  /tool jira_create_issue --projectKey PROJ --issuetypeName Task --summary "Set up CI" --description "Create CI pipeline"
+  /tool jira_create_issue --fields '{"project":{"key":"PROJ"},"issuetype":{"id":"10001"},"summary":"Do X"}'`,
+        Parameters: map[string]string{
+            "fields":             "JSON object for fields (overrides convenience params)",
+            "projectKey":         "Project key",
+            "projectId":          "Project ID",
+            "issuetypeId":        "Issue type ID",
+            "issuetypeName":      "Issue type name",
+            "summary":            "Summary text",
+            "description":        "ADF JSON object or plain string (auto-wrapped)",
+            "environment":        "ADF JSON object or plain string (auto-wrapped)",
+            "labels":             "CSV string, JSON array, or array",
+            "priorityName":       "Priority name",
+            "priorityId":         "Priority ID",
+            "assigneeAccountId":  "Assignee accountId",
+            "reporterAccountId":  "Reporter accountId",
+            "parentId":           "Parent issue ID (for subtasks)",
+            "parentKey":          "Parent issue key (for subtasks)",
+            "update":             "JSON object",
+            "properties":         "JSON array/object",
+            "historyMetadata":    "JSON object",
+            "transition":         "JSON object for initial transition",
+        },
+    }
+    toolExecutors["jira_create_issue"] = executeJiraCreateIssueTool
+
+    tools["jira_edit_issue"] = Tool{
+        Name:        "jira_edit_issue",
+        Description: "Edit Jira issue fields/properties",
+        Help: `Usage: /tool jira_edit_issue --issue <ID-or-KEY> [--notifyUsers <bool>] [--overrideScreenSecurity <bool>] [--overrideEditableFlag <bool>] [--returnIssue <bool>] [--expand <s>] --fields <json> --update <json>
 
 Body keys (JSON strings are accepted): fields, update, properties, historyMetadata, transition
 
 Examples:
   /tool jira_edit_issue --issue PROJ-123 --fields '{"summary":"New summary"}'`,
-		Parameters: map[string]string{
-			"issue":                 "Issue ID or key (alias: issueIdOrKey)",
-			"notifyUsers":          "Boolean",
-			"overrideScreenSecurity":"Boolean",
-			"overrideEditableFlag": "Boolean",
-			"returnIssue":          "Boolean",
-			"expand":               "Expand parameter",
-			"fields":               "JSON object of fields",
-			"update":               "JSON object of updates",
-			"properties":           "JSON array of properties",
-			"historyMetadata":      "JSON object",
-			"transition":           "JSON object",
-		},
-	}
-	toolExecutors["jira_edit_issue"] = executeJiraEditIssueTool
+        Parameters: map[string]string{
+            "issue":                 "Issue ID or key (alias: issueIdOrKey)",
+            "notifyUsers":          "Boolean",
+            "overrideScreenSecurity":"Boolean",
+            "overrideEditableFlag": "Boolean",
+            "returnIssue":          "Boolean",
+            "expand":               "Expand parameter",
+            "fields":               "JSON object of fields",
+            "update":               "JSON object of updates",
+            "properties":           "JSON array of properties",
+            "historyMetadata":      "JSON object",
+            "transition":           "JSON object",
+        },
+    }
+    toolExecutors["jira_edit_issue"] = executeJiraEditIssueTool
 
-	tools["jira_delete_issue"] = Tool{
-		Name:        "jira_delete_issue",
-		Description: "Delete a Jira issue",
-		Help: `Usage: /tool jira_delete_issue --issue <ID-or-KEY> [--deleteSubtasks <bool|" + "string>]
+    tools["jira_delete_issue"] = Tool{
+        Name:        "jira_delete_issue",
+        Description: "Delete a Jira issue",
+        Help: `Usage: /tool jira_delete_issue --issue <ID-or-KEY> [--deleteSubtasks <bool|" + "string>]
 
 Examples:
   /tool jira_delete_issue --issue PROJ-123 --deleteSubtasks true`,
