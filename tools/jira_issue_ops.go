@@ -111,22 +111,20 @@ func executeJiraCreateIssueTool(args map[string]interface{}) (*ToolResponse, err
     // environment and description (ADF-capable fields)
     handleADFField(fields, args, "environment")
 
-    // project: by key or id
-    if v, ok := args["projectKey"].(string); ok && v != "" {
-        p := ensureMap(fields, "project")
-        p["key"] = v
-    }
+    // project: prefer id over key (avoid setting both)
     if v, ok := args["projectId"].(string); ok && v != "" {
         p := ensureMap(fields, "project")
         p["id"] = v
+    } else if v, ok := args["projectKey"].(string); ok && v != "" {
+        p := ensureMap(fields, "project")
+        p["key"] = v
     }
 
-    // issuetype: by id or name
+    // issuetype: prefer id over name (avoid setting both)
     if v, ok := args["issuetypeId"].(string); ok && v != "" {
         it := ensureMap(fields, "issuetype")
         it["id"] = v
-    }
-    if v, ok := args["issuetypeName"].(string); ok && v != "" {
+    } else if v, ok := args["issuetypeName"].(string); ok && v != "" {
         it := ensureMap(fields, "issuetype")
         it["name"] = v
     }
@@ -195,15 +193,16 @@ func executeJiraCreateIssueTool(args map[string]interface{}) (*ToolResponse, err
     // Optional: update/properties/historyMetadata/transition passthrough
     for _, k := range []string{"update", "properties", "historyMetadata", "transition"} {
         if v, ok := args[k]; ok {
-            // If provided as JSON string, try to parse
+            // If provided as JSON string, it must be valid JSON.
             if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
                 var obj interface{}
-                if err := json.Unmarshal([]byte(s), &obj); err == nil {
-                    body[k] = obj
-                    continue
+                if err := json.Unmarshal([]byte(s), &obj); err != nil {
+                    return &ToolResponse{Success: false, Error: fmt.Sprintf("invalid JSON for parameter '%s': %v", k, err)}, nil
                 }
+                body[k] = obj
+            } else {
+                body[k] = v
             }
-            body[k] = v
         }
     }
 
