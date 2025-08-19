@@ -229,29 +229,26 @@ func buildJiraCreateIssueBody(p *jiraCreateIssueParams) (map[string]interface{},
     // labels parsing
     if p.Labels != nil {
         var arr []string
+        addLabel := func(s string) {
+            trimmed := strings.TrimSpace(s)
+            if trimmed != "" {
+                arr = append(arr, trimmed)
+            }
+        }
         switch v := p.Labels.(type) {
         case []interface{}:
             for _, it := range v {
                 if s, ok := it.(string); ok {
-                    trimmed := strings.TrimSpace(s)
-                    if trimmed != "" {
-                        arr = append(arr, trimmed)
-                    }
+                    addLabel(s)
                 }
             }
         case []string:
             for _, s := range v {
-                trimmed := strings.TrimSpace(s)
-                if trimmed != "" {
-                    arr = append(arr, trimmed)
-                }
+                addLabel(s)
             }
         case string:
             for _, s := range strings.Split(v, ",") {
-                trimmed := strings.TrimSpace(s)
-                if trimmed != "" {
-                    arr = append(arr, trimmed)
-                }
+                addLabel(s)
             }
         }
         if len(arr) > 0 { fields["labels"] = arr }
