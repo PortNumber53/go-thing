@@ -156,9 +156,8 @@ func executeJiraDeleteProjectTool(args map[string]interface{}) (*ToolResponse, e
 
 	status, _, _, err := jiraDo("DELETE", "/rest/api/3/project/"+url.PathEscape(idOrKey), q, nil)
 	if err != nil { return &ToolResponse{Success: false, Error: err.Error()}, nil }
-	if status == http.StatusNoContent { return &ToolResponse{Success: true, Data: map[string]interface{}{"message": "project deleted"}}, nil }
-	if status < 200 || status >= 300 { return &ToolResponse{Success: false, Error: fmt.Sprintf("jira delete project failed: %d", status)}, nil }
-	return &ToolResponse{Success: true, Data: map[string]interface{}{"message": "project deleted"}}, nil
+    if status < 200 || status >= 300 { return &ToolResponse{Success: false, Error: fmt.Sprintf("jira delete project failed: %d", status)}, nil }
+    return &ToolResponse{Success: true, Data: map[string]interface{}{"message": "project deleted"}}, nil
 }
 
 // ----------------- Projects: POST /rest/api/3/project/{projectIdOrKey}/archive -----------------
