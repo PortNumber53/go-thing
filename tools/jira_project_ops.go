@@ -20,6 +20,22 @@ func setQueryFromInt(q url.Values, args map[string]interface{}, key string) {
 	}
 }
 
+// getProjectIDOrKey extracts the project identifier from args, checking common keys.
+// It returns the resolved idOrKey or a ToolResponse on error.
+func getProjectIDOrKey(args map[string]interface{}) (string, *ToolResponse) {
+	idOrKey, _ := args["projectIdOrKey"].(string)
+	if idOrKey == "" {
+		idOrKey, _ = args["project"].(string)
+	}
+	if idOrKey == "" {
+		idOrKey, _ = args["id"].(string)
+	}
+	if idOrKey == "" {
+		return "", &ToolResponse{Success: false, Error: "projectIdOrKey is required"}
+	}
+	return idOrKey, nil
+}
+
 // ----------------- Projects: GET /rest/api/3/project (deprecated all) -----------------
 func executeJiraProjectsAllTool(args map[string]interface{}) (*ToolResponse, error) {
 	q := url.Values{}
@@ -106,10 +122,8 @@ func executeJiraProjectsSearchTool(args map[string]interface{}) (*ToolResponse, 
 
 // ----------------- Projects: GET /rest/api/3/project/{projectIdOrKey} -----------------
 func executeJiraGetProjectTool(args map[string]interface{}) (*ToolResponse, error) {
-	idOrKey, _ := args["projectIdOrKey"].(string)
-	if idOrKey == "" { idOrKey, _ = args["project"].(string) }
-	if idOrKey == "" { idOrKey, _ = args["id"].(string) }
-	if idOrKey == "" { return &ToolResponse{Success: false, Error: "projectIdOrKey is required"}, nil }
+	idOrKey, tr := getProjectIDOrKey(args)
+	if tr != nil { return tr, nil }
 	q := url.Values{}
 	if v, ok := args["expand"].(string); ok && v != "" { q.Set("expand", v) }
 	if v, ok := args["properties"].(string); ok && v != "" { q.Set("properties", v) }
@@ -125,10 +139,8 @@ func executeJiraGetProjectTool(args map[string]interface{}) (*ToolResponse, erro
 
 // ----------------- Projects: PUT /rest/api/3/project/{projectIdOrKey} -----------------
 func executeJiraUpdateProjectTool(args map[string]interface{}) (*ToolResponse, error) {
-	idOrKey, _ := args["projectIdOrKey"].(string)
-	if idOrKey == "" { idOrKey, _ = args["project"].(string) }
-	if idOrKey == "" { idOrKey, _ = args["id"].(string) }
-	if idOrKey == "" { return &ToolResponse{Success: false, Error: "projectIdOrKey is required"}, nil }
+	idOrKey, tr := getProjectIDOrKey(args)
+	if tr != nil { return tr, nil }
 
 	q := url.Values{}
 	if v, ok := args["expand"].(string); ok && v != "" { q.Set("expand", v) }
@@ -153,10 +165,8 @@ func executeJiraUpdateProjectTool(args map[string]interface{}) (*ToolResponse, e
 
 // ----------------- Projects: DELETE /rest/api/3/project/{projectIdOrKey} -----------------
 func executeJiraDeleteProjectTool(args map[string]interface{}) (*ToolResponse, error) {
-	idOrKey, _ := args["projectIdOrKey"].(string)
-	if idOrKey == "" { idOrKey, _ = args["project"].(string) }
-	if idOrKey == "" { idOrKey, _ = args["id"].(string) }
-	if idOrKey == "" { return &ToolResponse{Success: false, Error: "projectIdOrKey is required"}, nil }
+	idOrKey, tr := getProjectIDOrKey(args)
+	if tr != nil { return tr, nil }
 	q := url.Values{}
 	if v, ok := args["enableUndo"].(bool); ok { q.Set("enableUndo", strconv.FormatBool(v)) }
 
@@ -168,10 +178,8 @@ func executeJiraDeleteProjectTool(args map[string]interface{}) (*ToolResponse, e
 
 // ----------------- Projects: POST /rest/api/3/project/{projectIdOrKey}/archive -----------------
 func executeJiraArchiveProjectTool(args map[string]interface{}) (*ToolResponse, error) {
-	idOrKey, _ := args["projectIdOrKey"].(string)
-	if idOrKey == "" { idOrKey, _ = args["project"].(string) }
-	if idOrKey == "" { idOrKey, _ = args["id"].(string) }
-	if idOrKey == "" { return &ToolResponse{Success: false, Error: "projectIdOrKey is required"}, nil }
+	idOrKey, tr := getProjectIDOrKey(args)
+	if tr != nil { return tr, nil }
 
 	status, body, _, err := jiraDo("POST", "/rest/api/3/project/"+url.PathEscape(idOrKey)+"/archive", nil, nil)
 	if err != nil { return &ToolResponse{Success: false, Error: err.Error()}, nil }
@@ -184,10 +192,8 @@ func executeJiraArchiveProjectTool(args map[string]interface{}) (*ToolResponse, 
 
 // ----------------- Projects: POST /rest/api/3/project/{projectIdOrKey}/delete (async) -----------------
 func executeJiraDeleteProjectAsyncTool(args map[string]interface{}) (*ToolResponse, error) {
-	idOrKey, _ := args["projectIdOrKey"].(string)
-	if idOrKey == "" { idOrKey, _ = args["project"].(string) }
-	if idOrKey == "" { idOrKey, _ = args["id"].(string) }
-	if idOrKey == "" { return &ToolResponse{Success: false, Error: "projectIdOrKey is required"}, nil }
+	idOrKey, tr := getProjectIDOrKey(args)
+	if tr != nil { return tr, nil }
 
 	status, body, headers, err := jiraDo("POST", "/rest/api/3/project/"+url.PathEscape(idOrKey)+"/delete", nil, nil)
 	if err != nil { return &ToolResponse{Success: false, Error: err.Error()}, nil }
@@ -207,10 +213,8 @@ func executeJiraDeleteProjectAsyncTool(args map[string]interface{}) (*ToolRespon
 
 // ----------------- Projects: POST /rest/api/3/project/{projectIdOrKey}/restore -----------------
 func executeJiraRestoreProjectTool(args map[string]interface{}) (*ToolResponse, error) {
-	idOrKey, _ := args["projectIdOrKey"].(string)
-	if idOrKey == "" { idOrKey, _ = args["project"].(string) }
-	if idOrKey == "" { idOrKey, _ = args["id"].(string) }
-	if idOrKey == "" { return &ToolResponse{Success: false, Error: "projectIdOrKey is required"}, nil }
+	idOrKey, tr := getProjectIDOrKey(args)
+	if tr != nil { return tr, nil }
 
 	status, body, _, err := jiraDo("POST", "/rest/api/3/project/"+url.PathEscape(idOrKey)+"/restore", nil, nil)
 	if err != nil { return &ToolResponse{Success: false, Error: err.Error()}, nil }
@@ -222,10 +226,8 @@ func executeJiraRestoreProjectTool(args map[string]interface{}) (*ToolResponse, 
 
 // ----------------- Projects: GET /rest/api/3/project/{projectIdOrKey}/statuses -----------------
 func executeJiraGetProjectStatusesTool(args map[string]interface{}) (*ToolResponse, error) {
-	idOrKey, _ := args["projectIdOrKey"].(string)
-	if idOrKey == "" { idOrKey, _ = args["project"].(string) }
-	if idOrKey == "" { idOrKey, _ = args["id"].(string) }
-	if idOrKey == "" { return &ToolResponse{Success: false, Error: "projectIdOrKey is required"}, nil }
+	idOrKey, tr := getProjectIDOrKey(args)
+	if tr != nil { return tr, nil }
 
 	status, body, _, err := jiraDo("GET", "/rest/api/3/project/"+url.PathEscape(idOrKey)+"/statuses", nil, nil)
 	if err != nil { return &ToolResponse{Success: false, Error: err.Error()}, nil }
