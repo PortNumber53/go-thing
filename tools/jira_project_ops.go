@@ -109,6 +109,9 @@ func executeJiraProjectsSearchTool(args map[string]interface{}) (*ToolResponse, 
 	status, body, _, err := jiraDo("GET", "/rest/api/3/project/search", q, nil)
 	if err != nil { return &ToolResponse{Success: false, Error: err.Error()}, nil }
 	if status < 200 || status >= 300 {
+		if status == http.StatusUnauthorized {
+			return &ToolResponse{Success: false, Error: "unauthorized"}, nil
+		}
 		return &ToolResponse{Success: false, Error: fmt.Sprintf("jira search projects failed: %d", status)}, nil
 	}
 	var obj interface{}
@@ -127,7 +130,12 @@ func executeJiraGetProjectTool(args map[string]interface{}) (*ToolResponse, erro
 	status, body, _, err := jiraDo("GET", "/rest/api/3/project/"+url.PathEscape(idOrKey), q, nil)
 	if err != nil { return &ToolResponse{Success: false, Error: err.Error()}, nil }
 	if status == http.StatusNotFound { return &ToolResponse{Success: false, Error: "project not found"}, nil }
-	if status < 200 || status >= 300 { return &ToolResponse{Success: false, Error: fmt.Sprintf("jira get project failed: %d", status)}, nil }
+	if status < 200 || status >= 300 {
+		if status == http.StatusUnauthorized {
+			return &ToolResponse{Success: false, Error: "unauthorized"}, nil
+		}
+		return &ToolResponse{Success: false, Error: fmt.Sprintf("jira get project failed: %d", status)}, nil
+	}
 	var obj interface{}
 	if err := json.Unmarshal(body, &obj); err != nil { return &ToolResponse{Success: false, Error: fmt.Sprintf("parse error: %v", err)}, nil }
 	return &ToolResponse{Success: true, Data: obj}, nil
