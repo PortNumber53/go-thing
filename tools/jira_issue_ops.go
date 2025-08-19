@@ -84,8 +84,8 @@ type jiraCreateIssueParams struct {
     IssueTypeID     string
     IssueTypeName   string
     Summary         string
-    Description     interface{} // string or map[string]interface{} (handled via handleADFField at build time)
-    Environment     interface{} // string or map[string]interface{}
+    Description     interface{} // string or map[string]interface{} (handled by processADFValue at build time)
+    Environment     interface{} // string or map[string]interface{} (handled by processADFValue at build time)
     Labels          interface{} // []string | []interface{} | string
     PriorityName    string
     PriorityID      string
