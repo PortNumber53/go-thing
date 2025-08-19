@@ -23,17 +23,13 @@ func setQueryFromInt(q url.Values, args map[string]interface{}, key string) {
 // getProjectIDOrKey extracts the project identifier from args, checking common keys.
 // It returns the resolved idOrKey or a ToolResponse on error.
 func getProjectIDOrKey(args map[string]interface{}) (string, *ToolResponse) {
-	idOrKey, _ := args["projectIdOrKey"].(string)
-	if idOrKey == "" {
-		idOrKey, _ = args["project"].(string)
+	for _, key := range []string{"projectIdOrKey", "project", "id"} {
+		if idOrKey, ok := args[key].(string); ok && idOrKey != "" {
+			return idOrKey, nil
+		}
 	}
-	if idOrKey == "" {
-		idOrKey, _ = args["id"].(string)
-	}
-	if idOrKey == "" {
-		return "", &ToolResponse{Success: false, Error: "projectIdOrKey is required"}
-	}
-	return idOrKey, nil
+	return "", &ToolResponse{Success: false, Error: "projectIdOrKey is required"}
+
 }
 
 // ----------------- Projects: GET /rest/api/3/project (deprecated all) -----------------
