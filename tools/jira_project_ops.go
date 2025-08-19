@@ -133,9 +133,14 @@ func executeJiraUpdateProjectTool(args map[string]interface{}) (*ToolResponse, e
 	if v, ok := args["expand"].(string); ok && v != "" { q.Set("expand", v) }
 
 	body := map[string]interface{}{}
-	for _, k := range []string{"assigneeType","avatarId","categoryId","description","issueSecurityScheme","key","lead","leadAccountId","name","notificationScheme","permissionScheme","url"} {
-		if v, ok := args[k]; ok { body[k] = v }
-	}
+    for k, v := range args {
+        body[k] = v
+    }
+    // Remove non-body parameters
+    delete(body, "projectIdOrKey")
+    delete(body, "project")
+    delete(body, "id")
+    delete(body, "expand")
 
 	status, respBody, _, err := jiraDo("PUT", "/rest/api/3/project/"+url.PathEscape(idOrKey), q, body)
 	if err != nil { return &ToolResponse{Success: false, Error: err.Error()}, nil }
