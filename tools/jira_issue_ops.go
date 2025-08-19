@@ -204,72 +204,92 @@ func buildJiraCreateIssueBody(p *jiraCreateIssueParams) (map[string]interface{},
     }
 
     // environment
-    if processedEnv, ok := processADFValue(p.Environment); ok { fields["environment"] = processedEnv }
-
-    // project: prefer id over key
-    if p.ProjectID != "" {
-        ensureMap(fields, "project")["id"] = p.ProjectID
-    } else if p.ProjectKey != "" {
-        ensureMap(fields, "project")["key"] = p.ProjectKey
+    if _, exists := fields["environment"]; !exists {
+        if processedEnv, ok := processADFValue(p.Environment); ok { fields["environment"] = processedEnv }
     }
 
-    // issuetype: prefer id over name
-    if p.IssueTypeID != "" {
-        ensureMap(fields, "issuetype")["id"] = p.IssueTypeID
-    } else if p.IssueTypeName != "" {
-        ensureMap(fields, "issuetype")["name"] = p.IssueTypeName
-    }
-
-    // summary
-    if p.Summary != "" { fields["summary"] = p.Summary }
-
-    // description (ADF-capable)
-    if processedDesc, ok := processADFValue(p.Description); ok { fields["description"] = processedDesc }
-
-    // labels parsing
-    if p.Labels != nil {
-        var arr []string
-        addLabel := func(s string) {
-            trimmed := strings.TrimSpace(s)
-            if trimmed != "" {
-                arr = append(arr, trimmed)
-            }
+    // project: prefer id over key (only if not provided in fields)
+    if _, exists := fields["project"]; !exists {
+        if p.ProjectID != "" {
+            ensureMap(fields, "project")["id"] = p.ProjectID
+        } else if p.ProjectKey != "" {
+            ensureMap(fields, "project")["key"] = p.ProjectKey
         }
-        switch v := p.Labels.(type) {
-        case []interface{}:
-            for _, it := range v {
-                if s, ok := it.(string); ok {
+    }
+
+    // issuetype: prefer id over name (only if not provided in fields)
+    if _, exists := fields["issuetype"]; !exists {
+        if p.IssueTypeID != "" {
+            ensureMap(fields, "issuetype")["id"] = p.IssueTypeID
+        } else if p.IssueTypeName != "" {
+            ensureMap(fields, "issuetype")["name"] = p.IssueTypeName
+        }
+    }
+
+    // summary (only if not provided in fields)
+    if _, exists := fields["summary"]; !exists {
+        if p.Summary != "" { fields["summary"] = p.Summary }
+    }
+
+    // description (ADF-capable) (only if not provided in fields)
+    if _, exists := fields["description"]; !exists {
+        if processedDesc, ok := processADFValue(p.Description); ok { fields["description"] = processedDesc }
+    }
+
+    // labels parsing (only if not provided in fields)
+    if _, exists := fields["labels"]; !exists {
+        if p.Labels != nil {
+            var arr []string
+            addLabel := func(s string) {
+                trimmed := strings.TrimSpace(s)
+                if trimmed != "" {
+                    arr = append(arr, trimmed)
+                }
+            }
+            switch v := p.Labels.(type) {
+            case []interface{}:
+                for _, it := range v {
+                    if s, ok := it.(string); ok {
+                        addLabel(s)
+                    }
+                }
+            case []string:
+                for _, s := range v {
+                    addLabel(s)
+                }
+            case string:
+                for _, s := range strings.Split(v, ",") {
                     addLabel(s)
                 }
             }
-        case []string:
-            for _, s := range v {
-                addLabel(s)
-            }
-        case string:
-            for _, s := range strings.Split(v, ",") {
-                addLabel(s)
-            }
+            if len(arr) > 0 { fields["labels"] = arr }
         }
-        if len(arr) > 0 { fields["labels"] = arr }
     }
 
-    // priority: prefer id over name (avoid setting both)
-    if p.PriorityID != "" {
-        fields["priority"] = map[string]interface{}{"id": p.PriorityID}
-    } else if p.PriorityName != "" {
-        fields["priority"] = map[string]interface{}{"name": p.PriorityName}
+    // priority: prefer id over name (avoid setting both); only if not provided in fields
+    if _, exists := fields["priority"]; !exists {
+        if p.PriorityID != "" {
+            fields["priority"] = map[string]interface{}{"id": p.PriorityID}
+        } else if p.PriorityName != "" {
+            fields["priority"] = map[string]interface{}{"name": p.PriorityName}
+        }
     }
 
-    // assignee / reporter
-    if p.AssigneeAcctID != "" { fields["assignee"] = map[string]interface{}{"accountId": p.AssigneeAcctID} }
-    if p.ReporterAcctID != "" { fields["reporter"] = map[string]interface{}{"accountId": p.ReporterAcctID} }
+    // assignee / reporter (only if not provided in fields)
+    if _, exists := fields["assignee"]; !exists {
+        if p.AssigneeAcctID != "" { fields["assignee"] = map[string]interface{}{"accountId": p.AssigneeAcctID} }
+    }
+    if _, exists := fields["reporter"]; !exists {
+        if p.ReporterAcctID != "" { fields["reporter"] = map[string]interface{}{"accountId": p.ReporterAcctID} }
+    }
 
-    // parent
-    if p.ParentID != "" {
-        fields["parent"] = map[string]interface{}{"id": p.ParentID}
-    } else if p.ParentKey != "" {
-        fields["parent"] = map[string]interface{}{"key": p.ParentKey}
+    // parent (only if not provided in fields)
+    if _, exists := fields["parent"]; !exists {
+        if p.ParentID != "" {
+            fields["parent"] = map[string]interface{}{"id": p.ParentID}
+        } else if p.ParentKey != "" {
+            fields["parent"] = map[string]interface{}{"key": p.ParentKey}
+        }
     }
 
     if len(fields) == 0 {
