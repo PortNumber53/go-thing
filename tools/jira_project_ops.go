@@ -8,12 +8,23 @@ import (
 	"strconv"
 )
 
+// setQueryFromInt sets q[key] from args[key] when it's provided as either int or float64.
+// Jira tools sometimes receive numeric args unmarshaled as float64; this helper normalizes them.
+func setQueryFromInt(q url.Values, args map[string]interface{}, key string) {
+	if v, ok := args[key].(int); ok {
+		q.Set(key, strconv.Itoa(v))
+		return
+	}
+	if v, ok := args[key].(float64); ok {
+		q.Set(key, strconv.Itoa(int(v)))
+	}
+}
+
 // ----------------- Projects: GET /rest/api/3/project (deprecated all) -----------------
 func executeJiraProjectsAllTool(args map[string]interface{}) (*ToolResponse, error) {
 	q := url.Values{}
 	if v, ok := args["expand"].(string); ok && v != "" { q.Set("expand", v) }
-	if v, ok := args["recent"].(int); ok { q.Set("recent", strconv.Itoa(v)) }
-	if v, ok := args["recent"].(float64); ok { q.Set("recent", strconv.Itoa(int(v))) }
+	setQueryFromInt(q, args, "recent")
 	if v, ok := args["properties"].(string); ok && v != "" { q.Set("properties", v) }
 
 	status, body, _, err := jiraDo("GET", "/rest/api/3/project", q, nil)
@@ -67,17 +78,14 @@ func executeJiraProjectsRecentTool(args map[string]interface{}) (*ToolResponse, 
 func executeJiraProjectsSearchTool(args map[string]interface{}) (*ToolResponse, error) {
 	q := url.Values{}
 	// Standard pagination and filters
-	if v, ok := args["startAt"].(int); ok { q.Set("startAt", strconv.Itoa(v)) }
-	if v, ok := args["startAt"].(float64); ok { q.Set("startAt", strconv.Itoa(int(v))) }
-	if v, ok := args["maxResults"].(int); ok { q.Set("maxResults", strconv.Itoa(v)) }
-	if v, ok := args["maxResults"].(float64); ok { q.Set("maxResults", strconv.Itoa(int(v))) }
+	setQueryFromInt(q, args, "startAt")
+	setQueryFromInt(q, args, "maxResults")
 	if v, ok := args["orderBy"].(string); ok && v != "" { q.Set("orderBy", v) }
 	if v, ok := args["id"].(string); ok && v != "" { q.Set("id", v) } // CSV or multi supported by passing CSV
 	if v, ok := args["keys"].(string); ok && v != "" { q.Set("keys", v) }
 	if v, ok := args["query"].(string); ok && v != "" { q.Set("query", v) }
 	if v, ok := args["typeKey"].(string); ok && v != "" { q.Set("typeKey", v) }
-	if v, ok := args["categoryId"].(int); ok { q.Set("categoryId", strconv.Itoa(v)) }
-	if v, ok := args["categoryId"].(float64); ok { q.Set("categoryId", strconv.Itoa(int(v))) }
+	setQueryFromInt(q, args, "categoryId")
 	if v, ok := args["action"].(string); ok && v != "" { q.Set("action", v) }
 	if v, ok := args["expand"].(string); ok && v != "" { q.Set("expand", v) }
 	// Allow additional possible filters if provided
