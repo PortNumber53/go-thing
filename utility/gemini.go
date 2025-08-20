@@ -237,7 +237,7 @@ You are a helpful assistant that executes tasks by calling tools.
 		if !shouldRetry429(err) || attempt == maxAttempts {
 			return "", ToolCall{}, err
 		}
-		// Honor server-provided retry delay if present; else exponential backoff
+		// Honor server-provided retry delay if present; else linear backoff
 		delay := parseRetryDelay(err, baseDelay*time.Duration(attempt))
 		if delay > 0 {
 			select {
