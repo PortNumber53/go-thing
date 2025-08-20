@@ -1192,6 +1192,79 @@ func main() {
         // Log final summary of extracted data (no persistence)
         log.Printf("[GitHubWebhook] summary delivery=%q event=%q action=%q repo_full=%q repo_id=%q sender=%q issue_ref=%q before=%q after=%q", deliveryID, eventHeader, action, repoFull, repoID, sender, ref, before, after)
 
+        // AI follow-up loop: handle PR reviews/comments authored by gemini-code-assist bot
+        if (eventHeader == "pull_request_review" || eventHeader == "pull_request_review_comment") && strings.EqualFold(sender, "gemini-code-assist[bot]") {
+            // Extract PR context
+            prNumber := ""
+            headRef, headSHA := "", ""
+            if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
+                switch v := pr["number"].(type) {
+                case float64:
+                    prNumber = strconv.FormatInt(int64(v), 10)
+                case json.Number:
+                    prNumber = v.String()
+                case string:
+                    prNumber = v
+                }
+                if h, ok := pr["head"].(map[string]interface{}); ok {
+                    if v, ok := h["ref"].(string); ok { headRef = v }
+                    if v, ok := h["sha"].(string); ok { headSHA = v }
+                }
+            } else {
+                // Fallbacks if structure differs
+                switch v := payload["number"].(type) {
+                case float64:
+                    prNumber = strconv.FormatInt(int64(v), 10)
+                case json.Number:
+                    prNumber = v.String()
+                case string:
+                    prNumber = v
+                }
+            }
+
+            // Extract review/comment text and any inline context
+            commentBody := ""
+            extraContext := ""
+            if eventHeader == "pull_request_review" {
+                if rv, ok := payload["review"].(map[string]interface{}); ok {
+                    if b, ok := rv["body"].(string); ok { commentBody = b }
+                }
+            } else if eventHeader == "pull_request_review_comment" {
+                if cm, ok := payload["comment"].(map[string]interface{}); ok {
+                    if b, ok := cm["body"].(string); ok { commentBody = b }
+                    // Include file/line and diff hunk when available for better grounding
+                    path, _ := cm["path"].(string)
+                    side, _ := cm["side"].(string)
+                    // line can be number but often float64 in generic JSON
+                    lineStr := ""
+                    if lv, ok := cm["line"].(float64); ok { lineStr = strconv.FormatInt(int64(lv), 10) }
+                    if hv, ok := cm["diff_hunk"].(string); ok {
+                        extraContext = fmt.Sprintf("\n\n[Inline Context]\nFile: %s\nSide: %s Line: %s\nDiff Hunk:\n%s\n", path, side, lineStr, hv)
+                    } else if path != "" || side != "" || lineStr != "" {
+                        extraContext = fmt.Sprintf("\n\n[Inline Context]\nFile: %s\nSide: %s Line: %s\n", path, side, lineStr)
+                    }
+                }
+            }
+
+            // Build the task for the internal agent loop. Instruct it to output ALL_DONE! when no more actionable suggestions remain.
+            task := fmt.Sprintf(
+                "Automated follow-up for GitHub PR review.\nRepository: %s\nPR #%s\nHead: %s @ %s\nEvent: %s by gemini-code-assist bot.\n\nInstruction: Apply the review suggestions below to the codebase in the least-intrusive way. If there are no remaining actionable suggestions from gemini-code-assist on this PR after processing, respond with EXACTLY: ALL_DONE!\n\nReview context:\n%s%s",
+                repoFull, prNumber, headRef, headSHA, eventHeader, strings.TrimSpace(commentBody), extraContext,
+            )
+
+            // Run asynchronously so webhook responds fast
+            go func(ctx context.Context, t string) {
+                log.Printf("[GitHubWebhook][AI] starting agent loop for repo=%q pr=%q head_ref=%q head_sha=%q", repoFull, prNumber, headRef, headSHA)
+                resp, _, err := utility.GeminiAPIHandler(ctx, t, nil)
+                if err != nil {
+                    log.Printf("[GitHubWebhook][AI] error: %v", err)
+                    return
+                }
+                // Log only; future: optionally post a PR comment/status with result
+                if len(resp) > 512 { log.Printf("[GitHubWebhook][AI] result: %.512s…", resp) } else { log.Printf("[GitHubWebhook][AI] result: %s", resp) }
+            }(c.Request.Context(), task)
+        }
+
         c.JSON(http.StatusOK, gin.H{"ok": true})
     })
 
