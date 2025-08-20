@@ -76,13 +76,12 @@ func parseRetryDelay(err error, def time.Duration) time.Duration {
 	msg := err.Error()
 	idx := strings.Index(msg, "retryDelay:")
 	if idx >= 0 {
-		// read until non-duration char
-                fields := strings.Fields(msg[idx+len("retryDelay:"):])
-		var durStr string
-		if len(fields) > 0 {
-			durStr = fields[0]
+		// A more robust way to parse the duration value, stopping at the first delimiter.
+		valStr := strings.TrimSpace(msg[idx+len("retryDelay:"):])
+		if endIdx := strings.IndexAny(valStr, " ,"); endIdx != -1 {
+			valStr = valStr[:endIdx]
 		}
-		if d, e := time.ParseDuration(durStr); e == nil {
+		if d, e := time.ParseDuration(valStr); e == nil {
 			return d
 		}
 	}
