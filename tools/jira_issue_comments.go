@@ -5,8 +5,35 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
+
+// ----------------- Helper: extract Jira error details -----------------
+// jiraErrorDetailFromBody tries to parse Jira error response JSON and returns a concise string.
+// Falls back to the raw response body when structure is unknown.
+func jiraErrorDetailFromBody(respBody []byte) string {
+	type jiraErr struct {
+		ErrorMessages []string          `json:"errorMessages"`
+		Errors        map[string]string `json:"errors"`
+	}
+	var e jiraErr
+	if json.Unmarshal(respBody, &e) == nil {
+		var parts []string
+		if len(e.ErrorMessages) > 0 {
+			parts = append(parts, strings.Join(e.ErrorMessages, "; "))
+		}
+		if len(e.Errors) > 0 {
+			kv := make([]string, 0, len(e.Errors))
+			for k, v := range e.Errors { kv = append(kv, fmt.Sprintf("%s: %s", k, v)) }
+			parts = append(parts, strings.Join(kv, "; "))
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, " | ")
+		}
+	}
+	return string(respBody)
+}
 
 // ----------------- Helper: coerce bool -----------------
 func coerceBool(v interface{}) (bool, bool) {
@@ -24,27 +51,57 @@ func coerceBool(v interface{}) (bool, bool) {
 func executeJiraGetCommentsByIdsTool(args map[string]interface{}) (*ToolResponse, error) {
 	idsRaw, ok := args["ids"]
 	if !ok {
-		return &ToolResponse{Success: false, Error: "ids is required (array of integers)"}, nil
+		return &ToolResponse{Success: false, Error: "ids is required (comma-separated string or array)"}, nil
 	}
-	idsSlice, ok := idsRaw.([]interface{})
-	if !ok {
-		return &ToolResponse{Success: false, Error: "ids must be an array"}, nil
+	parseInt := func(s string) (int, error) {
+		if s == "" { return 0, fmt.Errorf("empty id") }
+		// try fast path
+		if n, err := strconv.Atoi(s); err == nil { return n, nil }
+		// fallback via json.Number to accept large ints safely
+		var num json.Number = json.Number(s)
+		if i64, err := num.Int64(); err == nil { return int(i64), nil }
+		return 0, fmt.Errorf("invalid id: %s", s)
 	}
-	ids := make([]int, 0, len(idsSlice))
-	for _, it := range idsSlice {
-		switch v := it.(type) {
-		case float64:
-			ids = append(ids, int(v))
-		case int:
-			ids = append(ids, v)
-		case json.Number:
-			if i, err := v.Int64(); err == nil { ids = append(ids, int(i)) } else { return &ToolResponse{Success: false, Error: fmt.Sprintf("invalid id: %v", v)}, nil }
-		case string:
-			var num json.Number = json.Number(v)
-			if i, err := num.Int64(); err == nil { ids = append(ids, int(i)) } else { return &ToolResponse{Success: false, Error: fmt.Sprintf("invalid id string: %s", v)}, nil }
-		default:
-			return &ToolResponse{Success: false, Error: fmt.Sprintf("unsupported id type: %T", v)}, nil
+	ids := make([]int, 0, 8)
+	switch v := idsRaw.(type) {
+	case []interface{}:
+		for _, it := range v {
+			switch t := it.(type) {
+			case float64:
+				ids = append(ids, int(t))
+			case int:
+				ids = append(ids, t)
+			case json.Number:
+				if i, err := t.Int64(); err == nil { ids = append(ids, int(i)) } else { return &ToolResponse{Success: false, Error: fmt.Sprintf("invalid id: %v", t)}, nil }
+			case string:
+				if n, err := parseInt(strings.TrimSpace(t)); err == nil { ids = append(ids, n) } else { return &ToolResponse{Success: false, Error: err.Error()}, nil }
+			default:
+				return &ToolResponse{Success: false, Error: fmt.Sprintf("unsupported id type: %T", t)}, nil
+			}
 		}
+	case []string:
+		for _, s := range v {
+			if n, err := parseInt(strings.TrimSpace(s)); err == nil { ids = append(ids, n) } else { return &ToolResponse{Success: false, Error: err.Error()}, nil }
+		}
+	case string:
+		s := strings.TrimSpace(v)
+		// Allow users to paste with brackets like "[1,2,3]"
+		s = strings.TrimPrefix(s, "[")
+		s = strings.TrimSuffix(s, "]")
+		if s == "" {
+			return &ToolResponse{Success: false, Error: "ids is empty"}, nil
+		}
+		parts := strings.Split(s, ",")
+		for _, p := range parts {
+			token := strings.TrimSpace(p)
+			if token == "" { continue }
+			if n, err := parseInt(token); err == nil { ids = append(ids, n) } else { return &ToolResponse{Success: false, Error: err.Error()}, nil }
+		}
+	default:
+		return &ToolResponse{Success: false, Error: fmt.Sprintf("unsupported ids type: %T (expected array or comma-separated string)", v)}, nil
+	}
+	if len(ids) == 0 {
+		return &ToolResponse{Success: false, Error: "no valid ids provided"}, nil
 	}
 	body := map[string]interface{}{"ids": ids}
 	status, respBody, _, err := jiraDo("POST", "/rest/api/3/comment/list", nil, body)
@@ -97,22 +154,7 @@ func executeJiraAddCommentTool(args map[string]interface{}) (*ToolResponse, erro
 	status, respBody, _, err := jiraDo("POST", "/rest/api/3/issue/"+url.PathEscape(issueIdOrKey)+"/comment", nil, body)
 	if err != nil { return &ToolResponse{Success: false, Error: err.Error()}, nil }
 	if status != http.StatusCreated && !(status >= 200 && status < 300) {
-		// Try to extract Jira error details
-		var errObj struct{
-			ErrorMessages []string          `json:"errorMessages"`
-			Errors        map[string]string `json:"errors"`
-		}
-		detail := string(respBody)
-		if json.Unmarshal(respBody, &errObj) == nil {
-			var parts []string
-			if len(errObj.ErrorMessages) > 0 { parts = append(parts, strings.Join(errObj.ErrorMessages, "; ")) }
-			if len(errObj.Errors) > 0 {
-				kv := make([]string, 0, len(errObj.Errors))
-				for k, v := range errObj.Errors { kv = append(kv, fmt.Sprintf("%s: %s", k, v)) }
-				parts = append(parts, strings.Join(kv, "; "))
-			}
-			if len(parts) > 0 { detail = strings.Join(parts, " | ") }
-		}
+		detail := jiraErrorDetailFromBody(respBody)
 		return &ToolResponse{Success: false, Error: fmt.Sprintf("jira add comment failed: %d - %s", status, detail)}, nil
 	}
 	var obj interface{}
@@ -162,7 +204,10 @@ func executeJiraUpdateCommentTool(args map[string]interface{}) (*ToolResponse, e
 	}
 	status, respBody, _, err := jiraDo("PUT", "/rest/api/3/issue/"+url.PathEscape(issueIdOrKey)+"/comment/"+url.PathEscape(id), q, body)
 	if err != nil { return &ToolResponse{Success: false, Error: err.Error()}, nil }
-	if status < 200 || status >= 300 { return &ToolResponse{Success: false, Error: fmt.Sprintf("jira update comment failed: %d", status)}, nil }
+	if status < 200 || status >= 300 {
+		detail := jiraErrorDetailFromBody(respBody)
+		return &ToolResponse{Success: false, Error: fmt.Sprintf("jira update comment failed: %d - %s", status, detail)}, nil
+	}
 	var obj interface{}
 	if err := json.Unmarshal(respBody, &obj); err != nil { return &ToolResponse{Success: false, Error: fmt.Sprintf("parse error: %v", err)}, nil }
 	return &ToolResponse{Success: true, Data: obj}, nil
@@ -175,10 +220,13 @@ func executeJiraDeleteCommentTool(args map[string]interface{}) (*ToolResponse, e
 	id, _ := args["id"].(string)
 	if id == "" { id, _ = args["commentId"].(string) }
 	if issueIdOrKey == "" || id == "" { return &ToolResponse{Success: false, Error: "issueIdOrKey and id are required"}, nil }
-	status, _, _, err := jiraDo("DELETE", "/rest/api/3/issue/"+url.PathEscape(issueIdOrKey)+"/comment/"+url.PathEscape(id), nil, nil)
+	status, respBody, _, err := jiraDo("DELETE", "/rest/api/3/issue/"+url.PathEscape(issueIdOrKey)+"/comment/"+url.PathEscape(id), nil, nil)
 	if err != nil { return &ToolResponse{Success: false, Error: err.Error()}, nil }
 	if status == http.StatusNoContent { return &ToolResponse{Success: true, Data: map[string]interface{}{"message": "comment deleted"}}, nil }
-	if status < 200 || status >= 300 { return &ToolResponse{Success: false, Error: fmt.Sprintf("jira delete comment failed: %d", status)}, nil }
+	if status < 200 || status >= 300 {
+		detail := jiraErrorDetailFromBody(respBody)
+		return &ToolResponse{Success: false, Error: fmt.Sprintf("jira delete comment failed: %d - %s", status, detail)}, nil
+	}
 	return &ToolResponse{Success: true, Data: map[string]interface{}{"message": "comment deleted"}}, nil
 }
 
@@ -186,15 +234,19 @@ func init() {
 	tools["jira_get_comments_by_ids"] = Tool{
 		Name:        "jira_get_comments_by_ids",
 		Description: "Get a paginated list of comments by comment IDs",
-		Help: `Usage: /tool jira_get_comments_by_ids --ids [1,2,5]\n\nExamples:\n  /tool jira_get_comments_by_ids --ids [10000,10001]`,
-		Parameters: map[string]string{"ids": "Array of comment IDs (required)"},
+		Help: `Usage: /tool jira_get_comments_by_ids --ids <id1,id2,...>
+		Examples:
+		  /tool jira_get_comments_by_ids --ids 10000,10001
+		Note: Comma-separated string is recommended for /tool commands; API clients may send a native array.`,
+		Parameters: map[string]string{"ids": "Comma-separated comment IDs or array (required)"},
 	}
 	toolExecutors["jira_get_comments_by_ids"] = executeJiraGetCommentsByIdsTool
 
 	tools["jira_list_comments"] = Tool{
 		Name:        "jira_list_comments",
 		Description: "List all comments for an issue",
-		Help: `Usage: /tool jira_list_comments --issueIdOrKey <ISSUE> [--startAt <n>] [--maxResults <n>] [--orderBy <field>] [--expand <fields>]\nAliases: --issue` ,
+		Help: `Usage: /tool jira_list_comments --issueIdOrKey <ISSUE> [--startAt <n>] [--maxResults <n>] [--orderBy <field>] [--expand <fields>]
+		Aliases: --issue`,
 		Parameters: map[string]string{
 			"issueIdOrKey": "Issue key or ID (required)",
 			"startAt":      "Start index",
