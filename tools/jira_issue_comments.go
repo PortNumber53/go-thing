@@ -165,24 +165,9 @@ func executeJiraUpdateCommentTool(args map[string]interface{}) (*ToolResponse, e
 	if b, ok := coerceBool(args["overrideEditableFlag"]); ok { q.Set("overrideEditableFlag", fmt.Sprintf("%t", b)) }
 	if v, ok := args["expand"].(string); ok && v != "" { q.Set("expand", v) }
 	body := map[string]interface{}{}
-	if v, ok := args["body"].(map[string]interface{}); ok { body["body"] = v }
-	if v, ok := args["body"].(string); ok && v != "" {
-		// Jira Cloud v3 requires Atlassian Document Format (ADF). If a plain string is supplied,
-		// wrap it into a minimal ADF document to avoid 400 errors, same as add comment.
-		body["body"] = map[string]interface{}{
-			"type":    "doc",
-			"version": 1,
-			"content": []interface{}{
-				map[string]interface{}{
-					"type": "paragraph",
-					"content": []interface{}{
-						map[string]interface{}{
-							"type": "text",
-							"text": v,
-						},
-					},
-				},
-			},
+	if rawBody, ok := args["body"]; ok {
+		if processedBody, shouldSet := processADFValue(rawBody); shouldSet {
+			body["body"] = processedBody
 		}
 	}
 	if v, ok := args["visibility"].(map[string]interface{}); ok { body["visibility"] = v }
