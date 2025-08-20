@@ -57,9 +57,15 @@ func executeJiraGetCommentsByIdsTool(args map[string]interface{}) (*ToolResponse
 		if s == "" { return 0, fmt.Errorf("empty id") }
 		// try fast path
 		if n, err := strconv.Atoi(s); err == nil { return n, nil }
-		// fallback via json.Number to accept large ints safely
+		// fallback via json.Number to accept large ints safely, with overflow check
 		var num json.Number = json.Number(s)
-		if i64, err := num.Int64(); err == nil { return int(i64), nil }
+		if i64, err := num.Int64(); err == nil {
+			n := int(i64)
+			if int64(n) != i64 {
+				return 0, fmt.Errorf("id %s out of range for int type", s)
+			}
+			return n, nil
+		}
 		return 0, fmt.Errorf("invalid id: %s", s)
 	}
 	ids := make([]int, 0, 8)
