@@ -1080,6 +1080,57 @@ func main() {
                 log.Printf("[GitHubWebhook] issue fields action=%q repo=%q number=%q title=%q description=%q state=%q labels=%q reactions_total=%d (+1=%d,-1=%d,laugh=%d,hooray=%d,confused=%d,heart=%d,rocket=%d,eyes=%d) timeline_url=%q user=%q", action, repoFull, num, issueTitle, issueBodyLogged, issueState, strings.Join(labelNames, ","), reactionsTotal, rxPlus1, rxMinus1, rxLaugh, rxHooray, rxConfused, rxHeart, rxRocket, rxEyes, issueTimeline, issueUser)
             }
         }
+        // Push-specific enrichment: detect newly added files
+        if eventHeader == "push" {
+            createdFlag := false
+            if v, ok := payload["created"].(bool); ok { createdFlag = v }
+            // Aggregate added files across commits
+            totalAdded := 0
+            var addedSamples []string
+            if arr, ok := payload["commits"].([]interface{}); ok {
+                for _, cv := range arr {
+                    if cm, ok := cv.(map[string]interface{}); ok {
+                        if ad, ok := cm["added"].([]interface{}); ok {
+                            for _, av := range ad {
+                                if s, ok := av.(string); ok {
+                                    totalAdded++
+                                    // Keep a small sample for logging
+                                    if len(addedSamples) < 10 {
+                                        addedSamples = append(addedSamples, s)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Head commit details
+            headID, headMsg, headAuthor := "", "", ""
+            if hc, ok := payload["head_commit"].(map[string]interface{}); ok {
+                if v, ok := hc["id"].(string); ok { headID = v }
+                if v, ok := hc["message"].(string); ok { headMsg = v }
+                if au, ok := hc["author"].(map[string]interface{}); ok {
+                    if v, ok := au["name"].(string); ok { headAuthor = v }
+                }
+                // If head commit has additional files added, include in counts/samples
+                if ad, ok := hc["added"].([]interface{}); ok {
+                    for _, av := range ad {
+                        if s, ok := av.(string); ok {
+                            totalAdded++
+                            if len(addedSamples) < 10 {
+                                addedSamples = append(addedSamples, s)
+                            }
+                        }
+                    }
+                }
+            }
+            // Truncate message for log safety
+            if len(headMsg) > 200 { headMsg = headMsg[:200] + "…" }
+            log.Printf("[GitHubWebhook] push files created=%t branch=%q total_added=%d head_commit=%q author=%q msg=%q", createdFlag, ref, totalAdded, headID, headAuthor, headMsg)
+            if totalAdded > 0 {
+                log.Printf("[GitHubWebhook] push added samples (%d of %d): %q", len(addedSamples), totalAdded, strings.Join(addedSamples, ","))
+            }
+        }
         // Log final summary of extracted data (no persistence)
         log.Printf("[GitHubWebhook] summary delivery=%q event=%q action=%q repo_full=%q repo_id=%q sender=%q issue_ref=%q before=%q after=%q", deliveryID, eventHeader, action, repoFull, repoID, sender, ref, before, after)
 
