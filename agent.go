@@ -1051,7 +1051,7 @@ func main() {
                 }
                 reactionsTotal := 0
                 // Optional per-reaction counts (if present)
-                rxPlus1, rxMinus1, rxLaugh, rxHooray, rxConfused, rxHeart, rxRocket, rxEyes := 0, 0, 0, 0, 0, 0, 0, 0
+                var rxPlus1, rxMinus1, rxLaugh, rxHooray, rxConfused, rxHeart, rxRocket, rxEyes int
                 if rx, ok := iss["reactions"].(map[string]interface{}); ok {
                     switch tv := rx["total_count"].(type) {
                     case float64:
@@ -1061,15 +1061,22 @@ func main() {
                     case string:
                         if iv, err := strconv.Atoi(tv); err == nil { reactionsTotal = iv }
                     }
-                    // Read individual counts if present
-                    if v, ok := rx["+1"].(float64); ok { rxPlus1 = int(v) }
-                    if v, ok := rx["-1"].(float64); ok { rxMinus1 = int(v) }
-                    if v, ok := rx["laugh"].(float64); ok { rxLaugh = int(v) }
-                    if v, ok := rx["hooray"].(float64); ok { rxHooray = int(v) }
-                    if v, ok := rx["confused"].(float64); ok { rxConfused = int(v) }
-                    if v, ok := rx["heart"].(float64); ok { rxHeart = int(v) }
-                    if v, ok := rx["rocket"].(float64); ok { rxRocket = int(v) }
-                    if v, ok := rx["eyes"].(float64); ok { rxEyes = int(v) }
+                    // Read individual counts if present via map to reduce repetition
+                    reactionMap := map[string]*int{
+                        "+1":       &rxPlus1,
+                        "-1":       &rxMinus1,
+                        "laugh":    &rxLaugh,
+                        "hooray":   &rxHooray,
+                        "confused": &rxConfused,
+                        "heart":    &rxHeart,
+                        "rocket":   &rxRocket,
+                        "eyes":     &rxEyes,
+                    }
+                    for name, ptr := range reactionMap {
+                        if v, ok := rx[name].(float64); ok {
+                            *ptr = int(v)
+                        }
+                    }
                 }
                 html := ""
                 if h, ok := iss["html_url"].(string); ok { html = h }
@@ -1266,7 +1273,7 @@ func main() {
 
             // Build the task for the internal agent loop. Instruct it to output ALL_DONE! when no more actionable suggestions remain.
             task := fmt.Sprintf(
-                "Automated follow-up for GitHub PR review.\nRepository: %s\nPR #%s\nHead: %s @ %s\nEvent: %s by gemini-code-assist bot.\n\nInstruction: Apply the review suggestions below to the codebase in the least-intrusive way. If there are no remaining actionable suggestions from gemini-code-assist on this PR after processing, respond with EXACTLY: ALL_DONE!\n\nReview context:\n%s%s",
+                "Automated follow-up for GitHub PR review.\nRepository: %s\nPR #%s\nHead: %s @ %s\nEvent: %s by gemini-code-assist bot.\n\nInstruction: Apply the review suggestions below to the codebase in the least-intrusive way. When you finish and there are no remaining actionable suggestions from gemini-code-assist on this PR, respond with EXACTLY: ALL_DONE!\n\nIf you determine that you CANNOT complete the requested changes (e.g., missing context or files, insufficient permissions, conflicting instructions, external dependency, or repeated failures), STOP and respond with EXACTLY: GIVING UP: <reason> (replace <reason> with a concise, specific explanation).\n\nReview context:\n%s%s",
                 repoFull, prNumber, headRef, headSHA, eventHeader, strings.TrimSpace(commentBody), extraContext,
             )
 
