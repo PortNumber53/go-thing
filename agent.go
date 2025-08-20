@@ -596,6 +596,7 @@ func main() {
                 log.Printf("[Postgres] Migrations applied from %s", pgcfg.MigrationsDir)
             }
         }
+        
     } else {
         log.Printf("[Config] Load failed (%v); continuing with defaults", iniErr)
     }
@@ -1078,6 +1079,63 @@ func main() {
                 }
                 // Log extracted issue fields succinctly
                 log.Printf("[GitHubWebhook] issue fields action=%q repo=%q number=%q title=%q description=%q state=%q labels=%q reactions_total=%d (+1=%d,-1=%d,laugh=%d,hooray=%d,confused=%d,heart=%d,rocket=%d,eyes=%d) timeline_url=%q user=%q", action, repoFull, num, issueTitle, issueBodyLogged, issueState, strings.Join(labelNames, ","), reactionsTotal, rxPlus1, rxMinus1, rxLaugh, rxHooray, rxConfused, rxHeart, rxRocket, rxEyes, issueTimeline, issueUser)
+            }
+        }
+        // Pull Request-specific enrichment
+        if eventHeader == "pull_request" {
+            if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
+                // Core identifiers
+                prNumber := ""
+                switch v := payload["number"].(type) { // top-level number is present
+                case float64:
+                    prNumber = strconv.FormatInt(int64(v), 10)
+                case json.Number:
+                    prNumber = v.String()
+                case string:
+                    prNumber = v
+                }
+                prTitle := ""
+                if v, ok := pr["title"].(string); ok { prTitle = v }
+                prBody := ""
+                if v, ok := pr["body"].(string); ok { prBody = v }
+                prBodyLogged := prBody
+                if len(prBodyLogged) > 512 { prBodyLogged = prBodyLogged[:512] + "…" }
+                prState := ""
+                if v, ok := pr["state"].(string); ok { prState = v }
+                prDraft := false
+                if v, ok := pr["draft"].(bool); ok { prDraft = v }
+                prUser := ""
+                if u, ok := pr["user"].(map[string]interface{}); ok {
+                    if lg, ok := u["login"].(string); ok { prUser = lg }
+                }
+                prHTML := ""
+                if v, ok := pr["html_url"].(string); ok { prHTML = v }
+                // Branches and SHAs
+                headRef, headSHA := "", ""
+                if h, ok := pr["head"].(map[string]interface{}); ok {
+                    if v, ok := h["ref"].(string); ok { headRef = v }
+                    if v, ok := h["sha"].(string); ok { headSHA = v }
+                }
+                baseRef := ""
+                if b, ok := pr["base"].(map[string]interface{}); ok {
+                    if v, ok := b["ref"].(string); ok { baseRef = v }
+                }
+                // Stats
+                commits, additions, deletions, changed := 0, 0, 0, 0
+                if v, ok := pr["commits"].(float64); ok { commits = int(v) }
+                if v, ok := pr["additions"].(float64); ok { additions = int(v) }
+                if v, ok := pr["deletions"].(float64); ok { deletions = int(v) }
+                if v, ok := pr["changed_files"].(float64); ok { changed = int(v) }
+                // Merge status
+                merged := false
+                if v, ok := pr["merged"].(bool); ok { merged = v }
+                mergeableState := ""
+                if v, ok := pr["mergeable_state"].(string); ok { mergeableState = v }
+                mergeCommitSHA := ""
+                if v, ok := pr["merge_commit_sha"].(string); ok { mergeCommitSHA = v }
+                // Log extracted PR fields
+                log.Printf("[GitHubWebhook] pr fields action=%q repo=%q number=%q title=%q state=%q draft=%t user=%q url=%q head_ref=%q head_sha=%q base_ref=%q merged=%t mergeable_state=%q merge_commit_sha=%q", action, repoFull, prNumber, prTitle, prState, prDraft, prUser, prHTML, headRef, headSHA, baseRef, merged, mergeableState, mergeCommitSHA)
+                log.Printf("[GitHubWebhook] pr stats commits=%d additions=%d deletions=%d changed_files=%d body=%q", commits, additions, deletions, changed, prBodyLogged)
             }
         }
         // Push-specific enrichment: detect newly added files
