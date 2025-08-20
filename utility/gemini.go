@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
+	"golang.org/x/time/rate"
 	"google.golang.org/genai"
 )
 
@@ -23,6 +27,66 @@ type ToolCall struct {
 // GetMergedContext returns a merged context slice from either current_context or current_content
 func (tc *ToolCall) GetMergedContext() []string {
 	return MergeStringSets(tc.CurrentContext, tc.CurrentContent)
+}
+
+// --- Rate limiting and retry/backoff for Gemini API ---
+var (
+	geminiLimiterOnce sync.Once
+	geminiLimiter     *rate.Limiter
+)
+
+func getGeminiLimiter() *rate.Limiter {
+	geminiLimiterOnce.Do(func() {
+		// Default 10 requests per minute if not configured
+		rpm := 10
+		if cfg, err := LoadConfig(); err == nil {
+			if v := strings.TrimSpace(cfg["GEMINI_RPM"]); v != "" {
+				if n, err := strconv.Atoi(v); err == nil && n > 0 {
+					rpm = n
+				}
+			}
+		}
+		// rate.Every defines minimum time between events
+		// Burst set to rpm to allow short spikes up to the per-minute quota
+		interval := time.Minute / time.Duration(rpm)
+		geminiLimiter = rate.NewLimiter(rate.Every(interval), rpm)
+		log.Printf("[Gemini Rate] Initialized limiter: %d req/min (interval=%s, burst=%d)", rpm, interval, rpm)
+	})
+	return geminiLimiter
+}
+
+// shouldRetry429 best-effort detection of quota/rate errors
+func shouldRetry429(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "resource_exhausted") || strings.Contains(msg, "429") || strings.Contains(msg, "quota") {
+		return true
+	}
+	return false
+}
+
+// parseRetryDelay tries to extract a retry delay from the error text; falls back to def
+func parseRetryDelay(err error, def time.Duration) time.Duration {
+	if err == nil {
+		return def
+	}
+	// Example fragment: "RetryInfo retryDelay:25s"
+	msg := err.Error()
+	idx := strings.Index(msg, "retryDelay:")
+	if idx >= 0 {
+		// read until non-duration char
+		end := idx + len("retryDelay:")
+		for end < len(msg) && (msg[end] == 's' || msg[end] == 'm' || msg[end] == 'h' || (msg[end] >= '0' && msg[end] <= '9')) {
+			end++
+		}
+		durStr := strings.TrimSpace(msg[idx+len("retryDelay:"):end])
+		if d, e := time.ParseDuration(durStr); e == nil {
+			return d
+		}
+	}
+	return def
 }
 
 // callGeminiAPI sends the assembled system prompt and returns either a final text or a ToolCall.
@@ -155,10 +219,38 @@ You are a helpful assistant that executes tasks by calling tools.
 	}
 	systemPrompt := instructions
 	log.Printf("[Gemini API] Sending prompt: %s", systemPrompt)
-	resp, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(systemPrompt), nil)
-	if err != nil {
-		log.Printf("[Gemini API] Error generating content: %v", err)
+	// Global rate limit to respect API quotas
+	if err := getGeminiLimiter().Wait(ctx); err != nil {
+		log.Printf("[Gemini API] Rate limiter wait failed: %v", err)
 		return "", ToolCall{}, err
+	}
+
+	var resp *genai.GenerateContentResponse
+	// Retry with backoff when hitting quota/rate errors
+	maxAttempts := 3
+	baseDelay := 5 * time.Second
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		resp, err = client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(systemPrompt), nil)
+		if err == nil {
+			break
+		}
+		log.Printf("[Gemini API] Error generating content (attempt %d/%d): %v", attempt, maxAttempts, err)
+		if !shouldRetry429(err) || attempt == maxAttempts {
+			return "", ToolCall{}, err
+		}
+		// Honor server-provided retry delay if present; else exponential backoff
+		delay := parseRetryDelay(err, baseDelay*time.Duration(attempt))
+		if delay > 0 {
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return "", ToolCall{}, ctx.Err()
+			}
+		}
+		// Also wait on limiter again before retry to re-schedule within quota
+		if err := getGeminiLimiter().Wait(ctx); err != nil {
+			return "", ToolCall{}, err
+		}
 	}
 	responseText := resp.Text()
 	log.Printf("[Gemini API] Received response: %s", responseText)
