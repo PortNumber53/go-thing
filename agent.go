@@ -131,6 +131,24 @@ func validateCSRF(c *gin.Context) bool {
     return true
 }
 
+// hmacSha256 computes the GitHub signature header value for the given secret and body.
+// Returns the string in the format "sha256=<hex>" to compare against X-Hub-Signature-256.
+func hmacSha256(secret string, body []byte) string {
+    mac := hmac.New(sha256.New, []byte(secret))
+    mac.Write(body)
+    sum := mac.Sum(nil)
+    return "sha256=" + hex.EncodeToString(sum)
+}
+
+// hmacEqual performs a constant-time comparison between the received signature header
+// and the expected value. Comparison is case-insensitive for hex digits.
+func hmacEqual(gotHeader, expected string) bool {
+    // Normalize to lowercase and trim spaces
+    g := strings.ToLower(strings.TrimSpace(gotHeader))
+    e := strings.ToLower(strings.TrimSpace(expected))
+    return hmac.Equal([]byte(g), []byte(e))
+}
+
 // emailRegex caches a simple email validation regex.
 var (
 	emailRegexOnce     sync.Once
@@ -816,6 +834,258 @@ func main() {
         }
         c.JSON(http.StatusOK, gin.H{"id": uid, "username": username, "name": name})
     })
+
+    // GitHub direct API caller (CSRF protected)
+    r.POST("/github/call", func(c *gin.Context) {
+        if !validateCSRF(c) {
+            c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+            return
+        }
+        // limit body to 1MB
+        c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+        var req struct {
+            Method string                 `json:"method"`
+            Path   string                 `json:"path"`
+            Query  map[string]interface{} `json:"query"`
+            Body   interface{}            `json:"body"`
+        }
+        if err := c.ShouldBindJSON(&req); err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+            return
+        }
+        m := strings.ToUpper(strings.TrimSpace(req.Method))
+        if m == "" { m = "GET" }
+        p := strings.TrimSpace(req.Path)
+        if p == "" {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "path is required"})
+            return
+        }
+        q := url.Values{}
+        for k, v := range req.Query {
+            key := strings.TrimSpace(k)
+            if key == "" { continue }
+            switch tv := v.(type) {
+            case string:
+                if tv != "" { q.Set(key, tv) }
+            case float64:
+                q.Set(key, strconv.FormatInt(int64(tv), 10))
+            case bool:
+                q.Set(key, strconv.FormatBool(tv))
+            case []interface{}:
+                // join as comma list
+                parts := make([]string, 0, len(tv))
+                for _, iv := range tv {
+                    parts = append(parts, fmt.Sprint(iv))
+                }
+                if len(parts) > 0 { q.Set(key, strings.Join(parts, ",")) }
+            default:
+                // fallback to fmt.Sprint
+                s := fmt.Sprint(tv)
+                if strings.TrimSpace(s) != "" { q.Set(key, s) }
+            }
+        }
+        status, body, hdrs, err := utility.GitHubDo(m, p, q, req.Body)
+        if err != nil {
+            c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+            return
+        }
+        // Try JSON parse
+        var obj interface{}
+        if len(body) > 0 && json.Unmarshal(body, &obj) == nil {
+            c.JSON(status, gin.H{"ok": status >= 200 && status < 300, "data": obj, "headers": hdrs})
+            return
+        }
+        c.JSON(status, gin.H{"ok": status >= 200 && status < 300, "data": string(body), "headers": hdrs})
+    })
+
+    // GitHub webhook endpoint (HMAC-validated)
+    r.POST("/webhook/github", func(c *gin.Context) {
+        // Read body with a reasonable limit
+        c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20) // 1MB
+        body, err := io.ReadAll(c.Request.Body)
+        if err != nil {
+            log.Printf("[GitHubWebhook] read error: %v", err)
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+            return
+        }
+        // Log basic request metadata (no secrets)
+        evt := strings.TrimSpace(c.Request.Header.Get("X-GitHub-Event"))
+        delivery := strings.TrimSpace(c.Request.Header.Get("X-GitHub-Delivery"))
+        ua := strings.TrimSpace(c.Request.Header.Get("User-Agent"))
+        ctype := strings.TrimSpace(c.Request.Header.Get("Content-Type"))
+        sigPresent := c.Request.Header.Get("X-Hub-Signature-256") != ""
+        clientIP := c.ClientIP()
+        qstr := c.Request.URL.RawQuery
+        log.Printf("[GitHubWebhook] headers event=%q delivery=%q ua=%q content_type=%q sig256_present=%t ip=%q body_len=%d query=%q", evt, delivery, ua, ctype, sigPresent, clientIP, len(body), qstr)
+        // Log the raw body for debugging/analysis (body already limited to 1MB above)
+        log.Printf("[GitHubWebhook] raw body: %s", string(body))
+
+        // Try to parse JSON for structured logging
+        var payload map[string]interface{}
+        if err := json.Unmarshal(body, &payload); err != nil {
+            // If not JSON, just log raw (truncated)
+            raw := string(body)
+            if len(raw) > 512 {
+                raw = raw[:512] + "…"
+            }
+            log.Printf("[GitHubWebhook] non-JSON payload: %s", raw)
+            c.JSON(http.StatusOK, gin.H{"ok": true})
+            return
+        }
+
+        // Validate HMAC signature
+        // Prefer INI config [default] GITHUB_WEBHOOK_SECRET; fallback to environment.
+        secret := ""
+        if cfg, err := utility.LoadConfig(); err == nil && cfg != nil {
+            secret = strings.TrimSpace(cfg["GITHUB_WEBHOOK_SECRET"])
+        }
+        if secret == "" {
+            secret = os.Getenv("GITHUB_WEBHOOK_SECRET")
+        }
+        if secret == "" {
+            log.Printf("[GitHubWebhook] reject: missing GITHUB_WEBHOOK_SECRET")
+            c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+            return
+        }
+        signature := c.Request.Header.Get("X-Hub-Signature-256")
+        if signature == "" {
+            log.Printf("[GitHubWebhook] reject: missing X-Hub-Signature-256")
+            c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+            return
+        }
+        expected := hmacSha256(secret, body)
+        if !hmacEqual(signature, expected) {
+            log.Printf("[GitHubWebhook] reject: invalid X-Hub-Signature-256")
+            c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+            return
+        }
+
+        // Extract common fields for visibility
+        action := ""
+        if v, ok := payload["action"].(string); ok { action = v }
+        var repoName, repoFull, repoID string
+        if r, ok := payload["repository"].(map[string]interface{}); ok {
+            if n, ok := r["name"].(string); ok { repoName = n }
+            if fn, ok := r["full_name"].(string); ok { repoFull = fn }
+            switch idv := r["id"].(type) {
+            case float64:
+                repoID = strconv.FormatInt(int64(idv), 10)
+            case json.Number:
+                repoID = idv.String()
+            case string:
+                repoID = idv
+            }
+        }
+        sender := ""
+        if s, ok := payload["sender"].(map[string]interface{}); ok {
+            if lg, ok := s["login"].(string); ok { sender = lg }
+        }
+        installation := ""
+        if ins, ok := payload["installation"].(map[string]interface{}); ok {
+            switch idv := ins["id"].(type) {
+            case float64:
+                installation = strconv.FormatInt(int64(idv), 10)
+            case json.Number:
+                installation = idv.String()
+            case string:
+                installation = idv
+            }
+        }
+        ref := ""
+        if v, ok := payload["ref"].(string); ok { ref = v }
+        before := ""
+        if v, ok := payload["before"].(string); ok { before = v }
+        after := ""
+        if v, ok := payload["after"].(string); ok { after = v }
+        pusher := ""
+        if p, ok := payload["pusher"].(map[string]interface{}); ok {
+            if nm, ok := p["name"].(string); ok { pusher = nm }
+        }
+        log.Printf("[GitHubWebhook] parsed action=%q repo=%q full=%q id=%q sender=%q installation=%q ref=%q before=%q after=%q pusher=%q", action, repoName, repoFull, repoID, sender, installation, ref, before, after, pusher)
+
+        // Build a concise summary depending on event type (log-only)
+        eventHeader := strings.TrimSpace(c.Request.Header.Get("X-GitHub-Event"))
+        deliveryID := strings.TrimSpace(c.Request.Header.Get("X-GitHub-Delivery"))
+        summary := eventHeader + ": " + action
+        // Issues-specific enrichment
+        if eventHeader == "issues" {
+            if iss, ok := payload["issue"].(map[string]interface{}); ok {
+                num := ""
+                switch nv := iss["number"].(type) {
+                case float64:
+                    num = strconv.FormatInt(int64(nv), 10)
+                case json.Number:
+                    num = nv.String()
+                case string:
+                    num = nv
+                }
+                issueTitle := ""
+                if t, ok := iss["title"].(string); ok { issueTitle = t }
+                issueBody := ""
+                if b, ok := iss["body"].(string); ok { issueBody = b }
+                // Truncate description for logging to avoid huge lines
+                issueBodyLogged := issueBody
+                if len(issueBodyLogged) > 512 {
+                    issueBodyLogged = issueBodyLogged[:512] + "…"
+                }
+                issueTimeline := ""
+                if tl, ok := iss["timeline_url"].(string); ok { issueTimeline = tl }
+                issueUser := ""
+                if u, ok := iss["user"].(map[string]interface{}); ok {
+                    if lg, ok := u["login"].(string); ok { issueUser = lg }
+                    if nm, ok := u["name"].(string); ok && issueUser == "" { issueUser = nm }
+                }
+                issueState := ""
+                if st, ok := iss["state"].(string); ok { issueState = st }
+                // Labels extraction
+                var labelNames []string
+                if lbs, ok := iss["labels"].([]interface{}); ok {
+                    for _, lv := range lbs {
+                        if lm, ok := lv.(map[string]interface{}); ok {
+                            if ln, ok := lm["name"].(string); ok && strings.TrimSpace(ln) != "" {
+                                labelNames = append(labelNames, ln)
+                            }
+                        }
+                    }
+                }
+                reactionsTotal := 0
+                // Optional per-reaction counts (if present)
+                rxPlus1, rxMinus1, rxLaugh, rxHooray, rxConfused, rxHeart, rxRocket, rxEyes := 0, 0, 0, 0, 0, 0, 0, 0
+                if rx, ok := iss["reactions"].(map[string]interface{}); ok {
+                    switch tv := rx["total_count"].(type) {
+                    case float64:
+                        reactionsTotal = int(tv)
+                    case json.Number:
+                        if iv, err := strconv.Atoi(tv.String()); err == nil { reactionsTotal = iv }
+                    case string:
+                        if iv, err := strconv.Atoi(tv); err == nil { reactionsTotal = iv }
+                    }
+                    // Read individual counts if present
+                    if v, ok := rx["+1"].(float64); ok { rxPlus1 = int(v) }
+                    if v, ok := rx["-1"].(float64); ok { rxMinus1 = int(v) }
+                    if v, ok := rx["laugh"].(float64); ok { rxLaugh = int(v) }
+                    if v, ok := rx["hooray"].(float64); ok { rxHooray = int(v) }
+                    if v, ok := rx["confused"].(float64); ok { rxConfused = int(v) }
+                    if v, ok := rx["heart"].(float64); ok { rxHeart = int(v) }
+                    if v, ok := rx["rocket"].(float64); ok { rxRocket = int(v) }
+                    if v, ok := rx["eyes"].(float64); ok { rxEyes = int(v) }
+                }
+                html := ""
+                if h, ok := iss["html_url"].(string); ok { html = h }
+                if repoFull != "" && num != "" {
+                    summary = "issue #" + num + " " + action + " — " + repoFull + ": " + issueTitle
+                    if html != "" { summary += " (" + html + ")" }
+                }
+                // Log extracted issue fields succinctly
+                log.Printf("[GitHubWebhook] issue fields action=%q repo=%q number=%q title=%q description=%q state=%q labels=%q reactions_total=%d (+1=%d,-1=%d,laugh=%d,hooray=%d,confused=%d,heart=%d,rocket=%d,eyes=%d) timeline_url=%q user=%q", action, repoFull, num, issueTitle, issueBodyLogged, issueState, strings.Join(labelNames, ","), reactionsTotal, rxPlus1, rxMinus1, rxLaugh, rxHooray, rxConfused, rxHeart, rxRocket, rxEyes, issueTimeline, issueUser)
+            }
+        }
+        // Log final summary of extracted data (no persistence)
+        log.Printf("[GitHubWebhook] summary delivery=%q event=%q action=%q repo_full=%q repo_id=%q sender=%q issue_ref=%q before=%q after=%q", deliveryID, eventHeader, action, repoFull, repoID, sender, ref, before, after)
+
+        c.JSON(http.StatusOK, gin.H{"ok": true})
+    })
+
     // Jira webhook endpoint (no CSRF; external origin). Optional token validation via config JIRA_WEBHOOK_TOKEN.
     r.POST("/webhook/jira", func(c *gin.Context) {
         // Optional shared token check
