@@ -1225,13 +1225,31 @@ func main() {
             // Extract review/comment text and any inline context
             commentBody := ""
             extraContext := ""
+            reviewID := ""
+            commentID := ""
             if eventHeader == "pull_request_review" {
                 if rv, ok := payload["review"].(map[string]interface{}); ok {
                     if b, ok := rv["body"].(string); ok { commentBody = b }
+                    switch v := rv["id"].(type) {
+                    case float64:
+                        reviewID = strconv.FormatInt(int64(v), 10)
+                    case json.Number:
+                        reviewID = v.String()
+                    case string:
+                        reviewID = v
+                    }
                 }
             } else if eventHeader == "pull_request_review_comment" {
                 if cm, ok := payload["comment"].(map[string]interface{}); ok {
                     if b, ok := cm["body"].(string); ok { commentBody = b }
+                    switch v := cm["id"].(type) {
+                    case float64:
+                        commentID = strconv.FormatInt(int64(v), 10)
+                    case json.Number:
+                        commentID = v.String()
+                    case string:
+                        commentID = v
+                    }
                     // Include file/line and diff hunk when available for better grounding
                     path, _ := cm["path"].(string)
                     side, _ := cm["side"].(string)
@@ -1252,17 +1270,37 @@ func main() {
                 repoFull, prNumber, headRef, headSHA, eventHeader, strings.TrimSpace(commentBody), extraContext,
             )
 
-            // Run asynchronously so webhook responds fast
-            go func(ctx context.Context, t string) {
-                log.Printf("[GitHubWebhook][AI] starting agent loop for repo=%q pr=%q head_ref=%q head_sha=%q", repoFull, prNumber, headRef, headSHA)
+            // Run asynchronously so webhook responds fast. Use background context with timeout to avoid request context cancellation.
+            go func(t string) {
+                start := time.Now()
+                timeout := 3 * time.Minute
+                ctx, cancel := context.WithTimeout(context.Background(), timeout)
+                defer cancel()
+                log.Printf("[GitHubWebhook][AI] start repo=%q pr=%q head_ref=%q head_sha=%q event=%q review_id=%q comment_id=%q task_len=%d comment_len=%d extra_ctx=%t timeout=%s",
+                    repoFull, prNumber, headRef, headSHA, eventHeader, reviewID, commentID, len(t), len(strings.TrimSpace(commentBody)), extraContext != "", timeout)
+
                 resp, _, err := utility.GeminiAPIHandler(ctx, t, nil)
                 if err != nil {
-                    log.Printf("[GitHubWebhook][AI] error: %v", err)
+                    // Highlight common cancellation/timeout causes
+                    msg := err.Error()
+                    if strings.Contains(msg, "context canceled") {
+                        log.Printf("[GitHubWebhook][AI] error: context canceled (likely timeout/cancel) err=%v elapsed=%s", err, time.Since(start))
+                    } else if strings.Contains(msg, "deadline exceeded") {
+                        log.Printf("[GitHubWebhook][AI] error: deadline exceeded err=%v elapsed=%s", err, time.Since(start))
+                    } else {
+                        log.Printf("[GitHubWebhook][AI] error: %v elapsed=%s", err, time.Since(start))
+                    }
                     return
                 }
                 // Log only; future: optionally post a PR comment/status with result
-                if len(resp) > 512 { log.Printf("[GitHubWebhook][AI] result: %.512s…", resp) } else { log.Printf("[GitHubWebhook][AI] result: %s", resp) }
-            }(c.Request.Context(), task)
+                dur := time.Since(start)
+                allDone := strings.Contains(resp, "ALL_DONE!")
+                if len(resp) > 512 {
+                    log.Printf("[GitHubWebhook][AI] success elapsed=%s all_done=%t result: %.512s…", dur, allDone, resp)
+                } else {
+                    log.Printf("[GitHubWebhook][AI] success elapsed=%s all_done=%t result: %s", dur, allDone, resp)
+                }
+            }(task)
         }
 
         c.JSON(http.StatusOK, gin.H{"ok": true})
