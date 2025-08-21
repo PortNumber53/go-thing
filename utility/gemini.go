@@ -39,15 +39,15 @@ func getGeminiLimiter() *rate.Limiter {
 	geminiLimiterOnce.Do(func() {
 		// Default 10 requests per minute if not configured
 		rpm := 10
-if cfg, err := LoadConfig(); err != nil {
-	log.Printf("[Gemini Rate] Failed to load config, using default: %v", err)
-} else if v := strings.TrimSpace(cfg["GEMINI_RPM"]); v != "" {
-	if n, err := strconv.Atoi(v); err == nil && n > 0 {
-		rpm = n
-	} else if err != nil {
-		log.Printf("[Gemini Rate] Could not parse GEMINI_RPM value '%s', using default: %v", v, err)
-	}
-}
+		if cfg, err := LoadConfig(); err != nil {
+			log.Printf("[Gemini Rate] Failed to load config, using default: %v", err)
+		} else if v := strings.TrimSpace(cfg["GEMINI_RPM"]); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				rpm = n
+			} else if err != nil {
+				log.Printf("[Gemini Rate] Could not parse GEMINI_RPM value '%s', using default: %v", v, err)
+			}
+		}
 		// rate.Every defines minimum time between events
 		// Burst set to rpm to allow short spikes up to the per-minute quota
 		interval := time.Minute / time.Duration(rpm)
