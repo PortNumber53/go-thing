@@ -23,6 +23,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"strconv"
+	mathrand "math/rand"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/slack-go/slack"
@@ -38,6 +39,11 @@ import (
 	"go-thing/utility"
 
 )
+
+// init seeds math/rand so jitter used in backoffs is non-deterministic across instances
+func init() {
+    mathrand.Seed(time.Now().UnixNano())
+}
 
 // ToolResponse represents a response from tool execution
 type ToolResponse struct {
