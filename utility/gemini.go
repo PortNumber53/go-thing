@@ -17,6 +17,12 @@ import (
 	"google.golang.org/genai"
 )
 
+const (
+	// Retry/backoff configuration for Gemini API calls
+	maxAttempts = 3
+	baseDelay   = 5 * time.Second
+)
+
 // ToolCall describes the model's directive in JSON
 // Note: kept unexported; only used internally by this package
 type ToolCall struct {
@@ -238,8 +244,6 @@ You are a helpful assistant that executes tasks by calling tools.
 
 	var resp *genai.GenerateContentResponse
 	// Retry with backoff when hitting quota/rate errors
-	const maxAttempts = 3
-	const baseDelay = 5 * time.Second
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		resp, err = client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(systemPrompt), nil)
 		if err == nil {
@@ -267,12 +271,9 @@ You are a helpful assistant that executes tasks by calling tools.
 	}
 	// Guard against nil response to avoid panic if no attempt succeeded
 	if resp == nil {
-		// This can happen if the loop completes without a successful response,
-		// for example if maxAttempts <= 0.
-		if err == nil {
-			return "", ToolCall{}, fmt.Errorf("gemini: no response received after %d attempts", maxAttempts)
-		}
-		return "", ToolCall{}, fmt.Errorf("no response and last error: %w", err)
+		// This happens if the loop completes without a successful response.
+		// The `err` variable will hold the error from the last attempt.
+		return "", ToolCall{}, fmt.Errorf("gemini: no response received after %d attempts, last error: %w", maxAttempts, err)
 	}
 	responseText := resp.Text()
 	log.Printf("[Gemini API] Received response: %s", responseText)
