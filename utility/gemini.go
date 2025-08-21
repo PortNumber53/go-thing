@@ -63,6 +63,10 @@ func getGeminiLimiter() *rate.Limiter {
 		// rate.Every defines minimum time between events
 		// Burst set to rpm to allow short spikes up to the per-minute quota
 		interval := time.Minute / time.Duration(rpm)
+		if interval <= 0 {
+			// Prevent infinite rate from pathological large RPM values
+			interval = time.Nanosecond
+		}
 		geminiLimiter = rate.NewLimiter(rate.Every(interval), rpm)
 		log.Printf("[Gemini Rate] Initialized limiter: %d req/min (interval=%s, burst=%d)", rpm, interval, rpm)
 	})
