@@ -3,6 +3,7 @@ package utility
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/genai"
 )
 
@@ -66,11 +68,14 @@ func shouldRetry429(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "resource_exhausted") || strings.Contains(msg, "429") || strings.Contains(msg, "quota") {
+	// Prefer structured error type when available
+	var gerr *googleapi.Error
+	if errors.As(err, &gerr) && gerr.Code == 429 {
 		return true
 	}
-	return false
+	// Fallback to message inspection for other client libs/providers
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "resource_exhausted") || strings.Contains(msg, "429") || strings.Contains(msg, "quota")
 }
 
 // parseRetryDelay tries to extract a retry delay from the error text; falls back to def
