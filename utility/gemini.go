@@ -253,6 +253,15 @@ const maxAttempts = 3
 			return "", ToolCall{}, err
 		}
 	}
+	// Guard against nil response to avoid panic if no attempt succeeded
+	if resp == nil {
+		// This can happen if the loop completes without a successful response,
+		// for example if maxAttempts <= 0.
+		if err == nil {
+			return "", ToolCall{}, fmt.Errorf("gemini: no response received after %d attempts", maxAttempts)
+		}
+		return "", ToolCall{}, err
+	}
 	responseText := resp.Text()
 	log.Printf("[Gemini API] Received response: %s", responseText)
 
