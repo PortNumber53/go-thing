@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"strconv"
 	"strings"
 	"sync"
@@ -245,11 +246,13 @@ You are a helpful assistant that executes tasks by calling tools.
 			break
 		}
 		log.Printf("[Gemini API] Error generating content (attempt %d/%d): %v", attempt, maxAttempts, err)
-        if !shouldRetry429(err) || attempt == maxAttempts {
+		if !shouldRetry429(err) || attempt == maxAttempts {
 			break
 		}
-		// Honor server-provided retry delay if present; else linear backoff
+		// Honor server-provided retry delay if present; else linear backoff with jitter
 		delay := parseRetryDelay(err, baseDelay*time.Duration(attempt))
+		// Add small random jitter to avoid synchronized retries across instances
+		delay += time.Duration(rand.Intn(1000)) * time.Millisecond
 		if delay > 0 {
 			select {
 			case <-time.After(delay):
