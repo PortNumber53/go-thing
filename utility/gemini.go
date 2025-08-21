@@ -50,15 +50,14 @@ func getGeminiLimiter() *rate.Limiter {
 		rpm := 10
 		if cfg, err := LoadConfig(); err != nil {
 			log.Printf("[Gemini Rate] Failed to load config, using default: %v", err)
-		} else if v := strings.TrimSpace(cfg["GEMINI_RPM"]); v != "" {
-			if n, err := strconv.Atoi(v); err == nil {
-				if n > 0 {
-					rpm = n
-				} else {
-					log.Printf("[Gemini Rate] Invalid GEMINI_RPM value '%s' (must be > 0), using default.", v)
-				}
+		} else if rpmStr := strings.TrimSpace(cfg["GEMINI_RPM"]); rpmStr != "" {
+			n, err := strconv.Atoi(rpmStr)
+			if err != nil {
+				log.Printf("[Gemini Rate] Could not parse GEMINI_RPM value '%s', using default: %v", rpmStr, err)
+			} else if n <= 0 {
+				log.Printf("[Gemini Rate] Invalid GEMINI_RPM value '%s' (must be > 0), using default.", rpmStr)
 			} else {
-				log.Printf("[Gemini Rate] Could not parse GEMINI_RPM value '%s', using default: %v", v, err)
+				rpm = n
 			}
 		}
 		// rate.Every defines minimum time between events
