@@ -245,8 +245,8 @@ You are a helpful assistant that executes tasks by calling tools.
 			break
 		}
 		log.Printf("[Gemini API] Error generating content (attempt %d/%d): %v", attempt, maxAttempts, err)
-		if !shouldRetry429(err) || attempt == maxAttempts {
-			return "", ToolCall{}, fmt.Errorf("generate content failed: %w", err)
+        if !shouldRetry429(err) || attempt == maxAttempts {
+			break
 		}
 		// Honor server-provided retry delay if present; else linear backoff
 		delay := parseRetryDelay(err, baseDelay*time.Duration(attempt))
