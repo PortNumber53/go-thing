@@ -228,8 +228,8 @@ You are a helpful assistant that executes tasks by calling tools.
 
 	var resp *genai.GenerateContentResponse
 	// Retry with backoff when hitting quota/rate errors
-	maxAttempts := 3
-	baseDelay := 5 * time.Second
+const maxAttempts = 3
+	const baseDelay = 5 * time.Second
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		resp, err = client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(systemPrompt), nil)
 		if err == nil {
