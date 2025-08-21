@@ -42,9 +42,13 @@ func getGeminiLimiter() *rate.Limiter {
 		if cfg, err := LoadConfig(); err != nil {
 			log.Printf("[Gemini Rate] Failed to load config, using default: %v", err)
 		} else if v := strings.TrimSpace(cfg["GEMINI_RPM"]); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				rpm = n
-			} else if err != nil {
+			if n, err := strconv.Atoi(v); err == nil {
+				if n > 0 {
+					rpm = n
+				} else {
+					log.Printf("[Gemini Rate] Invalid GEMINI_RPM value '%s' (must be > 0), using default.", v)
+				}
+			} else {
 				log.Printf("[Gemini Rate] Could not parse GEMINI_RPM value '%s', using default: %v", v, err)
 			}
 		}
@@ -223,7 +227,7 @@ You are a helpful assistant that executes tasks by calling tools.
 	// Global rate limit to respect API quotas
 	if err := getGeminiLimiter().Wait(ctx); err != nil {
 		log.Printf("[Gemini API] Rate limiter wait failed: %v", err)
-		return "", ToolCall{}, err
+		return "", ToolCall{}, fmt.Errorf("rate limiter wait failed: %w", err)
 	}
 
 	var resp *genai.GenerateContentResponse
@@ -237,7 +241,7 @@ You are a helpful assistant that executes tasks by calling tools.
 		}
 		log.Printf("[Gemini API] Error generating content (attempt %d/%d): %v", attempt, maxAttempts, err)
 		if !shouldRetry429(err) || attempt == maxAttempts {
-			return "", ToolCall{}, err
+			return "", ToolCall{}, fmt.Errorf("generate content failed: %w", err)
 		}
 		// Honor server-provided retry delay if present; else linear backoff
 		delay := parseRetryDelay(err, baseDelay*time.Duration(attempt))
@@ -245,12 +249,12 @@ You are a helpful assistant that executes tasks by calling tools.
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():
-				return "", ToolCall{}, ctx.Err()
+				return "", ToolCall{}, fmt.Errorf("retry delay wait canceled: %w", ctx.Err())
 			}
 		}
 		// Also wait on limiter again before retry to re-schedule within quota
 		if err := getGeminiLimiter().Wait(ctx); err != nil {
-			return "", ToolCall{}, err
+			return "", ToolCall{}, fmt.Errorf("rate limiter wait before retry failed: %w", err)
 		}
 	}
 	// Guard against nil response to avoid panic if no attempt succeeded
@@ -260,7 +264,7 @@ You are a helpful assistant that executes tasks by calling tools.
 		if err == nil {
 			return "", ToolCall{}, fmt.Errorf("gemini: no response received after %d attempts", maxAttempts)
 		}
-		return "", ToolCall{}, err
+		return "", ToolCall{}, fmt.Errorf("no response and last error: %w", err)
 	}
 	responseText := resp.Text()
 	log.Printf("[Gemini API] Received response: %s", responseText)
