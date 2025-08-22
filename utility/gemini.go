@@ -266,8 +266,8 @@ You are a helpful assistant that executes tasks by calling tools.
 		if !shouldRetry429(err) || attempt == maxAttempts {
 			break
 		}
-// Honor server-provided retry delay if present; else exponential backoff with jitter
-delay := parseRetryDelay(err, baseDelay*time.Duration(1<<(attempt-1)))
+		// Honor server-provided retry delay if present; else exponential backoff with jitter
+		delay := parseRetryDelay(err, baseDelay*time.Duration(1<<(attempt-1)))
 		// Add small random jitter to avoid synchronized retries across instances
 		delay += time.Duration(rand.Intn(1000)) * time.Millisecond
 		if delay > 0 {
