@@ -56,14 +56,8 @@ func getGeminiLimiter() *rate.Limiter {
 		cfg, err := LoadConfig()
 		if err != nil {
 			slog.Warn("Failed to load config for Gemini rate limiter, using default", "error", err)
-		} else if rpmStr := strings.TrimSpace(cfg["GEMINI_RPM"]); rpmStr != "" {
-			if n, err := strconv.Atoi(rpmStr); err != nil {
-				slog.Warn("Could not parse GEMINI_RPM; using default", "value", rpmStr, "error", err)
-			} else if n <= 0 {
-				slog.Warn("Invalid GEMINI_RPM (must be > 0); using default", "value", rpmStr)
-			} else {
-				rpm = n
-			}
+		} else {
+			rpm = parseRpmFromConfig(cfg, rpm)
 		}
 		// rate.Every defines minimum time between events
 		// Burst set to rpm to allow short spikes up to the per-minute quota
@@ -81,6 +75,25 @@ func getGeminiLimiter() *rate.Limiter {
 		slog.Info("Initialized Gemini limiter", "rpm", rpm, "interval", interval.String(), "burst", burst)
 	})
 	return geminiLimiter
+}
+
+// parseRpmFromConfig extracts and validates the GEMINI_RPM value from config.
+// Returns defaultRpm when unset, invalid, or unparseable. Emits warnings on issues.
+func parseRpmFromConfig(cfg map[string]string, defaultRpm int) int {
+	rpmStr := strings.TrimSpace(cfg["GEMINI_RPM"])
+	if rpmStr == "" {
+		return defaultRpm
+	}
+	n, err := strconv.Atoi(rpmStr)
+	if err != nil {
+		slog.Warn("Could not parse GEMINI_RPM; using default", "value", rpmStr, "error", err)
+		return defaultRpm
+	}
+	if n <= 0 {
+		slog.Warn("Invalid GEMINI_RPM (must be > 0); using default", "value", rpmStr)
+		return defaultRpm
+	}
+	return n
 }
 
 // shouldRetry429 best-effort detection of quota/rate errors
