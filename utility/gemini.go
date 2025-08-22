@@ -24,6 +24,8 @@ const (
 	geminiModelName = "gemini-2.5-flash"
 	// Random jitter upper bound for backoff, in milliseconds
 	backoffJitterMs = 1000
+	// Upper bound to clamp burst size for the rate limiter
+	maxBurst = 100
 )
 
 // ToolCall describes the model's directive in JSON
@@ -71,7 +73,6 @@ func getGeminiLimiter() *rate.Limiter {
 			interval = time.Nanosecond
 		}
 		burst := rpm
-		const maxBurst = 100
 		if burst > maxBurst {
 			slog.Warn("GEMINI_RPM is very large, clamping burst size to avoid traffic spikes", "rpm", rpm, "max_burst", maxBurst)
 			burst = maxBurst
