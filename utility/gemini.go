@@ -19,8 +19,9 @@ import (
 
 const (
 	// Retry/backoff configuration for Gemini API calls
-	maxAttempts = 3
-	baseDelay   = 5 * time.Second
+	maxAttempts     = 3
+	baseDelay       = 5 * time.Second
+	geminiModelName = "gemini-2.5-flash"
 )
 
 // ToolCall describes the model's directive in JSON
@@ -248,7 +249,7 @@ You are a helpful assistant that executes tasks by calling tools.
 	var resp *genai.GenerateContentResponse
 	// Retry with backoff when hitting quota/rate errors
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		resp, err = client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(systemPrompt), nil)
+		resp, err = client.Models.GenerateContent(ctx, geminiModelName, genai.Text(systemPrompt), nil)
 		if err == nil {
 			break
 		}
