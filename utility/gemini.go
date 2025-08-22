@@ -3,11 +3,31 @@ package utility
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
+	"log/slog"
+	"math/rand"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
+	"golang.org/x/time/rate"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/genai"
+)
+
+const (
+	// Retry/backoff configuration for Gemini API calls
+	maxAttempts = 3
+	baseDelay   = 5 * time.Second
+	geminiModelName = "gemini-2.5-flash"
+	// Random jitter upper bound for backoff, in milliseconds
+	backoffJitterMs = 1000
+	// Upper bound to clamp burst size for the rate limiter
+	maxBurst = 100
+	// Default rate limit for Gemini API calls in requests per minute.
+	defaultGeminiRpm = 10
 )
 
 // ToolCall describes the model's directive in JSON
@@ -23,6 +43,95 @@ type ToolCall struct {
 // GetMergedContext returns a merged context slice from either current_context or current_content
 func (tc *ToolCall) GetMergedContext() []string {
 	return MergeStringSets(tc.CurrentContext, tc.CurrentContent)
+}
+
+// --- Rate limiting and retry/backoff for Gemini API ---
+var (
+	geminiLimiterOnce sync.Once
+	geminiLimiter     *rate.Limiter
+)
+
+func getGeminiLimiter() *rate.Limiter {
+	geminiLimiterOnce.Do(func() {
+		// Default requests per minute if not configured
+		rpm := defaultGeminiRpm
+		cfg, err := LoadConfig()
+		if err != nil {
+			slog.Warn("Failed to load config for Gemini rate limiter, using default", "error", err)
+		} else {
+			rpm = parseRpmFromConfig(cfg, rpm)
+		}
+		// rate.Every defines minimum time between events
+		// Burst set to rpm to allow short spikes up to the per-minute quota
+		interval := time.Minute / time.Duration(rpm)
+		if interval <= 0 {
+			// Prevent infinite rate from pathological large RPM values
+			interval = time.Nanosecond
+		}
+		burst := rpm
+		if burst > maxBurst {
+			slog.Warn("GEMINI_RPM is very large, clamping burst size to avoid traffic spikes", "rpm", rpm, "max_burst", maxBurst)
+			burst = maxBurst
+		}
+		geminiLimiter = rate.NewLimiter(rate.Every(interval), burst)
+		slog.Info("Initialized Gemini limiter", "rpm", rpm, "interval", interval.String(), "burst", burst)
+	})
+	return geminiLimiter
+}
+
+// parseRpmFromConfig extracts and validates the GEMINI_RPM value from config.
+// Returns defaultRpm when unset, invalid, or unparseable. Emits warnings on issues.
+func parseRpmFromConfig(cfg map[string]string, defaultRpm int) int {
+	rpmStr := strings.TrimSpace(cfg["GEMINI_RPM"])
+	if rpmStr == "" {
+		return defaultRpm
+	}
+	n, err := strconv.Atoi(rpmStr)
+	if err != nil {
+		slog.Warn("Could not parse GEMINI_RPM; using default", "value", rpmStr, "error", err)
+		return defaultRpm
+	}
+	if n <= 0 {
+		slog.Warn("Invalid GEMINI_RPM (must be > 0); using default", "value", rpmStr)
+		return defaultRpm
+	}
+	return n
+}
+
+// shouldRetry429 best-effort detection of quota/rate errors
+func shouldRetry429(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Prefer structured error type when available
+	var gerr *googleapi.Error
+	if errors.As(err, &gerr) && gerr.Code == 429 {
+		return true
+	}
+	// Fallback to message inspection for other client libs/providers
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "resource_exhausted") || strings.Contains(msg, "429") || strings.Contains(msg, "quota")
+}
+
+// parseRetryDelay tries to extract a retry delay from the error text; falls back to def
+func parseRetryDelay(err error, def time.Duration) time.Duration {
+	if err == nil {
+		return def
+	}
+	// Example fragment: "RetryInfo retryDelay:25s"
+	msg := err.Error()
+	idx := strings.Index(msg, "retryDelay:")
+	if idx >= 0 {
+		// A more robust way to parse the duration value, stopping at the first delimiter.
+		valStr := strings.TrimSpace(msg[idx+len("retryDelay:"):])
+		if endIdx := strings.IndexAny(valStr, " ,"); endIdx != -1 {
+			valStr = valStr[:endIdx]
+		}
+		if d, e := time.ParseDuration(valStr); e == nil {
+			return d
+		}
+	}
+	return def
 }
 
 // callGeminiAPI sends the assembled system prompt and returns either a final text or a ToolCall.
@@ -54,7 +163,7 @@ func callGeminiAPI(ctx context.Context, client *genai.Client, task string, persi
 		sanitized := SanitizeContextFacts(persistedContext)
 		b, err := json.Marshal(sanitized)
 		if err != nil {
-			log.Printf("[Gemini API] Failed to marshal persisted context: %v", err)
+			slog.Error("Failed to marshal persisted context", "error", err)
 			return "", ToolCall{}, fmt.Errorf("failed to marshal persisted context: %w", err)
 		}
 		contextSection.WriteString("## Persisted Context\n")
@@ -154,14 +263,60 @@ You are a helpful assistant that executes tasks by calling tools.
 %s`, maxItems, toolsSection.String(), contextSection.String(), task)
 	}
 	systemPrompt := instructions
-	log.Printf("[Gemini API] Sending prompt: %s", systemPrompt)
-	resp, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(systemPrompt), nil)
-	if err != nil {
-		log.Printf("[Gemini API] Error generating content: %v", err)
-		return "", ToolCall{}, err
+	slog.Info("Sending Gemini prompt", "prompt", systemPrompt)
+	// Global rate limit to respect API quotas
+	if err := getGeminiLimiter().Wait(ctx); err != nil {
+		slog.Error("Rate limiter wait failed", "error", err)
+		return "", ToolCall{}, fmt.Errorf("rate limiter wait failed: %w", err)
+	}
+
+	var resp *genai.GenerateContentResponse
+	// Retry with backoff when hitting quota/rate errors
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		resp, err = client.Models.GenerateContent(ctx, geminiModelName, genai.Text(systemPrompt), nil)
+		// Success case: no error and a valid response.
+		if err == nil && resp != nil {
+			break
+		}
+
+		// Failure cases: determine if we should retry.
+		var isRetryable bool
+		if err != nil {
+			isRetryable = shouldRetry429(err)
+		} else { // err is nil, but resp is also nil. Treat as a transient error.
+			err = errors.New("gemini: API returned empty response without error")
+			isRetryable = true
+		}
+
+		slog.Warn("Error generating Gemini content", "attempt", attempt, "max_attempts", maxAttempts, "error", err)
+
+		if !isRetryable || attempt == maxAttempts {
+			break
+		}
+		// Honor server-provided retry delay if present; else exponential backoff with jitter
+		delay := parseRetryDelay(err, baseDelay*time.Duration(1<<(attempt-1)))
+		// Add small random jitter to avoid synchronized retries across instances
+		delay += time.Duration(rand.Intn(backoffJitterMs)) * time.Millisecond
+		if delay > 0 {
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return "", ToolCall{}, fmt.Errorf("retry delay wait canceled: %w", ctx.Err())
+			}
+		}
+		// Also wait on limiter again before retry to re-schedule within quota
+		if err := getGeminiLimiter().Wait(ctx); err != nil {
+			return "", ToolCall{}, fmt.Errorf("rate limiter wait before retry failed: %w", err)
+		}
+	}
+	// Guard against nil response to avoid panic if no attempt succeeded
+	if resp == nil {
+		// This happens if the loop completes without a successful response.
+		// The `err` variable will hold the error from the last attempt.
+		return "", ToolCall{}, fmt.Errorf("gemini: no response received after %d attempts, last error: %w", maxAttempts, err)
 	}
 	responseText := resp.Text()
-	log.Printf("[Gemini API] Received response: %s", responseText)
+	slog.Info("Received Gemini response", "response", responseText)
 
 	// Clean the response to extract raw JSON if it's in a markdown block
 	cleanedResponse := strings.TrimSpace(responseText)
@@ -182,29 +337,29 @@ You are a helpful assistant that executes tasks by calling tools.
 		// Log parsed context if present and not disabled
 		if !disableContext && (len(toolCall.CurrentContext) > 0 || len(toolCall.CurrentContent) > 0) {
 			merged := toolCall.GetMergedContext()
-			log.Printf("[Gemini API] current_json: current_context=%v current_content=%v merged=%v", toolCall.CurrentContext, toolCall.CurrentContent, merged)
+			slog.Info("Gemini JSON with context", "current_context", toolCall.CurrentContext, "current_content", toolCall.CurrentContent, "merged", merged)
 		}
 		if toolCall.Tool != "" {
-			log.Printf("[Gemini API] Tool call detected: %v", toolCall)
+			slog.Info("Gemini tool call detected", "tool_call", toolCall)
 			return "", toolCall, nil
 		}
 		// Final path: ensure responseText reflects final content
-		log.Printf("[Gemini API] Final JSON detected")
+		slog.Info("Final JSON detected")
 		return toolCall.Final, toolCall, nil
 	}
 	// Fallback: not JSON
-	log.Printf("[Gemini API] Non-JSON response, returning raw text")
+	slog.Info("Non-JSON response, returning raw text")
 	return responseText, ToolCall{}, nil
 }
 
 // GeminiAPIHandler runs the LLM/tool loop. It accepts an initialContext (persisted across turns)
 // and returns the final assistant response and the updated current_context slice.
 func GeminiAPIHandler(ctx context.Context, task string, initialContext []string) (string, []string, error) {
-	log.Printf("[Gemini API] Handler invoked for task: %s", task)
+	slog.Info("Gemini handler invoked", "task", task)
 	if len(initialContext) > 0 {
-		log.Printf("[Context] Loaded initial current_context: %v", initialContext)
+		slog.Info("Loaded initial current_context", "current_context", initialContext)
 	} else {
-		log.Printf("[Context] No initial current_context loaded")
+		slog.Info("No initial current_context loaded")
 	}
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -237,19 +392,19 @@ func GeminiAPIHandler(ctx context.Context, task string, initialContext []string)
 
 		responseText, toolCall, err := callGeminiAPI(ctx, client, currentPrompt, currentContext, disableContext)
 		if err != nil {
-			log.Printf("[Gemini Loop] Error from Gemini: %v", err)
+			slog.Error("Error from Gemini in loop", "error", err)
 			return "", currentContext, err
 		}
 		// Merge model-provided context only when enabled
 		if !disableContext && len(toolCall.GetMergedContext()) > 0 {
-			log.Printf("[Context] From toolCall: current_context=%v current_content=%v", toolCall.CurrentContext, toolCall.CurrentContent)
+			slog.Info("Context from toolCall", "current_context", toolCall.CurrentContext, "current_content", toolCall.CurrentContent)
 			incoming := SanitizeContextFacts(toolCall.GetMergedContext())
 			currentContext = MergeStringSets(currentContext, incoming)
 			maxItems := getContextMaxItems()
 			if len(currentContext) > maxItems {
 				currentContext = currentContext[len(currentContext)-maxItems:]
 			}
-			log.Printf("[Context] Updated current_context: %v", currentContext)
+			slog.Info("Updated current_context", "current_context", currentContext)
 		}
 
 		if toolCall.Tool != "" {
