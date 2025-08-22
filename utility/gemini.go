@@ -258,13 +258,13 @@ You are a helpful assistant that executes tasks by calling tools.
 	// Retry with backoff when hitting quota/rate errors
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		resp, err = client.Models.GenerateContent(ctx, geminiModelName, genai.Text(systemPrompt), nil)
-if err == nil {
-	if resp != nil {
-		break // Success
-	}
-	// Treat (nil, nil) as a transient error to be retried.
-	err = errors.New("gemini: API returned empty response without error")
-}
+		if err == nil {
+			if resp != nil {
+				break // Success
+			}
+			// Treat (nil, nil) as a transient error to be retried.
+			err = errors.New("gemini: API returned empty response without error")
+		}
 		slog.Warn("Error generating Gemini content", "attempt", attempt, "max_attempts", maxAttempts, "error", err)
 		if !shouldRetry429(err) || attempt == maxAttempts {
 			break
