@@ -258,15 +258,20 @@ You are a helpful assistant that executes tasks by calling tools.
 	// Retry with backoff when hitting quota/rate errors
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		resp, err = client.Models.GenerateContent(ctx, geminiModelName, genai.Text(systemPrompt), nil)
+		// Determine if we should retry
+		var isRetryable bool
 		if err == nil {
 			if resp != nil {
 				break // Success
 			}
 			// Treat (nil, nil) as a transient error to be retried.
 			err = errors.New("gemini: API returned empty response without error")
+			isRetryable = true
+		} else {
+			isRetryable = shouldRetry429(err)
 		}
 		slog.Warn("Error generating Gemini content", "attempt", attempt, "max_attempts", maxAttempts, "error", err)
-		if !shouldRetry429(err) || attempt == maxAttempts {
+		if !isRetryable || attempt == maxAttempts {
 			break
 		}
 		// Honor server-provided retry delay if present; else exponential backoff with jitter
