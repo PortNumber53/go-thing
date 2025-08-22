@@ -22,6 +22,8 @@ const (
 	maxAttempts = 3
 	baseDelay   = 5 * time.Second
 	geminiModelName = "gemini-2.5-flash"
+	// Random jitter upper bound for backoff, in milliseconds
+	backoffJitterMs = 1000
 )
 
 // ToolCall describes the model's directive in JSON
@@ -270,7 +272,7 @@ if err == nil {
 		// Honor server-provided retry delay if present; else exponential backoff with jitter
 		delay := parseRetryDelay(err, baseDelay*time.Duration(1<<(attempt-1)))
 		// Add small random jitter to avoid synchronized retries across instances
-		delay += time.Duration(rand.Intn(1000)) * time.Millisecond
+		delay += time.Duration(rand.Intn(backoffJitterMs)) * time.Millisecond
 		if delay > 0 {
 			select {
 			case <-time.After(delay):
