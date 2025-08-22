@@ -26,6 +26,8 @@ const (
 	backoffJitterMs = 1000
 	// Upper bound to clamp burst size for the rate limiter
 	maxBurst = 100
+	// Default rate limit for Gemini API calls in requests per minute.
+	defaultGeminiRpm = 10
 )
 
 // ToolCall describes the model's directive in JSON
@@ -51,8 +53,8 @@ var (
 
 func getGeminiLimiter() *rate.Limiter {
 	geminiLimiterOnce.Do(func() {
-		// Default 10 requests per minute if not configured
-		rpm := 10
+		// Default requests per minute if not configured
+		rpm := defaultGeminiRpm
 		cfg, err := LoadConfig()
 		if err != nil {
 			slog.Warn("Failed to load config for Gemini rate limiter, using default", "error", err)
