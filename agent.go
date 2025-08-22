@@ -27,6 +27,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/slack-go/slack"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/google/go-github/v66/github"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/time/rate"
 	"gopkg.in/ini.v1"
@@ -921,7 +922,7 @@ func main() {
         // Log the raw body for debugging/analysis (body already limited to 1MB above)
         log.Printf("[GitHubWebhook] raw body: %s", string(body))
 
-        // Try to parse JSON for structured logging
+        // Try to parse JSON for structured logging (generic map for common fields)
         var payload map[string]interface{}
         if err := json.Unmarshal(body, &payload); err != nil {
             // If not JSON, just log raw (truncated)
@@ -1008,6 +1009,11 @@ func main() {
         eventHeader := strings.TrimSpace(c.Request.Header.Get("X-GitHub-Event"))
         deliveryID := strings.TrimSpace(c.Request.Header.Get("X-GitHub-Delivery"))
         summary := eventHeader + ": " + action
+        // Parse typed webhook once for safer access to event-specific fields
+        parsedEvt, parseErr := github.ParseWebHook(eventHeader, body)
+        if parseErr != nil {
+            log.Printf("[GitHubWebhook] ParseWebHook error for type=%q: %v", eventHeader, parseErr)
+        }
         // Issues-specific enrichment
         if eventHeader == "issues" {
             if iss, ok := payload["issue"].(map[string]interface{}); ok {
@@ -1088,112 +1094,70 @@ func main() {
                 log.Printf("[GitHubWebhook] issue fields action=%q repo=%q number=%q title=%q description=%q state=%q labels=%q reactions_total=%d (+1=%d,-1=%d,laugh=%d,hooray=%d,confused=%d,heart=%d,rocket=%d,eyes=%d) timeline_url=%q user=%q", action, repoFull, num, issueTitle, issueBodyLogged, issueState, strings.Join(labelNames, ","), reactionsTotal, rxPlus1, rxMinus1, rxLaugh, rxHooray, rxConfused, rxHeart, rxRocket, rxEyes, issueTimeline, issueUser)
             }
         }
-        // Pull Request-specific enrichment
+        // Pull Request-specific enrichment (typed)
         if eventHeader == "pull_request" {
-            if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
-                // Core identifiers
-                prNumber := ""
-                switch v := payload["number"].(type) { // top-level number is present
-                case float64:
-                    prNumber = strconv.FormatInt(int64(v), 10)
-                case json.Number:
-                    prNumber = v.String()
-                case string:
-                    prNumber = v
-                }
-                prTitle := ""
-                if v, ok := pr["title"].(string); ok { prTitle = v }
-                prBody := ""
-                if v, ok := pr["body"].(string); ok { prBody = v }
-                prBodyLogged := prBody
-                if len(prBodyLogged) > 512 { prBodyLogged = prBodyLogged[:512] + "…" }
-                prState := ""
-                if v, ok := pr["state"].(string); ok { prState = v }
-                prDraft := false
-                if v, ok := pr["draft"].(bool); ok { prDraft = v }
-                prUser := ""
-                if u, ok := pr["user"].(map[string]interface{}); ok {
-                    if lg, ok := u["login"].(string); ok { prUser = lg }
-                }
-                prHTML := ""
-                if v, ok := pr["html_url"].(string); ok { prHTML = v }
-                // Branches and SHAs
+            if prEvt, ok := parsedEvt.(*github.PullRequestEvent); ok && prEvt != nil {
+                pr := prEvt.GetPullRequest()
+                number := pr.GetNumber()
+                title := pr.GetTitle()
+                body := pr.GetBody()
+                if len(body) > 512 { body = body[:512] + "…" }
+                state := pr.GetState()
+                draft := pr.GetDraft()
+                user := ""
+                if pr.User != nil { user = pr.User.GetLogin() }
+                htmlURL := pr.GetHTMLURL()
                 headRef, headSHA := "", ""
-                if h, ok := pr["head"].(map[string]interface{}); ok {
-                    if v, ok := h["ref"].(string); ok { headRef = v }
-                    if v, ok := h["sha"].(string); ok { headSHA = v }
-                }
+                if pr.Head != nil { headRef = pr.Head.GetRef(); headSHA = pr.Head.GetSHA() }
                 baseRef := ""
-                if b, ok := pr["base"].(map[string]interface{}); ok {
-                    if v, ok := b["ref"].(string); ok { baseRef = v }
-                }
-                // Stats
-                commits, additions, deletions, changed := 0, 0, 0, 0
-                if v, ok := pr["commits"].(float64); ok { commits = int(v) }
-                if v, ok := pr["additions"].(float64); ok { additions = int(v) }
-                if v, ok := pr["deletions"].(float64); ok { deletions = int(v) }
-                if v, ok := pr["changed_files"].(float64); ok { changed = int(v) }
-                // Merge status
-                merged := false
-                if v, ok := pr["merged"].(bool); ok { merged = v }
-                mergeableState := ""
-                if v, ok := pr["mergeable_state"].(string); ok { mergeableState = v }
-                mergeCommitSHA := ""
-                if v, ok := pr["merge_commit_sha"].(string); ok { mergeCommitSHA = v }
-                // Log extracted PR fields
-                log.Printf("[GitHubWebhook] pr fields action=%q repo=%q number=%q title=%q state=%q draft=%t user=%q url=%q head_ref=%q head_sha=%q base_ref=%q merged=%t mergeable_state=%q merge_commit_sha=%q", action, repoFull, prNumber, prTitle, prState, prDraft, prUser, prHTML, headRef, headSHA, baseRef, merged, mergeableState, mergeCommitSHA)
-                log.Printf("[GitHubWebhook] pr stats commits=%d additions=%d deletions=%d changed_files=%d body=%q", commits, additions, deletions, changed, prBodyLogged)
+                if pr.Base != nil { baseRef = pr.Base.GetRef() }
+                commits := pr.GetCommits()
+                additions := pr.GetAdditions()
+                deletions := pr.GetDeletions()
+                changed := pr.GetChangedFiles()
+                merged := pr.GetMerged()
+                mergeableState := pr.GetMergeableState()
+                mergeCommitSHA := pr.GetMergeCommitSHA()
+                log.Printf("[GitHubWebhook] pr fields action=%q repo=%q number=%d title=%q state=%q draft=%t user=%q url=%q head_ref=%q head_sha=%q base_ref=%q merged=%t mergeable_state=%q merge_commit_sha=%q", action, repoFull, number, title, state, draft, user, htmlURL, headRef, headSHA, baseRef, merged, mergeableState, mergeCommitSHA)
+                log.Printf("[GitHubWebhook] pr stats commits=%d additions=%d deletions=%d changed_files=%d body=%q", commits, additions, deletions, changed, body)
             }
         }
-        // Push-specific enrichment: detect newly added files
+        // Push-specific enrichment (typed): detect newly added files
         if eventHeader == "push" {
-            createdFlag := false
-            if v, ok := payload["created"].(bool); ok { createdFlag = v }
-            // Aggregate added files across commits
-            totalAdded := 0
-            var addedSamples []string
-            if arr, ok := payload["commits"].([]interface{}); ok {
-                for _, cv := range arr {
-                    if cm, ok := cv.(map[string]interface{}); ok {
-                        if ad, ok := cm["added"].([]interface{}); ok {
-                            for _, av := range ad {
-                                if s, ok := av.(string); ok {
-                                    totalAdded++
-                                    // Keep a small sample for logging
-                                    if len(addedSamples) < 10 {
-                                        addedSamples = append(addedSamples, s)
-                                    }
-                                }
-                            }
-                        }
+            if pushEvt, ok := parsedEvt.(*github.PushEvent); ok && pushEvt != nil {
+                createdFlag := false
+                if pushEvt.Created != nil { createdFlag = *pushEvt.Created }
+                // Aggregate added files across commits
+                totalAdded := 0
+                var addedSamples []string
+                for _, cm := range pushEvt.Commits {
+                    for _, f := range cm.Added {
+                        totalAdded++
+                        if len(addedSamples) < 10 { addedSamples = append(addedSamples, f) }
                     }
                 }
-            }
-            // Head commit details
-            headID, headMsg, headAuthor := "", "", ""
-            if hc, ok := payload["head_commit"].(map[string]interface{}); ok {
-                if v, ok := hc["id"].(string); ok { headID = v }
-                if v, ok := hc["message"].(string); ok { headMsg = v }
-                if au, ok := hc["author"].(map[string]interface{}); ok {
-                    if v, ok := au["name"].(string); ok { headAuthor = v }
-                }
-                // If head commit has additional files added, include in counts/samples
-                if ad, ok := hc["added"].([]interface{}); ok {
-                    for _, av := range ad {
-                        if s, ok := av.(string); ok {
-                            totalAdded++
-                            if len(addedSamples) < 10 {
-                                addedSamples = append(addedSamples, s)
-                            }
-                        }
+                // Head commit details
+                headID, headMsg, headAuthor := "", "", ""
+                if pushEvt.HeadCommit != nil {
+                    if pushEvt.HeadCommit.ID != nil { headID = *pushEvt.HeadCommit.ID }
+                    if pushEvt.HeadCommit.Message != nil { headMsg = *pushEvt.HeadCommit.Message }
+                    if pushEvt.HeadCommit.Author != nil && pushEvt.HeadCommit.Author.Name != nil {
+                        headAuthor = *pushEvt.HeadCommit.Author.Name
+                    }
+                    for _, f := range pushEvt.HeadCommit.Added {
+                        totalAdded++
+                        if len(addedSamples) < 10 { addedSamples = append(addedSamples, f) }
                     }
                 }
-            }
-            // Truncate message for log safety
-            if len(headMsg) > 200 { headMsg = headMsg[:200] + "…" }
-            log.Printf("[GitHubWebhook] push files created=%t branch=%q total_added=%d head_commit=%q author=%q msg=%q", createdFlag, ref, totalAdded, headID, headAuthor, headMsg)
-            if totalAdded > 0 {
-                log.Printf("[GitHubWebhook] push added samples (%d of %d): %q", len(addedSamples), totalAdded, strings.Join(addedSamples, ","))
+                // Truncate message for log safety
+                if len(headMsg) > 200 { headMsg = headMsg[:200] + "…" }
+                // Prefer typed ref if available
+                refVal := ref
+                if pushEvt.Ref != nil { refVal = pushEvt.GetRef() }
+                log.Printf("[GitHubWebhook] push files created=%t branch=%q total_added=%d head_commit=%q author=%q msg=%q", createdFlag, refVal, totalAdded, headID, headAuthor, headMsg)
+                if totalAdded > 0 {
+                    log.Printf("[GitHubWebhook] push added samples (%d of %d): %q", len(addedSamples), totalAdded, strings.Join(addedSamples, ","))
+                }
             }
         }
         // Log final summary of extracted data (no persistence)
