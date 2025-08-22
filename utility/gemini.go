@@ -68,8 +68,14 @@ func getGeminiLimiter() *rate.Limiter {
 			// Prevent infinite rate from pathological large RPM values
 			interval = time.Nanosecond
 		}
-		geminiLimiter = rate.NewLimiter(rate.Every(interval), rpm)
-		slog.Info("Initialized Gemini limiter", "rpm", rpm, "interval", interval.String(), "burst", rpm)
+		burst := rpm
+		const maxBurst = 100
+		if burst > maxBurst {
+			slog.Warn("GEMINI_RPM is very large, clamping burst size to avoid traffic spikes", "rpm", rpm, "max_burst", maxBurst)
+			burst = maxBurst
+		}
+		geminiLimiter = rate.NewLimiter(rate.Every(interval), burst)
+		slog.Info("Initialized Gemini limiter", "rpm", rpm, "interval", interval.String(), "burst", burst)
 	})
 	return geminiLimiter
 }
