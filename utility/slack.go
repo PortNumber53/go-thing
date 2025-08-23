@@ -29,6 +29,10 @@ const (
 	slackDateFallbackFormat = "2006-01-02 15:04:05"
 )
 
+// Prebuilt replacer for escaping Slack mrkdwn-sensitive characters in titles.
+// Defined at package scope to avoid per-call allocations.
+var slackMrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
 // SendSlackResponse posts a message to a Slack channel using the bot token
 // configured in the INI config (SLACK_BOT_TOKEN in [default]).
 func SendSlackResponse(channel, message string) error {
@@ -74,7 +78,7 @@ func fetchRecentThreads(ctx context.Context, limit int) ([]threadSummary, error)
 		return nil, fmt.Errorf("querying recent threads: %w", err)
 	}
 	defer rows.Close()
-out := make([]threadSummary, 0, limit)
+	out := make([]threadSummary, 0, limit)
 	for rows.Next() {
 		var t threadSummary
 		if err := rows.Scan(&t.ID, &t.Title, &t.UpdatedAt); err != nil {
@@ -113,7 +117,6 @@ func BuildSlackHomeView(ctx context.Context) slack.HomeTabViewRequest {
 		recentList = "_No threads yet. Start a conversation by messaging the bot!_"
 	} else {
 		var b strings.Builder
-		slackMrkdwnEscaper := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 		for _, t := range threads {
 			title := strings.TrimSpace(t.Title)
 			if title == "" {
