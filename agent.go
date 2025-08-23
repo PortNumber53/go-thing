@@ -46,6 +46,9 @@ type slackViewInfo struct {
     Hash string `json:"hash"`
 }
 
+// strongPassword requires at least 12 chars including upper, lower, digit, and special
+var strongPassword = regexp.MustCompile(`^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9\s]).{12,}$`)
+
 // requireAuth is a Gin middleware that enforces a valid session and stores userID in context
 func requireAuth() gin.HandlerFunc {
     return func(c *gin.Context) {
@@ -948,6 +951,10 @@ func main() {
         }
         if len(req.New) < 8 {
             c.JSON(http.StatusBadRequest, gin.H{"error": "new password must be at least 8 characters"})
+            return
+        }
+        if !strongPassword.MatchString(req.New) {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "password must be 12+ chars and include upper, lower, digit, and special character"})
             return
         }
         v, ok := c.Get("userID")
