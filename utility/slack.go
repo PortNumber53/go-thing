@@ -53,7 +53,7 @@ func getConfig() (map[string]string, error) {
 func SendSlackResponse(channel, message string) error {
     cfg, err := getConfig()
     if err != nil {
-        return fmt.Errorf("failed to load config: %v", err)
+        return fmt.Errorf("failed to load config: %w", err)
     }
 	botToken := cfg["SLACK_BOT_TOKEN"]
 	if strings.TrimSpace(botToken) == "" {
