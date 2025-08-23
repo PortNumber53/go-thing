@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/slack-go/slack"
+	"go-thing/db"
 )
 
 // SendSlackResponse posts a message to a Slack channel using the bot token
@@ -32,6 +34,41 @@ func SendSlackResponse(channel, message string) error {
 	return nil
 }
 
+// threadSummary is a minimal projection of a thread for display purposes.
+type threadSummary struct {
+	ID        int64
+	Title     string
+	UpdatedAt time.Time
+}
+
+// fetchRecentThreads returns the most recently updated threads (up to limit).
+func fetchRecentThreads(limit int) ([]threadSummary, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	dbc := db.Get()
+	if dbc == nil {
+		return nil, fmt.Errorf("db not initialized")
+	}
+	rows, err := dbc.Query(`SELECT id, COALESCE(title, ''), updated_at FROM threads ORDER BY updated_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []threadSummary
+	for rows.Next() {
+		var t threadSummary
+		if err := rows.Scan(&t.ID, &t.Title, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // BuildSlackHomeView constructs a simple Home tab view with blocks.
 func BuildSlackHomeView() slack.HomeTabViewRequest {
 	header := slack.NewHeaderBlock(
@@ -48,13 +85,50 @@ func BuildSlackHomeView() slack.HomeTabViewRequest {
 		nil,
 	)
 	divider := slack.NewDividerBlock()
-	blocks := slack.Blocks{BlockSet: []slack.Block{header, intro, divider, tips}}
+	// Recent threads
+	var recentList string
+	if threads, err := fetchRecentThreads(10); err != nil {
+		log.Printf("[Slack Home] fetchRecentThreads failed: %v", err)
+		recentList = "_No recent threads available._"
+	} else if len(threads) == 0 {
+		recentList = "_No threads yet. Start a conversation by messaging the bot!_"
+	} else {
+		var b strings.Builder
+		for _, t := range threads {
+			title := strings.TrimSpace(t.Title)
+			if title == "" {
+				title = "Untitled thread"
+			}
+			// Example line: • #12 — Project kickoff (2025-08-22 18:30)
+			b.WriteString("• #")
+			b.WriteString(fmt.Sprintf("%d", t.ID))
+			b.WriteString(" — ")
+			b.WriteString(title)
+			b.WriteString(" (updated ")
+			b.WriteString(t.UpdatedAt.Local().Format("2006-01-02 15:04"))
+			b.WriteString(")\n")
+		}
+		recentList = b.String()
+	}
+	recentHeader := slack.NewSectionBlock(
+		slack.NewTextBlockObject("mrkdwn", "*Recent Threads*", false, false),
+		nil,
+		nil,
+	)
+	recent := slack.NewSectionBlock(
+		slack.NewTextBlockObject("mrkdwn", recentList, false, false),
+		nil,
+		nil,
+	)
+
+	blocks := slack.Blocks{BlockSet: []slack.Block{header, intro, divider, tips, divider, recentHeader, recent}}
 	return slack.HomeTabViewRequest{Type: slack.VTHomeTab, Blocks: blocks}
 }
 
 // PublishSlackHomeTab publishes the Home tab for the given user using the bot token.
-// Requires the Slack app to have the `views:write` scope.
-func PublishSlackHomeTab(userID string) error {
+// Optionally pass the current view hash to avoid overwriting a newer view; on
+// hash_conflict, we retry once without the hash. Requires `views:write` scope.
+func PublishSlackHomeTab(userID string, hash string) error {
 	cfg, err := LoadConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %v", err)
@@ -68,9 +142,17 @@ func PublishSlackHomeTab(userID string) error {
 	}
 	api := slack.New(botToken)
 	view := BuildSlackHomeView()
-	if _, err := api.PublishView(userID, view, ""); err != nil {
-		return fmt.Errorf("views.publish failed: %w", err)
-	}
+	if _, err := api.PublishView(userID, view, hash); err != nil {
+        // If Slack returns a hash_conflict and we provided a hash, retry once without hash
+        if strings.Contains(strings.ToLower(err.Error()), "hash_conflict") && strings.TrimSpace(hash) != "" {
+            log.Printf("[Slack Home] hash_conflict with supplied hash, retrying without hash for user %s", userID)
+            if _, err2 := api.PublishView(userID, view, ""); err2 != nil {
+                return fmt.Errorf("views.publish failed after retry: %w", err2)
+            }
+        } else {
+            return fmt.Errorf("views.publish failed: %w", err)
+        }
+    }
 	log.Printf("[Slack API] Home tab published for user %s", userID)
 	return nil
 }

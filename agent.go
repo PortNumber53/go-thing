@@ -1743,6 +1743,9 @@ func main() {
 				var ah struct{
 					User string `json:"user"`
 					Tab  string `json:"tab"`
+					View *struct{
+						Hash string `json:"hash"`
+					} `json:"view"`
 				}
 				if err := json.Unmarshal(envelope.Event, &ah); err != nil {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid app_home_opened event"})
@@ -1752,7 +1755,11 @@ func main() {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "Missing user in app_home_opened"})
 					return
 				}
-				if err := utility.PublishSlackHomeTab(ah.User); err != nil {
+				hash := ""
+				if ah.View != nil {
+					hash = strings.TrimSpace(ah.View.Hash)
+				}
+				if err := utility.PublishSlackHomeTab(ah.User, hash); err != nil {
 					log.Printf("[Slack Home] publish failed: %v", err)
 				}
 				c.JSON(http.StatusOK, gin.H{"status": "home updated"})
