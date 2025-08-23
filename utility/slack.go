@@ -175,7 +175,10 @@ func BuildSlackHomeView(ctx context.Context) (slack.HomeTabViewRequest, error) {
 			line := fmt.Sprintf("• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.UTC().Format(slackDateFallbackFormat))
 			lineChars := utf8.RuneCountInString(line)
 			if listChars+lineChars > maxRecentListChars {
-				b.WriteString("• ... and more\n")
+				const andMoreLine = "• ... and more\n"
+				if listChars+utf8.RuneCountInString(andMoreLine) <= maxRecentListChars {
+					b.WriteString(andMoreLine)
+				}
 				break
 			}
 			b.WriteString(line)
