@@ -113,13 +113,14 @@ func BuildSlackHomeView(ctx context.Context) slack.HomeTabViewRequest {
 		recentList = "_No threads yet. Start a conversation by messaging the bot!_"
 	} else {
 		var b strings.Builder
+		slackMrkdwnEscaper := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 		for _, t := range threads {
 			title := strings.TrimSpace(t.Title)
 			if title == "" {
 				title = "Untitled thread"
 			}
 			// Escape characters for Slack mrkdwn to prevent formatting issues.
-			title = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(title)
+			title = slackMrkdwnEscaper.Replace(title)
 			// Example line: • #12 — Project kickoff (2025-08-22 18:30 UTC)
 			fmt.Fprintf(&b, "• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.UTC().Format(slackDateFallbackFormat)+" UTC")
 		}
