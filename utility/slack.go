@@ -117,8 +117,12 @@ func BuildSlackHomeView() slack.HomeTabViewRequest {
 			if title == "" {
 				title = "Untitled thread"
 			}
-			// Example line: • #12 — Project kickoff (2025-08-22 18:30)
-			fmt.Fprintf(&b, "• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.Local().Format(slackDateFallbackFormat))
+			// Escape characters for Slack mrkdwn to prevent formatting issues.
+			title = strings.ReplaceAll(title, "&", "&amp;")
+			title = strings.ReplaceAll(title, "<", "&lt;")
+			title = strings.ReplaceAll(title, ">", "&gt;")
+			// Example line: • #12 — Project kickoff (2025-08-22 18:30 UTC)
+			fmt.Fprintf(&b, "• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.UTC().Format(slackDateFallbackFormat)+" UTC")
 		}
 		recentList = strings.TrimSuffix(b.String(), "\n")
 	}
