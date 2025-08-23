@@ -68,7 +68,7 @@ func fetchRecentThreads(limit int) ([]threadSummary, error) {
 	if dbc == nil {
 		return nil, fmt.Errorf("db not initialized")
 	}
-rows, err := dbc.QueryContext(ctx, `SELECT id, COALESCE(title, ''), updated_at FROM threads ORDER BY updated_at DESC LIMIT $1`, limit)
+	rows, err := dbc.QueryContext(context.Background(), `SELECT id, COALESCE(title, ''), updated_at FROM threads ORDER BY updated_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("querying recent threads: %w", err)
 	}
