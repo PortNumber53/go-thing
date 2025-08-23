@@ -41,6 +41,18 @@ import (
 )
 
 
+// slackViewInfo contains information about a Slack view, such as its hash.
+type slackViewInfo struct {
+    Hash string `json:"hash"`
+}
+
+// slackAppHomeOpenedEvent represents the structure of a Slack app_home_opened event.
+type slackAppHomeOpenedEvent struct {
+    User string        `json:"user"`
+    Tab  string        `json:"tab"`
+    View *slackViewInfo `json:"view"`
+}
+
 // ToolResponse represents a response from tool execution
 type ToolResponse struct {
 	Success bool        `json:"success"`
@@ -1740,10 +1752,7 @@ func main() {
 				utility.HandleSlackMessage(c, &msg, getOrCreateAnyThread, utility.GeminiAPIHandler)
 				return
 			case "app_home_opened":
-				var ah struct{
-					User string `json:"user"`
-					Tab  string `json:"tab"`
-				}
+				var ah slackAppHomeOpenedEvent
 				if err := json.Unmarshal(envelope.Event, &ah); err != nil {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid app_home_opened event"})
 					return
@@ -1752,7 +1761,11 @@ func main() {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "Missing user in app_home_opened"})
 					return
 				}
-				if err := utility.PublishSlackHomeTab(ah.User); err != nil {
+				hash := ""
+				if ah.View != nil {
+					hash = strings.TrimSpace(ah.View.Hash)
+				}
+				if err := utility.PublishSlackHomeTab(c.Request.Context(), ah.User, hash); err != nil {
 					log.Printf("[Slack Home] publish failed: %v", err)
 				}
 				c.JSON(http.StatusOK, gin.H{"status": "home updated"})

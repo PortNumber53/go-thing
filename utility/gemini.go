@@ -19,8 +19,8 @@ import (
 
 const (
 	// Retry/backoff configuration for Gemini API calls
-	maxAttempts = 3
-	baseDelay   = 5 * time.Second
+	maxAttempts     = 3
+	baseDelay       = 5 * time.Second
 	geminiModelName = "gemini-2.5-flash"
 	// Random jitter upper bound for backoff, in milliseconds
 	backoffJitterMs = 1000

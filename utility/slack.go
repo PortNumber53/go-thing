@@ -1,25 +1,122 @@
 package utility
 
 import (
-	"fmt"
-	"log"
-	"strings"
+    "context"
+    "errors"
+    "fmt"
+    "log"
+    "strings"
+    "time"
+    "unicode/utf8"
 
 	"github.com/slack-go/slack"
+	"go-thing/db"
 )
+
+// constants for Slack Home tab behavior and Slack API error matching.
+const (
+	// defaultRecentThreadsLimit defines how many recent threads to show by default
+	// in the Slack Home tab and when no explicit limit is provided.
+	defaultRecentThreadsLimit = 10
+
+	// slackErrorHashConflict is returned by Slack when the provided view hash
+	// is stale (someone else updated the view). In that case, we retry publish
+	// without a hash.
+	slackErrorHashConflict = "hash_conflict"
+
+	// slackDateFallbackFormat is the Go time layout used to format timestamps
+	// in the Slack Home recent threads list as a fallback human-readable string.
+	// It pairs with Slack's date token for clients that can't render it.
+	slackDateFallbackFormat = "2006-01-02 15:04:05 UTC"
+
+	// maxTitleLenRecentThreads is the maximum number of runes to include from a
+	// thread title in the Slack Home recent list to avoid hitting Slack's 3000
+	// character limit on a single mrkdwn text object.
+	maxTitleLenRecentThreads = 150
+
+	// maxRecentListChars is a safety threshold below Slack's 3000 character
+	// limit for a single mrkdwn text object. We stop adding lines before we hit
+	// the hard limit to avoid publish failures.
+	maxRecentListChars = 2900
+)
+
+// Prebuilt replacer for escaping Slack mrkdwn-sensitive characters in titles.
+// Defined at package scope to avoid per-call allocations.
+var slackMrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
+// truncateRunes truncates s to at most max runes. If truncation occurs,
+// it appends a single-rune ellipsis (… U+2026) and ensures the total length
+// is <= max runes by reserving 1 rune for the ellipsis.
+// Edge cases:
+// - max <= 0: returns ""
+// - len(s) in runes <= max: returns s unchanged
+// - max == 1: returns only "…" (prefix is r[:0])
+func truncateRunes(s string, max int) string {
+    if max <= 0 {
+        return ""
+    }
+    r := []rune(s)
+    if len(r) <= max {
+        return s
+    }
+    // Reserve 1 rune for the ellipsis when truncation is needed.
+    return string(r[:max-1]) + "…"
+}
+
+// buildRecentThreadsList formats a slice of threadSummary entries into a
+// mrkdwn bullet list, applying title truncation/escaping and ensuring the
+// total text remains under maxRecentListChars. Appends a trailing summary
+// line ("• ... and more") only if it fits.
+func buildRecentThreadsList(threads []threadSummary) string {
+    var b strings.Builder
+    var listChars int
+    for _, t := range threads {
+        title := strings.TrimSpace(t.Title)
+        if title == "" {
+            title = "Untitled thread"
+        }
+        // Truncate overly long titles to keep the mrkdwn block under limits.
+        title = truncateRunes(title, maxTitleLenRecentThreads)
+        // Escape characters for Slack mrkdwn to prevent formatting issues.
+        title = slackMrkdwnEscaper.Replace(title)
+        // Example line: • #12 — Project kickoff (2025-08-22 18:30 UTC)
+        line := fmt.Sprintf("• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.UTC().Format(slackDateFallbackFormat))
+        lineChars := utf8.RuneCountInString(line)
+        if listChars+lineChars > maxRecentListChars {
+            const andMoreLine = "• ... and more\n"
+            if listChars+utf8.RuneCountInString(andMoreLine) <= maxRecentListChars {
+                b.WriteString(andMoreLine)
+            }
+            break
+        }
+        b.WriteString(line)
+        listChars += lineChars
+    }
+    return strings.TrimSuffix(b.String(), "\n")
+}
+
+// getBotToken loads the config and returns the Slack bot token.
+// Centralized to avoid duplication and ensure consistent error wrapping.
+func getBotToken() (string, error) {
+    cfg, err := LoadConfig()
+    if err != nil {
+        return "", fmt.Errorf("failed to load config: %w", err)
+    }
+    botToken := cfg["SLACK_BOT_TOKEN"]
+    if strings.TrimSpace(botToken) == "" {
+        return "", fmt.Errorf("SLACK_BOT_TOKEN missing in config")
+    }
+    return botToken, nil
+}
 
 // SendSlackResponse posts a message to a Slack channel using the bot token
 // configured in the INI config (SLACK_BOT_TOKEN in [default]).
 func SendSlackResponse(channel, message string) error {
-	cfg, err := LoadConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load config: %v", err)
-	}
-	botToken := cfg["SLACK_BOT_TOKEN"]
-	if strings.TrimSpace(botToken) == "" {
-		return fmt.Errorf("SLACK_BOT_TOKEN missing in config")
-	}
-	api := slack.New(botToken)
+    botToken, err := getBotToken()
+    if err != nil {
+        return err
+    }
+    api := slack.New(botToken)
 	_, _, err = api.PostMessage(
 		channel,
 		slack.MsgOptionText(message, false),
@@ -32,8 +129,46 @@ func SendSlackResponse(channel, message string) error {
 	return nil
 }
 
+// threadSummary is a minimal projection of a thread for display purposes.
+type threadSummary struct {
+	ID        int64
+	Title     string
+	UpdatedAt time.Time
+}
+
+// fetchRecentThreads returns the most recently updated threads (up to limit).
+func fetchRecentThreads(ctx context.Context, limit int) ([]threadSummary, error) {
+	if limit <= 0 {
+		limit = defaultRecentThreadsLimit
+	}
+	dbc := db.Get()
+	if dbc == nil {
+		return nil, fmt.Errorf("db not initialized")
+	}
+	rows, err := dbc.QueryContext(ctx, `SELECT id, COALESCE(title, ''), updated_at FROM threads ORDER BY updated_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("querying recent threads: %w", err)
+	}
+	defer rows.Close()
+	out := make([]threadSummary, 0, limit)
+	for rows.Next() {
+		var t threadSummary
+		if err := rows.Scan(&t.ID, &t.Title, &t.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scanning thread row: %w", err)
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating over thread rows: %w", err)
+	}
+	return out, nil
+}
+
 // BuildSlackHomeView constructs a simple Home tab view with blocks.
-func BuildSlackHomeView() slack.HomeTabViewRequest {
+// It returns the view and a non-fatal error if parts of the view could
+// not be generated (e.g., DB fetch issues). Callers may still publish
+// the returned view and log the partial failure.
+func BuildSlackHomeView(ctx context.Context) (slack.HomeTabViewRequest, error) {
 	header := slack.NewHeaderBlock(
 		slack.NewTextBlockObject("plain_text", "Go-Thing • Home", false, false),
 	)
@@ -48,29 +183,92 @@ func BuildSlackHomeView() slack.HomeTabViewRequest {
 		nil,
 	)
 	divider := slack.NewDividerBlock()
-	blocks := slack.Blocks{BlockSet: []slack.Block{header, intro, divider, tips}}
-	return slack.HomeTabViewRequest{Type: slack.VTHomeTab, Blocks: blocks}
+	// Recent threads
+	var recentList string
+	var buildErr error
+	if threads, err := fetchRecentThreads(ctx, defaultRecentThreadsLimit); err != nil {
+		buildErr = fmt.Errorf("recent threads unavailable: %w", err)
+		recentList = "_No recent threads available._"
+	} else if len(threads) == 0 {
+		recentList = "_No threads yet. Start a conversation by messaging the bot!_"
+	} else {
+		var b strings.Builder
+		var listChars int
+		for _, t := range threads {
+			title := strings.TrimSpace(t.Title)
+			if title == "" {
+				title = "Untitled thread"
+			}
+			// Truncate overly long titles to keep the mrkdwn block under limits.
+			title = truncateRunes(title, maxTitleLenRecentThreads)
+			// Escape characters for Slack mrkdwn to prevent formatting issues.
+			title = slackMrkdwnEscaper.Replace(title)
+			// Example line: • #12 — Project kickoff (2025-08-22 18:30 UTC)
+			line := fmt.Sprintf("• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.UTC().Format(slackDateFallbackFormat))
+			lineChars := utf8.RuneCountInString(line)
+			if listChars+lineChars > maxRecentListChars {
+				const andMoreLine = "• ... and more\n"
+				if listChars+utf8.RuneCountInString(andMoreLine) <= maxRecentListChars {
+					b.WriteString(andMoreLine)
+				}
+				break
+			}
+			b.WriteString(line)
+			listChars += lineChars
+		}
+		recentList = strings.TrimSuffix(b.String(), "\n")
+	}
+	recentHeader := slack.NewSectionBlock(
+		slack.NewTextBlockObject("mrkdwn", "*Recent Threads*", false, false),
+		nil,
+		nil,
+	)
+	recent := slack.NewSectionBlock(
+		slack.NewTextBlockObject("mrkdwn", recentList, false, false),
+		nil,
+		nil,
+	)
+
+	blocks := slack.Blocks{BlockSet: []slack.Block{header, intro, divider, tips, divider, recentHeader, recent}}
+	return slack.HomeTabViewRequest{Type: slack.VTHomeTab, Blocks: blocks}, buildErr
 }
 
 // PublishSlackHomeTab publishes the Home tab for the given user using the bot token.
-// Requires the Slack app to have the `views:write` scope.
-func PublishSlackHomeTab(userID string) error {
-	cfg, err := LoadConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load config: %v", err)
-	}
-	botToken := cfg["SLACK_BOT_TOKEN"]
-	if strings.TrimSpace(botToken) == "" {
-		return fmt.Errorf("SLACK_BOT_TOKEN missing in config")
-	}
-	if strings.TrimSpace(userID) == "" {
-		return fmt.Errorf("userID required")
-	}
-	api := slack.New(botToken)
-	view := BuildSlackHomeView()
-	if _, err := api.PublishView(userID, view, ""); err != nil {
-		return fmt.Errorf("views.publish failed: %w", err)
-	}
-	log.Printf("[Slack API] Home tab published for user %s", userID)
-	return nil
+// Optionally pass the current view hash to avoid overwriting a newer view; on
+// hash_conflict, we retry once without the hash. Requires `views:write` scope.
+func PublishSlackHomeTab(ctx context.Context, userID string, hash string) error {
+    botToken, err := getBotToken()
+    if err != nil {
+        return err
+    }
+    if strings.TrimSpace(userID) == "" {
+        return fmt.Errorf("userID required")
+    }
+    api := slack.New(botToken)
+    view, buildErr := BuildSlackHomeView(ctx)
+    if buildErr != nil {
+        // Log view generation errors immediately to ensure they are not lost if publishing fails.
+        log.Printf("[Slack API] Home tab view generation was incomplete for user %s: %v", userID, buildErr)
+    }
+
+    req := slack.PublishViewContextRequest{UserID: userID, View: view}
+    if h := strings.TrimSpace(hash); h != "" {
+        req.Hash = &h
+    }
+
+    if _, err := api.PublishViewContext(ctx, req); err != nil {
+        var slackErr *slack.SlackErrorResponse
+        // Only retry if a hash was provided in the first place.
+        if req.Hash != nil && errors.As(err, &slackErr) && slackErr.Err == slackErrorHashConflict {
+            log.Printf("[Slack Home] hash_conflict with supplied hash, retrying without hash for user %s", userID)
+            req.Hash = nil // Retry without the hash.
+            if _, err2 := api.PublishViewContext(ctx, req); err2 != nil {
+                return fmt.Errorf("views.publish failed on retry after '%s' error: %w", slackErr.Err, err2)
+            }
+        } else {
+            return fmt.Errorf("views.publish failed: %w", err)
+        }
+    }
+    log.Printf("[Slack API] Home tab published for user %s", userID)
+    return nil
 }
