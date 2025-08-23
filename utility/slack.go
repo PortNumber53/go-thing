@@ -11,6 +11,18 @@ import (
 	"go-thing/db"
 )
 
+// constants for Slack Home tab behavior and Slack API error matching.
+const (
+	// defaultRecentThreadsLimit defines how many recent threads to show by default
+	// in the Slack Home tab and when no explicit limit is provided.
+	defaultRecentThreadsLimit = 10
+
+	// slackErrorHashConflict is returned by Slack when the provided view hash
+	// is stale (someone else updated the view). In that case, we retry publish
+	// without a hash.
+	slackErrorHashConflict = "hash_conflict"
+)
+
 // SendSlackResponse posts a message to a Slack channel using the bot token
 // configured in the INI config (SLACK_BOT_TOKEN in [default]).
 func SendSlackResponse(channel, message string) error {
@@ -45,7 +57,7 @@ type threadSummary struct {
 // fetchRecentThreads returns the most recently updated threads (up to limit).
 func fetchRecentThreads(limit int) ([]threadSummary, error) {
 	if limit <= 0 {
-		limit = 10
+		limit = defaultRecentThreadsLimit
 	}
 	dbc := db.Get()
 	if dbc == nil {
@@ -88,7 +100,7 @@ func BuildSlackHomeView() slack.HomeTabViewRequest {
 	divider := slack.NewDividerBlock()
 	// Recent threads
 	var recentList string
-	if threads, err := fetchRecentThreads(10); err != nil {
+	if threads, err := fetchRecentThreads(defaultRecentThreadsLimit); err != nil {
 		log.Printf("[Slack Home] fetchRecentThreads failed: %v", err)
 		recentList = "_No recent threads available._"
 	} else if len(threads) == 0 {
@@ -139,7 +151,7 @@ func PublishSlackHomeTab(userID string, hash string) error {
 	view := BuildSlackHomeView()
 	if _, err := api.PublishView(userID, view, hash); err != nil {
 		var slackErr *slack.SlackErrorResponse
-		if errors.As(err, &slackErr) && slackErr.Err == "hash_conflict" && strings.TrimSpace(hash) != "" {
+		if errors.As(err, &slackErr) && slackErr.Err == slackErrorHashConflict && strings.TrimSpace(hash) != "" {
 			log.Printf("[Slack Home] hash_conflict with supplied hash, retrying without hash for user %s", userID)
 			if _, err2 := api.PublishView(userID, view, ""); err2 != nil {
 				return fmt.Errorf("views.publish failed after retry: %w", err2)
