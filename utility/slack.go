@@ -140,7 +140,6 @@ func BuildSlackHomeView(ctx context.Context) (slack.HomeTabViewRequest, error) {
 	var recentList string
 	var buildErr error
 	if threads, err := fetchRecentThreads(ctx, defaultRecentThreadsLimit); err != nil {
-		log.Printf("[Slack Home] fetchRecentThreads failed: %v", err)
 		buildErr = fmt.Errorf("recent threads unavailable: %w", err)
 		recentList = "_No recent threads available._"
 	} else if len(threads) == 0 {
