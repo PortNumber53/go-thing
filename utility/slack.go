@@ -103,7 +103,10 @@ func fetchRecentThreads(ctx context.Context, limit int) ([]threadSummary, error)
 }
 
 // BuildSlackHomeView constructs a simple Home tab view with blocks.
-func BuildSlackHomeView(ctx context.Context) slack.HomeTabViewRequest {
+// It returns the view and a non-fatal error if parts of the view could
+// not be generated (e.g., DB fetch issues). Callers may still publish
+// the returned view and log the partial failure.
+func BuildSlackHomeView(ctx context.Context) (slack.HomeTabViewRequest, error) {
 	header := slack.NewHeaderBlock(
 		slack.NewTextBlockObject("plain_text", "Go-Thing • Home", false, false),
 	)
@@ -120,8 +123,10 @@ func BuildSlackHomeView(ctx context.Context) slack.HomeTabViewRequest {
 	divider := slack.NewDividerBlock()
 	// Recent threads
 	var recentList string
+	var buildErr error
 	if threads, err := fetchRecentThreads(ctx, defaultRecentThreadsLimit); err != nil {
 		log.Printf("[Slack Home] fetchRecentThreads failed: %v", err)
+		buildErr = fmt.Errorf("recent threads unavailable: %w", err)
 		recentList = "_No recent threads available._"
 	} else if len(threads) == 0 {
 		recentList = "_No threads yet. Start a conversation by messaging the bot!_"
@@ -151,7 +156,7 @@ func BuildSlackHomeView(ctx context.Context) slack.HomeTabViewRequest {
 	)
 
 	blocks := slack.Blocks{BlockSet: []slack.Block{header, intro, divider, tips, divider, recentHeader, recent}}
-	return slack.HomeTabViewRequest{Type: slack.VTHomeTab, Blocks: blocks}
+	return slack.HomeTabViewRequest{Type: slack.VTHomeTab, Blocks: blocks}, buildErr
 }
 
 // PublishSlackHomeTab publishes the Home tab for the given user using the bot token.
@@ -166,7 +171,7 @@ func PublishSlackHomeTab(ctx context.Context, userID string, hash string) error 
         return fmt.Errorf("userID required")
     }
 	api := slack.New(botToken)
-	view := BuildSlackHomeView(ctx)
+	view, buildErr := BuildSlackHomeView(ctx)
 	if _, err := api.PublishView(userID, view, hash); err != nil {
 		var slackErr *slack.SlackErrorResponse
 		if errors.As(err, &slackErr) && slackErr.Err == slackErrorHashConflict && strings.TrimSpace(hash) != "" {
@@ -178,6 +183,10 @@ func PublishSlackHomeTab(ctx context.Context, userID string, hash string) error 
 			return fmt.Errorf("views.publish failed: %w", err)
 		}
 	}
-	log.Printf("[Slack API] Home tab published for user %s", userID)
+	if buildErr != nil {
+		log.Printf("[Slack API] Home tab published for user %s, but view generation was incomplete: %v", userID, buildErr)
+	} else {
+		log.Printf("[Slack API] Home tab published for user %s", userID)
+	}
 	return nil
 }
