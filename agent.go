@@ -41,6 +41,15 @@ import (
 )
 
 
+// slackAppHomeOpenedEvent represents the structure of a Slack app_home_opened event.
+type slackAppHomeOpenedEvent struct {
+    User string `json:"user"`
+    Tab  string `json:"tab"`
+    View *struct {
+        Hash string `json:"hash"`
+    } `json:"view"`
+}
+
 // ToolResponse represents a response from tool execution
 type ToolResponse struct {
 	Success bool        `json:"success"`
@@ -1740,13 +1749,7 @@ func main() {
 				utility.HandleSlackMessage(c, &msg, getOrCreateAnyThread, utility.GeminiAPIHandler)
 				return
 			case "app_home_opened":
-				var ah struct{
-					User string `json:"user"`
-					Tab  string `json:"tab"`
-					View *struct{
-						Hash string `json:"hash"`
-					} `json:"view"`
-				}
+				var ah slackAppHomeOpenedEvent
 				if err := json.Unmarshal(envelope.Event, &ah); err != nil {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid app_home_opened event"})
 					return
