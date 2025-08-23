@@ -7,6 +7,7 @@ import (
     "log"
     "strings"
     "time"
+    "unicode/utf8"
 
 	"github.com/slack-go/slack"
 	"go-thing/db"
@@ -159,23 +160,26 @@ func BuildSlackHomeView(ctx context.Context) (slack.HomeTabViewRequest, error) {
 		recentList = "_No threads yet. Start a conversation by messaging the bot!_"
 	} else {
 		var b strings.Builder
-		for _, t := range threads {
-			title := strings.TrimSpace(t.Title)
-			if title == "" {
-				title = "Untitled thread"
-			}
+        var listChars int
+        for _, t := range threads {
+            title := strings.TrimSpace(t.Title)
+            if title == "" {
+                title = "Untitled thread"
+            }
             // Truncate overly long titles to keep the mrkdwn block under limits.
             title = truncateRunes(title, maxTitleLenRecentThreads)
             // Escape characters for Slack mrkdwn to prevent formatting issues.
             title = slackMrkdwnEscaper.Replace(title)
-			// Example line: • #12 — Project kickoff (2025-08-22 18:30 UTC)
-			line := fmt.Sprintf("• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.UTC().Format(slackDateFallbackFormat))
-			if b.Len()+len(line) > maxRecentListChars {
-				b.WriteString("• ... and more\n")
-				break
-			}
-			b.WriteString(line)
-		}
+            // Example line: • #12 — Project kickoff (2025-08-22 18:30 UTC)
+            line := fmt.Sprintf("• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.UTC().Format(slackDateFallbackFormat))
+            lineChars := utf8.RuneCountInString(line)
+            if listChars+lineChars > maxRecentListChars {
+                b.WriteString("• ... and more\n")
+                break
+            }
+            b.WriteString(line)
+            listChars += lineChars
+        }
 		recentList = strings.TrimSuffix(b.String(), "\n")
 	}
 	recentHeader := slack.NewSectionBlock(
