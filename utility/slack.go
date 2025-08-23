@@ -188,17 +188,17 @@ func PublishSlackHomeTab(ctx context.Context, userID string, hash string) error 
     }
 	api := slack.New(botToken)
 	view, buildErr := BuildSlackHomeView(ctx)
-	if _, err := api.PublishView(userID, view, hash); err != nil {
-		var slackErr *slack.SlackErrorResponse
-		if errors.As(err, &slackErr) && slackErr.Err == slackErrorHashConflict && strings.TrimSpace(hash) != "" {
-			log.Printf("[Slack Home] hash_conflict with supplied hash, retrying without hash for user %s", userID)
-			if _, err2 := api.PublishView(userID, view, ""); err2 != nil {
-				return fmt.Errorf("views.publish failed after retry: %w", err2)
-			}
-		} else {
-			return fmt.Errorf("views.publish failed: %w", err)
-		}
-	}
+    if _, err := api.PublishViewContext(ctx, userID, view, hash); err != nil {
+        var slackErr *slack.SlackErrorResponse
+        if errors.As(err, &slackErr) && slackErr.Err == slackErrorHashConflict && strings.TrimSpace(hash) != "" {
+            log.Printf("[Slack Home] hash_conflict with supplied hash, retrying without hash for user %s", userID)
+            if _, err2 := api.PublishViewContext(ctx, userID, view, ""); err2 != nil {
+                return fmt.Errorf("views.publish failed after retry: %w", err2)
+            }
+        } else {
+            return fmt.Errorf("views.publish failed: %w", err)
+        }
+    }
 	if buildErr != nil {
 		log.Printf("[Slack API] Home tab published for user %s, but view generation was incomplete: %v", userID, buildErr)
 	} else {
