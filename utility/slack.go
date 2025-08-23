@@ -76,9 +76,9 @@ func fetchRecentThreads(limit int) ([]threadSummary, error) {
         }
 		out = append(out, t)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
+    if err := rows.Err(); err != nil {
+        return nil, fmt.Errorf("iterating over thread rows: %w", err)
+    }
 	return out, nil
 }
 
