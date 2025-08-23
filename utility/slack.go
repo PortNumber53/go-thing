@@ -47,12 +47,12 @@ var slackMrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&g
 // is truncated, an ellipsis "…" is appended, and the total length of the
 // returned string will not exceed `max`.
 func truncateRunes(s string, max int) string {
-    r := []rune(s)
-    if max < 0 || len(r) <= max {
-        return s
-    }
-    if max == 0 {
+    if max <= 0 {
         return ""
+    }
+    r := []rune(s)
+    if len(r) <= max {
+        return s
     }
     // Reserve 1 rune for the ellipsis when truncation is needed.
     if max == 1 {
