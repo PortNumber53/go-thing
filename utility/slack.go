@@ -44,9 +44,13 @@ const (
 // Defined at package scope to avoid per-call allocations.
 var slackMrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 
-// truncateRunes truncates a string to a maximum of `max` runes. If the string
-// is truncated, an ellipsis "…" is appended, and the total length of the
-// returned string will not exceed `max`.
+// truncateRunes truncates s to at most max runes. If truncation occurs,
+// it appends a single-rune ellipsis (… U+2026) and ensures the total length
+// is <= max runes by reserving 1 rune for the ellipsis.
+// Edge cases:
+// - max <= 0: returns ""
+// - len(s) in runes <= max: returns s unchanged
+// - max == 1: returns only "…" (prefix is r[:0])
 func truncateRunes(s string, max int) string {
     if max <= 0 {
         return ""
@@ -56,9 +60,6 @@ func truncateRunes(s string, max int) string {
         return s
     }
     // Reserve 1 rune for the ellipsis when truncation is needed.
-    if max == 1 {
-        return "…"
-    }
     return string(r[:max-1]) + "…"
 }
 
