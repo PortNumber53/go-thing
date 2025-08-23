@@ -32,6 +32,11 @@ const (
 	// thread title in the Slack Home recent list to avoid hitting Slack's 3000
 	// character limit on a single mrkdwn text object.
 	maxTitleLenRecentThreads = 150
+
+	// maxRecentListChars is a safety threshold below Slack's 3000 character
+	// limit for a single mrkdwn text object. We stop adding lines before we hit
+	// the hard limit to avoid publish failures.
+	maxRecentListChars = 2900
 )
 
 // Prebuilt replacer for escaping Slack mrkdwn-sensitive characters in titles.
@@ -164,7 +169,12 @@ func BuildSlackHomeView(ctx context.Context) (slack.HomeTabViewRequest, error) {
             // Escape characters for Slack mrkdwn to prevent formatting issues.
             title = slackMrkdwnEscaper.Replace(title)
 			// Example line: • #12 — Project kickoff (2025-08-22 18:30 UTC)
-			fmt.Fprintf(&b, "• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.UTC().Format(slackDateFallbackFormat))
+			line := fmt.Sprintf("• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.UTC().Format(slackDateFallbackFormat))
+			if b.Len()+len(line) > maxRecentListChars {
+				b.WriteString("• ... and more\n")
+				break
+			}
+			b.WriteString(line)
 		}
 		recentList = strings.TrimSuffix(b.String(), "\n")
 	}
