@@ -966,8 +966,16 @@ func main() {
 
     // Read current settings
     auth.GET("/api/settings", func(c *gin.Context) {
-        v, _ := c.Get("userID")
-        uid, _ := v.(int64)
+        v, ok := c.Get("userID")
+        if !ok {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+            return
+        }
+        uid, ok := v.(int64)
+        if !ok {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+            return
+        }
         dbc := db.Get()
         if dbc == nil {
             c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
@@ -1000,8 +1008,16 @@ func main() {
         }
         name := strings.TrimSpace(req.Name)
         if name == "" { c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"}); return }
-        v, _ := c.Get("userID")
-        uid, _ := v.(int64)
+        v, ok := c.Get("userID")
+        if !ok {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+            return
+        }
+        uid, ok := v.(int64)
+        if !ok {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+            return
+        }
         dbc := db.Get()
         if dbc == nil {
             c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
@@ -1033,8 +1049,16 @@ func main() {
             c.JSON(http.StatusBadRequest, gin.H{"error": "new password must be at least 8 characters"})
             return
         }
-        v, _ := c.Get("userID")
-        uid, _ := v.(int64)
+        v, ok := c.Get("userID")
+        if !ok {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+            return
+        }
+        uid, ok := v.(int64)
+        if !ok {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+            return
+        }
         dbc := db.Get()
         if dbc == nil {
             c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
