@@ -1,6 +1,7 @@
 package utility
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -137,16 +138,16 @@ func PublishSlackHomeTab(userID string, hash string) error {
 	api := slack.New(botToken)
 	view := BuildSlackHomeView()
 	if _, err := api.PublishView(userID, view, hash); err != nil {
-        // If Slack returns a hash_conflict and we provided a hash, retry once without hash
-        if err.Error() == "hash_conflict" && strings.TrimSpace(hash) != "" {
-            log.Printf("[Slack Home] hash_conflict with supplied hash, retrying without hash for user %s", userID)
-            if _, err2 := api.PublishView(userID, view, ""); err2 != nil {
-                return fmt.Errorf("views.publish failed after retry: %w", err2)
-            }
-        } else {
-            return fmt.Errorf("views.publish failed: %w", err)
-        }
-    }
+		var slackErr *slack.SlackErrorResponse
+		if errors.As(err, &slackErr) && slackErr.Err == "hash_conflict" && strings.TrimSpace(hash) != "" {
+			log.Printf("[Slack Home] hash_conflict with supplied hash, retrying without hash for user %s", userID)
+			if _, err2 := api.PublishView(userID, view, ""); err2 != nil {
+				return fmt.Errorf("views.publish failed after retry: %w", err2)
+			}
+		} else {
+			return fmt.Errorf("views.publish failed: %w", err)
+		}
+	}
 	log.Printf("[Slack API] Home tab published for user %s", userID)
 	return nil
 }
