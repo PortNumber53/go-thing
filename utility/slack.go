@@ -138,7 +138,7 @@ func PublishSlackHomeTab(userID string, hash string) error {
 	view := BuildSlackHomeView()
 	if _, err := api.PublishView(userID, view, hash); err != nil {
         // If Slack returns a hash_conflict and we provided a hash, retry once without hash
-        if strings.Contains(strings.ToLower(err.Error()), "hash_conflict") && strings.TrimSpace(hash) != "" {
+        if err.Error() == "hash_conflict" && strings.TrimSpace(hash) != "" {
             log.Printf("[Slack Home] hash_conflict with supplied hash, retrying without hash for user %s", userID)
             if _, err2 := api.PublishView(userID, view, ""); err2 != nil {
                 return fmt.Errorf("views.publish failed after retry: %w", err2)
