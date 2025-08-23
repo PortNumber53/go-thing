@@ -46,6 +46,21 @@ type slackViewInfo struct {
     Hash string `json:"hash"`
 }
 
+// strongPassword requires at least 12 chars including upper, lower, digit, and special
+var strongPassword = regexp.MustCompile(`^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9\s]).{12,}$`)
+
+// requireAuth is a Gin middleware that enforces a valid session and stores userID in context
+func requireAuth() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        if uid, ok := parseSession(c.Request); ok {
+            c.Set("userID", uid)
+            c.Next()
+            return
+        }
+        c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+    }
+}
+
 // slackAppHomeOpenedEvent represents the structure of a Slack app_home_opened event.
 type slackAppHomeOpenedEvent struct {
     User string        `json:"user"`
@@ -847,6 +862,143 @@ func main() {
             return
         }
         c.JSON(http.StatusOK, gin.H{"id": uid, "username": username, "name": name})
+    })
+
+    // Authenticated User Settings routes
+    auth := r.Group("/", requireAuth())
+    // Settings page is now rendered by the web frontend (#/settings)
+
+    // Read current settings
+    auth.GET("/api/settings", func(c *gin.Context) {
+        v, ok := c.Get("userID")
+        if !ok {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+            return
+        }
+        uid, ok := v.(int64)
+        if !ok {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+            return
+        }
+        dbc := db.Get()
+        if dbc == nil {
+            c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+            return
+        }
+        var username, name string
+        if err := dbc.QueryRow(`SELECT username, name FROM users WHERE id=$1`, uid).Scan(&username, &name); err != nil {
+            if err == sql.ErrNoRows {
+                clearSessionCookie(c)
+                c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+                return
+            }
+            log.Printf("[Settings] query error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+            return
+        }
+        c.JSON(http.StatusOK, gin.H{"username": username, "name": name})
+    })
+
+    // Update profile (name)
+    auth.POST("/api/settings", func(c *gin.Context) {
+        if !validateCSRF(c) {
+            c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+            return
+        }
+        var req struct{ Name string `json:"name"` }
+        if err := c.ShouldBindJSON(&req); err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+            return
+        }
+        name := strings.TrimSpace(req.Name)
+        if name == "" { c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"}); return }
+        v, ok := c.Get("userID")
+        if !ok {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+            return
+        }
+        uid, ok := v.(int64)
+        if !ok {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+            return
+        }
+        dbc := db.Get()
+        if dbc == nil {
+            c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+            return
+        }
+        if _, err := dbc.Exec(`UPDATE users SET name=$1, updated_at=now() WHERE id=$2`, name, uid); err != nil {
+            log.Printf("[Settings] update name error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update"})
+            return
+        }
+        c.JSON(http.StatusOK, gin.H{"ok": true})
+    })
+
+    // Change password
+    auth.POST("/api/settings/password", func(c *gin.Context) {
+        if !validateCSRF(c) {
+            c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+            return
+        }
+        var req struct{
+            Current string `json:"current_password"`
+            New     string `json:"new_password"`
+        }
+        if err := c.ShouldBindJSON(&req); err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+            return
+        }
+        if len(req.New) < 8 {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "new password must be at least 8 characters"})
+            return
+        }
+        if !strongPassword.MatchString(req.New) {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "password must be 12+ chars and include upper, lower, digit, and special character"})
+            return
+        }
+        v, ok := c.Get("userID")
+        if !ok {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+            return
+        }
+        uid, ok := v.(int64)
+        if !ok {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+            return
+        }
+        dbc := db.Get()
+        if dbc == nil {
+            c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+            return
+        }
+        var hash string
+        if err := dbc.QueryRow(`SELECT password_hash FROM users WHERE id=$1`, uid).Scan(&hash); err != nil {
+            if err == sql.ErrNoRows {
+                clearSessionCookie(c)
+                c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+                return
+            }
+            log.Printf("[Settings] query pass error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+            return
+        }
+        if bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Current)) != nil {
+            c.JSON(http.StatusUnauthorized, gin.H{"error": "current password is incorrect"})
+            return
+        }
+        newHash, err := bcrypt.GenerateFromPassword([]byte(req.New), bcrypt.DefaultCost)
+        if err != nil {
+            log.Printf("[Settings] bcrypt error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+            return
+        }
+        if _, err := dbc.Exec(`UPDATE users SET password_hash=$1, updated_at=now() WHERE id=$2`, string(newHash), uid); err != nil {
+            log.Printf("[Settings] update pass error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update"})
+            return
+        }
+        c.JSON(http.StatusOK, gin.H{"ok": true})
     })
 
     // GitHub direct API caller (CSRF protected)
