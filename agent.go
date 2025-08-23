@@ -41,13 +41,16 @@ import (
 )
 
 
+// slackViewInfo contains information about a Slack view, such as its hash.
+type slackViewInfo struct {
+    Hash string `json:"hash"`
+}
+
 // slackAppHomeOpenedEvent represents the structure of a Slack app_home_opened event.
 type slackAppHomeOpenedEvent struct {
-    User string `json:"user"`
-    Tab  string `json:"tab"`
-    View *struct {
-        Hash string `json:"hash"`
-    } `json:"view"`
+    User string        `json:"user"`
+    Tab  string        `json:"tab"`
+    View *slackViewInfo `json:"view"`
 }
 
 // ToolResponse represents a response from tool execution
