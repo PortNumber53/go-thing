@@ -113,7 +113,7 @@ func BuildSlackHomeView() slack.HomeTabViewRequest {
 				title = "Untitled thread"
 			}
 			// Example line: • #12 — Project kickoff (2025-08-22 18:30)
-            fmt.Fprintf(&b, "• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.Local().Format("2006-01-02 15:04"))
+			fmt.Fprintf(&b, "• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.Local().Format("2006-01-02 15:04"))
 		}
 		recentList = b.String()
 	}
