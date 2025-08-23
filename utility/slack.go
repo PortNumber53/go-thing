@@ -118,7 +118,7 @@ func BuildSlackHomeView() slack.HomeTabViewRequest {
 				title = "Untitled thread"
 			}
 			// Escape characters for Slack mrkdwn to prevent formatting issues.
-title = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(title)
+			title = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(title)
 			// Example line: • #12 — Project kickoff (2025-08-22 18:30 UTC)
 			fmt.Fprintf(&b, "• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.UTC().Format(slackDateFallbackFormat)+" UTC")
 		}
