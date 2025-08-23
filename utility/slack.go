@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"sync"
 
 	"github.com/slack-go/slack"
 	"go-thing/db"
@@ -33,13 +34,27 @@ const (
 // Defined at package scope to avoid per-call allocations.
 var slackMrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 
+// Cached config loaded once to avoid repeated I/O on every Slack API call.
+var (
+    cfgOnce     sync.Once
+    cachedCfg   map[string]string
+    cachedCfgErr error
+)
+
+func getConfig() (map[string]string, error) {
+    cfgOnce.Do(func() {
+        cachedCfg, cachedCfgErr = LoadConfig()
+    })
+    return cachedCfg, cachedCfgErr
+}
+
 // SendSlackResponse posts a message to a Slack channel using the bot token
 // configured in the INI config (SLACK_BOT_TOKEN in [default]).
 func SendSlackResponse(channel, message string) error {
-	cfg, err := LoadConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load config: %v", err)
-	}
+    cfg, err := getConfig()
+    if err != nil {
+        return fmt.Errorf("failed to load config: %v", err)
+    }
 	botToken := cfg["SLACK_BOT_TOKEN"]
 	if strings.TrimSpace(botToken) == "" {
 		return fmt.Errorf("SLACK_BOT_TOKEN missing in config")
@@ -148,10 +163,10 @@ func BuildSlackHomeView(ctx context.Context) slack.HomeTabViewRequest {
 // Optionally pass the current view hash to avoid overwriting a newer view; on
 // hash_conflict, we retry once without the hash. Requires `views:write` scope.
 func PublishSlackHomeTab(ctx context.Context, userID string, hash string) error {
-	cfg, err := LoadConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load config: %v", err)
-	}
+    cfg, err := getConfig()
+    if err != nil {
+        return fmt.Errorf("failed to load config: %v", err)
+    }
 	botToken := cfg["SLACK_BOT_TOKEN"]
 	if strings.TrimSpace(botToken) == "" {
 		return fmt.Errorf("SLACK_BOT_TOKEN missing in config")
