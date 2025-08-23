@@ -26,7 +26,7 @@ const (
 	// slackDateFallbackFormat is the Go time layout used to format timestamps
 	// in the Slack Home recent threads list as a fallback human-readable string.
 	// It pairs with Slack's date token for clients that can't render it.
-	slackDateFallbackFormat = "2006-01-02 15:04:05"
+	slackDateFallbackFormat = "2006-01-02 15:04:05 UTC"
 
 	// maxTitleLenRecentThreads is the maximum number of runes to include from a
 	// thread title in the Slack Home recent list to avoid hitting Slack's 3000
