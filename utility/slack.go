@@ -228,7 +228,7 @@ func PublishSlackHomeTab(ctx context.Context, userID string, hash string) error 
             log.Printf("[Slack Home] hash_conflict with supplied hash, retrying without hash for user %s", userID)
             req.Hash = nil // Retry without the hash.
             if _, err2 := api.PublishViewContext(ctx, req); err2 != nil {
-                return fmt.Errorf("views.publish failed after retry: %w", err2)
+                return fmt.Errorf("views.publish failed on retry after '%s' error: %w", slackErr.Err, err2)
             }
         } else {
             return fmt.Errorf("views.publish failed: %w", err)
