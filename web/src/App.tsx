@@ -165,7 +165,17 @@ export default function App() {
                     className="account-menu"
                   >
                     <div className="menu-section">Account</div>
-                    {/* Placeholder for future account/settings pages */}
+                    {/* Settings page (server-rendered at /settings) */}
+                    <button
+                      role="menuitem"
+                      className="menu-item"
+                      onClick={() => {
+                        setShowAccountMenu(false)
+                        window.location.href = '/settings'
+                      }}
+                    >
+                      Settings
+                    </button>
                     <button role="menuitem" className="menu-item" onClick={() => { setShowAccountMenu(false); logout(); }}>Log out</button>
                   </div>
                 )}

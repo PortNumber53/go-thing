@@ -46,6 +46,18 @@ type slackViewInfo struct {
     Hash string `json:"hash"`
 }
 
+// requireAuth is a Gin middleware that enforces a valid session and stores userID in context
+func requireAuth() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        if uid, ok := parseSession(c.Request); ok {
+            c.Set("userID", uid)
+            c.Next()
+            return
+        }
+        c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+    }
+}
+
 // slackAppHomeOpenedEvent represents the structure of a Slack app_home_opened event.
 type slackAppHomeOpenedEvent struct {
     User string        `json:"user"`
@@ -847,6 +859,214 @@ func main() {
             return
         }
         c.JSON(http.StatusOK, gin.H{"id": uid, "username": username, "name": name})
+    })
+
+    // Authenticated User Settings routes
+    auth := r.Group("/", requireAuth())
+    // Render minimal HTML settings page
+    auth.GET("/settings", func(c *gin.Context) {
+        // Simple HTML page with forms to update name and password using fetch to APIs
+        html := `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>User Settings</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;max-width:700px;margin:40px auto;padding:0 16px;color:#222}
+    h1{margin-bottom:8px}
+    .card{border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:16px 0}
+    label{display:block;margin:8px 0 4px;font-weight:600}
+    input{width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:6px}
+    button{margin-top:12px;padding:10px 14px;border:0;border-radius:6px;background:#2563eb;color:#fff;cursor:pointer}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    .row{display:flex;gap:12px;align-items:center}
+    .msg{margin-top:8px;font-size:.95em}
+    .ok{color:#047857}
+    .err{color:#b91c1c}
+  </style>
+  <script>
+    async function getCSRF(){
+      const r = await fetch('/csrf');
+      const j = await r.json();
+      return j.token;
+    }
+    async function loadMe(){
+      const r = await fetch('/me');
+      if(!r.ok){
+        document.body.innerHTML = '<p>Not logged in.</p>';
+        return;
+      }
+      const me = await r.json();
+      document.getElementById('username').textContent = me.username;
+      document.getElementById('name').value = me.name;
+    }
+    async function updateName(ev){
+      ev.preventDefault();
+      const name = document.getElementById('name').value.trim();
+      const btn = document.getElementById('btn-name');
+      const msg = document.getElementById('msg-name');
+      btn.disabled = true; msg.textContent = ''; msg.className = 'msg';
+      try{
+        const token = await getCSRF();
+        const r = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':token}, body:JSON.stringify({name})});
+        const j = await r.json();
+        if(!r.ok){ throw new Error(j.error||'failed'); }
+        msg.textContent = 'Saved'; msg.className = 'msg ok';
+      }catch(e){ msg.textContent = e.message; msg.className = 'msg err'; }
+      finally{ btn.disabled = false; }
+    }
+    async function updatePassword(ev){
+      ev.preventDefault();
+      const current_password = document.getElementById('current_password').value;
+      const new_password = document.getElementById('new_password').value;
+      const btn = document.getElementById('btn-pass');
+      const msg = document.getElementById('msg-pass');
+      btn.disabled = true; msg.textContent = ''; msg.className = 'msg';
+      try{
+        const token = await getCSRF();
+        const r = await fetch('/api/settings/password', {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':token}, body:JSON.stringify({current_password,new_password})});
+        const j = await r.json();
+        if(!r.ok){ throw new Error(j.error||'failed'); }
+        msg.textContent = 'Password updated'; msg.className = 'msg ok';
+        document.getElementById('current_password').value='';
+        document.getElementById('new_password').value='';
+      }catch(e){ msg.textContent = e.message; msg.className = 'msg err'; }
+      finally{ btn.disabled = false; }
+    }
+    window.addEventListener('DOMContentLoaded', ()=>{ loadMe(); document.getElementById('form-name').addEventListener('submit', updateName); document.getElementById('form-pass').addEventListener('submit', updatePassword); });
+  </script>
+  </head>
+  <body>
+    <h1>User Settings</h1>
+    <div class="card">
+      <div class="row"><strong>Signed in as:</strong> <span id="username"></span></div>
+      <form id="form-name">
+        <label for="name">Display name</label>
+        <input id="name" name="name" placeholder="Your name" />
+        <button id="btn-name" type="submit">Save</button>
+        <div id="msg-name" class="msg"></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Change Password</h3>
+      <form id="form-pass">
+        <label for="current_password">Current password</label>
+        <input id="current_password" name="current_password" type="password" />
+        <label for="new_password">New password</label>
+        <input id="new_password" name="new_password" type="password" />
+        <button id="btn-pass" type="submit">Update Password</button>
+        <div id="msg-pass" class="msg"></div>
+      </form>
+    </div>
+  </body>
+</html>`
+        c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
+    })
+
+    // Read current settings
+    auth.GET("/api/settings", func(c *gin.Context) {
+        v, _ := c.Get("userID")
+        uid, _ := v.(int64)
+        dbc := db.Get()
+        if dbc == nil {
+            c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+            return
+        }
+        var username, name string
+        if err := dbc.QueryRow(`SELECT username, name FROM users WHERE id=$1`, uid).Scan(&username, &name); err != nil {
+            if err == sql.ErrNoRows {
+                clearSessionCookie(c)
+                c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+                return
+            }
+            log.Printf("[Settings] query error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+            return
+        }
+        c.JSON(http.StatusOK, gin.H{"username": username, "name": name})
+    })
+
+    // Update profile (name)
+    auth.POST("/api/settings", func(c *gin.Context) {
+        if !validateCSRF(c) {
+            c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+            return
+        }
+        var req struct{ Name string `json:"name"` }
+        if err := c.ShouldBindJSON(&req); err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+            return
+        }
+        name := strings.TrimSpace(req.Name)
+        if name == "" { c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"}); return }
+        v, _ := c.Get("userID")
+        uid, _ := v.(int64)
+        dbc := db.Get()
+        if dbc == nil {
+            c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+            return
+        }
+        if _, err := dbc.Exec(`UPDATE users SET name=$1, updated_at=now() WHERE id=$2`, name, uid); err != nil {
+            log.Printf("[Settings] update name error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update"})
+            return
+        }
+        c.JSON(http.StatusOK, gin.H{"ok": true})
+    })
+
+    // Change password
+    auth.POST("/api/settings/password", func(c *gin.Context) {
+        if !validateCSRF(c) {
+            c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+            return
+        }
+        var req struct{
+            Current string `json:"current_password"`
+            New     string `json:"new_password"`
+        }
+        if err := c.ShouldBindJSON(&req); err != nil {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+            return
+        }
+        if len(req.New) < 8 {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "new password must be at least 8 characters"})
+            return
+        }
+        v, _ := c.Get("userID")
+        uid, _ := v.(int64)
+        dbc := db.Get()
+        if dbc == nil {
+            c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+            return
+        }
+        var hash string
+        if err := dbc.QueryRow(`SELECT password_hash FROM users WHERE id=$1`, uid).Scan(&hash); err != nil {
+            if err == sql.ErrNoRows {
+                clearSessionCookie(c)
+                c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+                return
+            }
+            log.Printf("[Settings] query pass error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+            return
+        }
+        if bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Current)) != nil {
+            c.JSON(http.StatusUnauthorized, gin.H{"error": "current password is incorrect"})
+            return
+        }
+        newHash, err := bcrypt.GenerateFromPassword([]byte(req.New), bcrypt.DefaultCost)
+        if err != nil {
+            log.Printf("[Settings] bcrypt error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+            return
+        }
+        if _, err := dbc.Exec(`UPDATE users SET password_hash=$1, updated_at=now() WHERE id=$2`, string(newHash), uid); err != nil {
+            log.Printf("[Settings] update pass error: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update"})
+            return
+        }
+        c.JSON(http.StatusOK, gin.H{"ok": true})
     })
 
     // GitHub direct API caller (CSRF protected)
