@@ -1759,7 +1759,7 @@ func main() {
 				if ah.View != nil {
 					hash = strings.TrimSpace(ah.View.Hash)
 				}
-				if err := utility.PublishSlackHomeTab(ah.User, hash); err != nil {
+				if err := utility.PublishSlackHomeTab(c.Request.Context(), ah.User, hash); err != nil {
 					log.Printf("[Slack Home] publish failed: %v", err)
 				}
 				c.JSON(http.StatusOK, gin.H{"status": "home updated"})

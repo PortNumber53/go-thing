@@ -1,6 +1,7 @@
 package utility
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -60,7 +61,7 @@ type threadSummary struct {
 }
 
 // fetchRecentThreads returns the most recently updated threads (up to limit).
-func fetchRecentThreads(limit int) ([]threadSummary, error) {
+func fetchRecentThreads(ctx context.Context, limit int) ([]threadSummary, error) {
 	if limit <= 0 {
 		limit = defaultRecentThreadsLimit
 	}
@@ -68,7 +69,7 @@ func fetchRecentThreads(limit int) ([]threadSummary, error) {
 	if dbc == nil {
 		return nil, fmt.Errorf("db not initialized")
 	}
-	rows, err := dbc.QueryContext(context.Background(), `SELECT id, COALESCE(title, ''), updated_at FROM threads ORDER BY updated_at DESC LIMIT $1`, limit)
+	rows, err := dbc.QueryContext(ctx, `SELECT id, COALESCE(title, ''), updated_at FROM threads ORDER BY updated_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("querying recent threads: %w", err)
 	}
@@ -88,7 +89,7 @@ func fetchRecentThreads(limit int) ([]threadSummary, error) {
 }
 
 // BuildSlackHomeView constructs a simple Home tab view with blocks.
-func BuildSlackHomeView() slack.HomeTabViewRequest {
+func BuildSlackHomeView(ctx context.Context) slack.HomeTabViewRequest {
 	header := slack.NewHeaderBlock(
 		slack.NewTextBlockObject("plain_text", "Go-Thing • Home", false, false),
 	)
@@ -105,7 +106,7 @@ func BuildSlackHomeView() slack.HomeTabViewRequest {
 	divider := slack.NewDividerBlock()
 	// Recent threads
 	var recentList string
-	if threads, err := fetchRecentThreads(defaultRecentThreadsLimit); err != nil {
+	if threads, err := fetchRecentThreads(ctx, defaultRecentThreadsLimit); err != nil {
 		log.Printf("[Slack Home] fetchRecentThreads failed: %v", err)
 		recentList = "_No recent threads available._"
 	} else if len(threads) == 0 {
@@ -142,7 +143,7 @@ func BuildSlackHomeView() slack.HomeTabViewRequest {
 // PublishSlackHomeTab publishes the Home tab for the given user using the bot token.
 // Optionally pass the current view hash to avoid overwriting a newer view; on
 // hash_conflict, we retry once without the hash. Requires `views:write` scope.
-func PublishSlackHomeTab(userID string, hash string) error {
+func PublishSlackHomeTab(ctx context.Context, userID string, hash string) error {
 	cfg, err := LoadConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %v", err)
@@ -155,7 +156,7 @@ func PublishSlackHomeTab(userID string, hash string) error {
 		return fmt.Errorf("userID required")
 	}
 	api := slack.New(botToken)
-	view := BuildSlackHomeView()
+	view := BuildSlackHomeView(ctx)
 	if _, err := api.PublishView(userID, view, hash); err != nil {
 		var slackErr *slack.SlackErrorResponse
 		if errors.As(err, &slackErr) && slackErr.Err == slackErrorHashConflict && strings.TrimSpace(hash) != "" {
