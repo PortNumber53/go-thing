@@ -33,18 +33,28 @@ const (
 // Defined at package scope to avoid per-call allocations.
 var slackMrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 
+// getBotToken loads the config and returns the Slack bot token.
+// Centralized to avoid duplication and ensure consistent error wrapping.
+func getBotToken() (string, error) {
+    cfg, err := LoadConfig()
+    if err != nil {
+        return "", fmt.Errorf("failed to load config: %w", err)
+    }
+    botToken := cfg["SLACK_BOT_TOKEN"]
+    if strings.TrimSpace(botToken) == "" {
+        return "", fmt.Errorf("SLACK_BOT_TOKEN missing in config")
+    }
+    return botToken, nil
+}
+
 // SendSlackResponse posts a message to a Slack channel using the bot token
 // configured in the INI config (SLACK_BOT_TOKEN in [default]).
 func SendSlackResponse(channel, message string) error {
-    cfg, err := LoadConfig()
+    botToken, err := getBotToken()
     if err != nil {
-        return fmt.Errorf("failed to load config: %w", err)
+        return err
     }
-	botToken := cfg["SLACK_BOT_TOKEN"]
-	if strings.TrimSpace(botToken) == "" {
-		return fmt.Errorf("SLACK_BOT_TOKEN missing in config")
-	}
-	api := slack.New(botToken)
+    api := slack.New(botToken)
 	_, _, err = api.PostMessage(
 		channel,
 		slack.MsgOptionText(message, false),
@@ -148,17 +158,13 @@ func BuildSlackHomeView(ctx context.Context) slack.HomeTabViewRequest {
 // Optionally pass the current view hash to avoid overwriting a newer view; on
 // hash_conflict, we retry once without the hash. Requires `views:write` scope.
 func PublishSlackHomeTab(ctx context.Context, userID string, hash string) error {
-    cfg, err := LoadConfig()
+    botToken, err := getBotToken()
     if err != nil {
-        return fmt.Errorf("failed to load config: %w", err)
+        return err
     }
-	botToken := cfg["SLACK_BOT_TOKEN"]
-	if strings.TrimSpace(botToken) == "" {
-		return fmt.Errorf("SLACK_BOT_TOKEN missing in config")
-	}
-	if strings.TrimSpace(userID) == "" {
-		return fmt.Errorf("userID required")
-	}
+    if strings.TrimSpace(userID) == "" {
+        return fmt.Errorf("userID required")
+    }
 	api := slack.New(botToken)
 	view := BuildSlackHomeView(ctx)
 	if _, err := api.PublishView(userID, view, hash); err != nil {
