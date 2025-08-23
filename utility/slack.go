@@ -200,15 +200,15 @@ func PublishSlackHomeTab(ctx context.Context, userID string, hash string) error 
         // Log view generation errors immediately to ensure they are not lost if publishing fails.
         log.Printf("[Slack API] Home tab view generation was incomplete for user %s: %v", userID, buildErr)
     }
+    trimmedHash := strings.TrimSpace(hash)
     var hashPtr *string
-    if strings.TrimSpace(hash) != "" {
-        h := hash
-        hashPtr = &h
+    if trimmedHash != "" {
+        hashPtr = &trimmedHash
     }
     req := slack.PublishViewContextRequest{UserID: userID, View: view, Hash: hashPtr}
     if _, err := api.PublishViewContext(ctx, req); err != nil {
         var slackErr *slack.SlackErrorResponse
-        if errors.As(err, &slackErr) && slackErr.Err == slackErrorHashConflict && strings.TrimSpace(hash) != "" {
+        if errors.As(err, &slackErr) && slackErr.Err == slackErrorHashConflict && trimmedHash != "" {
             log.Printf("[Slack Home] hash_conflict with supplied hash, retrying without hash for user %s", userID)
             req2 := slack.PublishViewContextRequest{UserID: userID, View: view, Hash: nil}
             if _, err2 := api.PublishViewContext(ctx, req2); err2 != nil {
