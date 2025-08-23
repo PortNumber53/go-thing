@@ -74,7 +74,7 @@ func fetchRecentThreads(ctx context.Context, limit int) ([]threadSummary, error)
 		return nil, fmt.Errorf("querying recent threads: %w", err)
 	}
 	defer rows.Close()
-	var out []threadSummary
+out := make([]threadSummary, 0, limit)
 	for rows.Next() {
 		var t threadSummary
 		if err := rows.Scan(&t.ID, &t.Title, &t.UpdatedAt); err != nil {
