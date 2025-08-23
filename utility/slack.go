@@ -200,18 +200,19 @@ func PublishSlackHomeTab(ctx context.Context, userID string, hash string) error 
         // Log view generation errors immediately to ensure they are not lost if publishing fails.
         log.Printf("[Slack API] Home tab view generation was incomplete for user %s: %v", userID, buildErr)
     }
-    trimmedHash := strings.TrimSpace(hash)
-    var hashPtr *string
-    if trimmedHash != "" {
-        hashPtr = &trimmedHash
+
+    req := slack.PublishViewContextRequest{UserID: userID, View: view}
+    if h := strings.TrimSpace(hash); h != "" {
+        req.Hash = &h
     }
-    req := slack.PublishViewContextRequest{UserID: userID, View: view, Hash: hashPtr}
+
     if _, err := api.PublishViewContext(ctx, req); err != nil {
         var slackErr *slack.SlackErrorResponse
-        if errors.As(err, &slackErr) && slackErr.Err == slackErrorHashConflict && trimmedHash != "" {
+        // Only retry if a hash was provided in the first place.
+        if req.Hash != nil && errors.As(err, &slackErr) && slackErr.Err == slackErrorHashConflict {
             log.Printf("[Slack Home] hash_conflict with supplied hash, retrying without hash for user %s", userID)
-            req2 := slack.PublishViewContextRequest{UserID: userID, View: view, Hash: nil}
-            if _, err2 := api.PublishViewContext(ctx, req2); err2 != nil {
+            req.Hash = nil // Retry without the hash.
+            if _, err2 := api.PublishViewContext(ctx, req); err2 != nil {
                 return fmt.Errorf("views.publish failed after retry: %w", err2)
             }
         } else {
