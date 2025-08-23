@@ -27,11 +27,26 @@ const (
 	// in the Slack Home recent threads list as a fallback human-readable string.
 	// It pairs with Slack's date token for clients that can't render it.
 	slackDateFallbackFormat = "2006-01-02 15:04:05"
+
+	// maxTitleLenRecentThreads is the maximum number of runes to include from a
+	// thread title in the Slack Home recent list to avoid hitting Slack's 3000
+	// character limit on a single mrkdwn text object.
+	maxTitleLenRecentThreads = 150
 )
 
 // Prebuilt replacer for escaping Slack mrkdwn-sensitive characters in titles.
 // Defined at package scope to avoid per-call allocations.
 var slackMrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
+// truncateRunes truncates a string to at most max runes, appending an ellipsis
+// if truncation occurred.
+func truncateRunes(s string, max int) string {
+    r := []rune(s)
+    if max >= 0 && len(r) > max {
+        return string(r[:max]) + "…"
+    }
+    return s
+}
 
 // getBotToken loads the config and returns the Slack bot token.
 // Centralized to avoid duplication and ensure consistent error wrapping.
@@ -139,6 +154,8 @@ func BuildSlackHomeView(ctx context.Context) (slack.HomeTabViewRequest, error) {
 			}
 			// Escape characters for Slack mrkdwn to prevent formatting issues.
 			title = slackMrkdwnEscaper.Replace(title)
+			// Truncate overly long titles to keep the mrkdwn block under limits.
+			title = truncateRunes(title, maxTitleLenRecentThreads)
 			// Example line: • #12 — Project kickoff (2025-08-22 18:30 UTC)
 			fmt.Fprintf(&b, "• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.UTC().Format(slackDateFallbackFormat)+" UTC")
 		}
