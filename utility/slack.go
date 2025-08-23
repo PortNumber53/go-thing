@@ -165,7 +165,7 @@ func BuildSlackHomeView(ctx context.Context) slack.HomeTabViewRequest {
 func PublishSlackHomeTab(ctx context.Context, userID string, hash string) error {
     cfg, err := getConfig()
     if err != nil {
-        return fmt.Errorf("failed to load config: %v", err)
+        return fmt.Errorf("failed to load config: %w", err)
     }
 	botToken := cfg["SLACK_BOT_TOKEN"]
 	if strings.TrimSpace(botToken) == "" {
