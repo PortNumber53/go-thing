@@ -152,10 +152,10 @@ func BuildSlackHomeView(ctx context.Context) (slack.HomeTabViewRequest, error) {
 			if title == "" {
 				title = "Untitled thread"
 			}
-			// Escape characters for Slack mrkdwn to prevent formatting issues.
-			title = slackMrkdwnEscaper.Replace(title)
-			// Truncate overly long titles to keep the mrkdwn block under limits.
-			title = truncateRunes(title, maxTitleLenRecentThreads)
+            // Truncate overly long titles to keep the mrkdwn block under limits.
+            title = truncateRunes(title, maxTitleLenRecentThreads)
+            // Escape characters for Slack mrkdwn to prevent formatting issues.
+            title = slackMrkdwnEscaper.Replace(title)
 			// Example line: • #12 — Project kickoff (2025-08-22 18:30 UTC)
 			fmt.Fprintf(&b, "• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.UTC().Format(slackDateFallbackFormat)+" UTC")
 		}
