@@ -71,9 +71,9 @@ func fetchRecentThreads(limit int) ([]threadSummary, error) {
 	var out []threadSummary
 	for rows.Next() {
 		var t threadSummary
-		if err := rows.Scan(&t.ID, &t.Title, &t.UpdatedAt); err != nil {
-			return nil, err
-		}
+        if err := rows.Scan(&t.ID, &t.Title, &t.UpdatedAt); err != nil {
+            return nil, fmt.Errorf("scanning thread row: %w", err)
+        }
 		out = append(out, t)
 	}
 	if err := rows.Err(); err != nil {
