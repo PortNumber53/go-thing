@@ -21,6 +21,11 @@ const (
 	// is stale (someone else updated the view). In that case, we retry publish
 	// without a hash.
 	slackErrorHashConflict = "hash_conflict"
+
+	// slackDateFallbackFormat is the Go time layout used to format timestamps
+	// in the Slack Home recent threads list as a fallback human-readable string.
+	// It pairs with Slack's date token for clients that can't render it.
+	slackDateFallbackFormat = "2006-01-02 15:04:05"
 )
 
 // SendSlackResponse posts a message to a Slack channel using the bot token
@@ -64,21 +69,21 @@ func fetchRecentThreads(limit int) ([]threadSummary, error) {
 		return nil, fmt.Errorf("db not initialized")
 	}
 	rows, err := dbc.Query(`SELECT id, COALESCE(title, ''), updated_at FROM threads ORDER BY updated_at DESC LIMIT $1`, limit)
-    if err != nil {
-        return nil, fmt.Errorf("querying recent threads: %w", err)
-    }
+	if err != nil {
+		return nil, fmt.Errorf("querying recent threads: %w", err)
+	}
 	defer rows.Close()
 	var out []threadSummary
 	for rows.Next() {
 		var t threadSummary
-        if err := rows.Scan(&t.ID, &t.Title, &t.UpdatedAt); err != nil {
-            return nil, fmt.Errorf("scanning thread row: %w", err)
-        }
+		if err := rows.Scan(&t.ID, &t.Title, &t.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scanning thread row: %w", err)
+		}
 		out = append(out, t)
 	}
-    if err := rows.Err(); err != nil {
-        return nil, fmt.Errorf("iterating over thread rows: %w", err)
-    }
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating over thread rows: %w", err)
+	}
 	return out, nil
 }
 
@@ -113,9 +118,9 @@ func BuildSlackHomeView() slack.HomeTabViewRequest {
 				title = "Untitled thread"
 			}
 			// Example line: • #12 — Project kickoff (2025-08-22 18:30)
-            fmt.Fprintf(&b, "• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.Local().Format("2006-01-02 15:04:05"))
+			fmt.Fprintf(&b, "• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.Local().Format(slackDateFallbackFormat))
 		}
-        recentList = strings.TrimSuffix(b.String(), "\n")
+		recentList = strings.TrimSuffix(b.String(), "\n")
 	}
 	recentHeader := slack.NewSectionBlock(
 		slack.NewTextBlockObject("mrkdwn", "*Recent Threads*", false, false),
