@@ -63,6 +63,38 @@ func truncateRunes(s string, max int) string {
     return string(r[:max-1]) + "…"
 }
 
+// buildRecentThreadsList formats a slice of threadSummary entries into a
+// mrkdwn bullet list, applying title truncation/escaping and ensuring the
+// total text remains under maxRecentListChars. Appends a trailing summary
+// line ("• ... and more") only if it fits.
+func buildRecentThreadsList(threads []threadSummary) string {
+    var b strings.Builder
+    var listChars int
+    for _, t := range threads {
+        title := strings.TrimSpace(t.Title)
+        if title == "" {
+            title = "Untitled thread"
+        }
+        // Truncate overly long titles to keep the mrkdwn block under limits.
+        title = truncateRunes(title, maxTitleLenRecentThreads)
+        // Escape characters for Slack mrkdwn to prevent formatting issues.
+        title = slackMrkdwnEscaper.Replace(title)
+        // Example line: • #12 — Project kickoff (2025-08-22 18:30 UTC)
+        line := fmt.Sprintf("• #%d — %s (updated <!date^%d^{date_short} {time}|%s>)\n", t.ID, title, t.UpdatedAt.Unix(), t.UpdatedAt.UTC().Format(slackDateFallbackFormat))
+        lineChars := utf8.RuneCountInString(line)
+        if listChars+lineChars > maxRecentListChars {
+            const andMoreLine = "• ... and more\n"
+            if listChars+utf8.RuneCountInString(andMoreLine) <= maxRecentListChars {
+                b.WriteString(andMoreLine)
+            }
+            break
+        }
+        b.WriteString(line)
+        listChars += lineChars
+    }
+    return strings.TrimSuffix(b.String(), "\n")
+}
+
 // getBotToken loads the config and returns the Slack bot token.
 // Centralized to avoid duplication and ensure consistent error wrapping.
 func getBotToken() (string, error) {
