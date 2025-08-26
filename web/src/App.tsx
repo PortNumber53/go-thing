@@ -276,6 +276,16 @@ function SettingsPage({ me, onNameUpdated }: SettingsProps) {
   const [confirmPass, setConfirmPass] = React.useState('')
   const [changing, setChanging] = React.useState(false)
 
+  // SSH Key Generation state
+  const [keyType, setKeyType] = React.useState<'ed25519' | 'rsa'>('ed25519')
+  const [rsaBits, setRsaBits] = React.useState<number>(3072)
+  const [keyComment, setKeyComment] = React.useState('')
+  const [keyPass, setKeyPass] = React.useState('')
+  const [genLoading, setGenLoading] = React.useState(false)
+  const [pubKey, setPubKey] = React.useState<string>('')
+  const [privKey, setPrivKey] = React.useState<string>('')
+  const [showPriv, setShowPriv] = React.useState(false)
+
   React.useEffect(() => {
     let aborted = false
     ;(async () => {
@@ -343,6 +353,54 @@ function SettingsPage({ me, onNameUpdated }: SettingsProps) {
     } finally {
       setChanging(false)
     }
+  }
+
+  async function generateKeys(e: React.FormEvent) {
+    e.preventDefault()
+    setMessage(null)
+    setGenLoading(true)
+    setPubKey(''); setPrivKey('')
+    try {
+      const token = await fetchCSRFToken()
+      const payload: any = {
+        type: keyType,
+        comment: keyComment.trim(),
+        passphrase: keyPass,
+      }
+      if (keyType === 'rsa') payload.bits = rsaBits
+      const res = await fetch('/api/ssh-keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': token },
+        body: JSON.stringify(payload),
+      })
+      if (!res.ok) {
+        const t = await res.text()
+        throw new Error(t || `HTTP ${res.status}`)
+      }
+      const data = await res.json()
+      if (typeof data?.public_key === 'string' && typeof data?.private_key === 'string') {
+        setPubKey(data.public_key.trim())
+        setPrivKey(data.private_key.trim())
+      } else {
+        throw new Error('Malformed response from server')
+      }
+    } catch (e: any) {
+      setMessage(`Failed to generate keys: ${e?.message ?? e}`)
+    } finally {
+      setGenLoading(false)
+    }
+  }
+
+  function download(text: string, filename: string) {
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
   }
 
   return (

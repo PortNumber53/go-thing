@@ -6,7 +6,7 @@ import os from 'os'
 import path from 'path'
 
 // https://vitejs.dev/config/
-const proxyPaths = ['/chat', '/webhook', '/signup', '/login', '/logout', '/me', '/csrf'] as const
+const proxyPaths = ['/chat', '/webhook', '/signup', '/login', '/logout', '/me', '/csrf', '/api'] as const
 const proxyConfig = proxyPaths.reduce<Record<string, { target: string; changeOrigin: boolean }>>((acc, path) => {
   acc[path] = {
     target: 'http://127.0.0.1:7866',
