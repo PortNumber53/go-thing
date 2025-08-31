@@ -270,6 +270,8 @@ function SettingsPage({ me, onNameUpdated }: SettingsProps) {
   const [loading, setLoading] = React.useState(true)
   const [saving, setSaving] = React.useState(false)
   const [message, setMessage] = React.useState<string | null>(null)
+  // Tabs: profile | password | docker
+  const [tab, setTab] = React.useState<'profile' | 'password' | 'docker'>('profile')
 
   const [curPass, setCurPass] = React.useState('')
   const [newPass, setNewPass] = React.useState('')
@@ -411,43 +413,82 @@ function SettingsPage({ me, onNameUpdated }: SettingsProps) {
       ) : (
         <>
           {message && <div className="system-msg" role="status" style={{ marginBottom: '1rem' }}>{message}</div>}
-          <section style={{ marginBottom: '2rem' }}>
-            <h2>Profile</h2>
-            <form onSubmit={saveProfile}>
-              <div className="row" style={{ gap: '0.5rem', alignItems: 'baseline' }}>
-                <label style={{ minWidth: 100 }}>Username</label>
-                <input type="text" value={username} disabled aria-readonly />
-              </div>
-              <div className="row" style={{ gap: '0.5rem', alignItems: 'baseline', marginTop: '0.5rem' }}>
-                <label style={{ minWidth: 100 }}>Display name</label>
-                <input type="text" value={name} onChange={(e) => setName(e.target.value)} />
-              </div>
-              <div style={{ marginTop: '0.75rem' }}>
-                <button type="submit" disabled={saving}>Save</button>
-              </div>
-            </form>
-          </section>
+          {/* Tabs */}
+          <div className="row" role="tablist" aria-label="Settings Sections" style={{ gap: '0.5rem', marginBottom: '1rem' }}>
+            <button role="tab" aria-selected={tab === 'profile'} className={tab === 'profile' ? 'link active' : 'link'} onClick={() => setTab('profile')}>Profile</button>
+            <button role="tab" aria-selected={tab === 'password'} className={tab === 'password' ? 'link active' : 'link'} onClick={() => setTab('password')}>Password</button>
+            <button role="tab" aria-selected={tab === 'docker'} className={tab === 'docker' ? 'link active' : 'link'} onClick={() => setTab('docker')}>Docker Settings</button>
+          </div>
 
-          <section>
-            <h2>Change Password</h2>
-            <form onSubmit={changePassword}>
-              <div className="row" style={{ gap: '0.5rem', alignItems: 'baseline' }}>
-                <label style={{ minWidth: 160 }}>Current password</label>
-                <input type="password" value={curPass} onChange={(e) => setCurPass(e.target.value)} autoComplete="current-password" />
-              </div>
-              <div className="row" style={{ gap: '0.5rem', alignItems: 'baseline', marginTop: '0.5rem' }}>
-                <label style={{ minWidth: 160 }}>New password</label>
-                <input type="password" value={newPass} onChange={(e) => setNewPass(e.target.value)} autoComplete="new-password" />
-              </div>
-              <div className="row" style={{ gap: '0.5rem', alignItems: 'baseline', marginTop: '0.5rem' }}>
-                <label style={{ minWidth: 160 }}>Confirm new password</label>
-                <input type="password" value={confirmPass} onChange={(e) => setConfirmPass(e.target.value)} autoComplete="new-password" />
-              </div>
-              <div style={{ marginTop: '0.75rem' }}>
-                <button type="submit" disabled={changing}>Change password</button>
-              </div>
-            </form>
-          </section>
+          {tab === 'profile' && (
+            <section style={{ marginBottom: '2rem' }}>
+              <h2>Profile</h2>
+              <form onSubmit={saveProfile}>
+                <div className="row" style={{ gap: '0.5rem', alignItems: 'baseline' }}>
+                  <label style={{ minWidth: 100 }}>Username</label>
+                  <input type="text" value={username} disabled aria-readonly />
+                </div>
+                <div className="row" style={{ gap: '0.5rem', alignItems: 'baseline', marginTop: '0.5rem' }}>
+                  <label style={{ minWidth: 100 }}>Display name</label>
+                  <input type="text" value={name} onChange={(e) => setName(e.target.value)} />
+                </div>
+                <div style={{ marginTop: '0.75rem' }}>
+                  <button type="submit" disabled={saving}>Save</button>
+                </div>
+              </form>
+            </section>
+          )}
+
+          {tab === 'password' && (
+            <section>
+              <h2>Change Password</h2>
+              <form onSubmit={changePassword}>
+                <div className="row" style={{ gap: '0.5rem', alignItems: 'baseline' }}>
+                  <label style={{ minWidth: 160 }}>Current password</label>
+                  <input type="password" value={curPass} onChange={(e) => setCurPass(e.target.value)} autoComplete="current-password" />
+                </div>
+                <div className="row" style={{ gap: '0.5rem', alignItems: 'baseline', marginTop: '0.5rem' }}>
+                  <label style={{ minWidth: 160 }}>New password</label>
+                  <input type="password" value={newPass} onChange={(e) => setNewPass(e.target.value)} autoComplete="new-password" />
+                </div>
+                <div className="row" style={{ gap: '0.5rem', alignItems: 'baseline', marginTop: '0.5rem' }}>
+                  <label style={{ minWidth: 160 }}>Confirm new password</label>
+                  <input type="password" value={confirmPass} onChange={(e) => setConfirmPass(e.target.value)} autoComplete="new-password" />
+                </div>
+                <div style={{ marginTop: '0.75rem' }}>
+                  <button type="submit" disabled={changing}>Change password</button>
+                </div>
+              </form>
+            </section>
+          )}
+
+          {tab === 'docker' && (
+            <section>
+              <h2>Docker Settings</h2>
+              <p style={{ marginTop: '0.25rem', color: '#666' }}>Configure the built-in Docker sandbox used by shell tools. Saving is coming soon.</p>
+              <form onSubmit={(e) => e.preventDefault()}>
+                <div className="row" style={{ gap: '0.5rem', alignItems: 'baseline', marginTop: '0.5rem' }}>
+                  <label style={{ minWidth: 220 }}>Container name</label>
+                  <input type="text" placeholder="go-thing-arch" disabled />
+                </div>
+                <div className="row" style={{ gap: '0.5rem', alignItems: 'baseline', marginTop: '0.5rem' }}>
+                  <label style={{ minWidth: 220 }}>Image</label>
+                  <input type="text" placeholder="archlinux:latest" disabled />
+                </div>
+                <div className="row" style={{ gap: '0.5rem', alignItems: 'baseline', marginTop: '0.5rem' }}>
+                  <label style={{ minWidth: 220 }}>Extra args</label>
+                  <input type="text" placeholder="--privileged" disabled />
+                </div>
+                <div className="row" style={{ gap: '0.5rem', alignItems: 'center', marginTop: '0.5rem' }}>
+                  <label style={{ minWidth: 220 }}>Auto remove container on exit</label>
+                  <input type="checkbox" disabled />
+                </div>
+                <div style={{ marginTop: '0.75rem' }}>
+                  <button type="submit" disabled title="Coming soon">Save</button>
+                </div>
+              </form>
+            </section>
+          )}
         </>
       )}
     </main>
