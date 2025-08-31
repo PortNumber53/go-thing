@@ -7,6 +7,7 @@
 
 ### Changed
 - Frontend: Settings tabs moved to a fixed horizontal toolbar under the header for consistent navigation.
+- Frontend: Increased contrast of the Settings toolbar (dark background, light text, clear active indicator) for readability.
 
 ## [2.1.1] - 2025-08-31
 

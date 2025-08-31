@@ -213,17 +213,54 @@ export default function App() {
           style={{
             position: 'sticky',
             top: 0,
-            background: '#fff',
+            background: '#111827', // gray-900 for strong contrast
+            color: '#F9FAFB', // gray-50 text
             zIndex: 10,
-            borderBottom: '1px solid #ddd',
+            borderBottom: '1px solid #111827',
             padding: '0.5rem 1rem',
             display: 'flex',
             gap: '0.5rem',
           }}
         >
-          <button role="tab" aria-selected={settingsTab === 'profile'} className={settingsTab === 'profile' ? 'link active' : 'link'} onClick={() => setSettingsTab('profile')}>Profile</button>
-          <button role="tab" aria-selected={settingsTab === 'password'} className={settingsTab === 'password' ? 'link active' : 'link'} onClick={() => setSettingsTab('password')}>Password</button>
-          <button role="tab" aria-selected={settingsTab === 'docker'} className={settingsTab === 'docker' ? 'link active' : 'link'} onClick={() => setSettingsTab('docker')}>Docker Settings</button>
+          <button
+            role="tab"
+            aria-selected={settingsTab === 'profile'}
+            className={settingsTab === 'profile' ? 'link active' : 'link'}
+            onClick={() => setSettingsTab('profile')}
+            style={{
+              color: settingsTab === 'profile' ? '#FFFFFF' : '#D1D5DB', // white vs gray-300
+              borderBottom: settingsTab === 'profile' ? '2px solid #60A5FA' : '2px solid transparent', // blue-400 indicator
+              paddingBottom: 4,
+            }}
+          >
+            Profile
+          </button>
+          <button
+            role="tab"
+            aria-selected={settingsTab === 'password'}
+            className={settingsTab === 'password' ? 'link active' : 'link'}
+            onClick={() => setSettingsTab('password')}
+            style={{
+              color: settingsTab === 'password' ? '#FFFFFF' : '#D1D5DB',
+              borderBottom: settingsTab === 'password' ? '2px solid #60A5FA' : '2px solid transparent',
+              paddingBottom: 4,
+            }}
+          >
+            Password
+          </button>
+          <button
+            role="tab"
+            aria-selected={settingsTab === 'docker'}
+            className={settingsTab === 'docker' ? 'link active' : 'link'}
+            onClick={() => setSettingsTab('docker')}
+            style={{
+              color: settingsTab === 'docker' ? '#FFFFFF' : '#D1D5DB',
+              borderBottom: settingsTab === 'docker' ? '2px solid #60A5FA' : '2px solid transparent',
+              paddingBottom: 4,
+            }}
+          >
+            Docker Settings
+          </button>
         </div>
       )}
       {route === '/settings' ? (
