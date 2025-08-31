@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.1.1] - 2025-08-31
+
+### Changed
+- Standardized PostgreSQL config keys in `[postgres]` section to use `DB_` prefix.
+  - Preferred keys: `DB_DSN` (optional), `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_SSLMODE`, `DB_MIGRATIONS_DIR`.
+  - Backward compatibility preserved: legacy keys (`PG_DSN`, `HOST`, `PORT`, `USER`, `PASSWORD`, `DBNAME`, `SSLMODE`, `MIGRATIONS_DIR`) and environment variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`).
+- Updated documentation (`README.md`) and sample config (`config.sample.ini`) to reflect new keys.
+
 ## [2.1.0] - 2025-08-09
 
 ### Added

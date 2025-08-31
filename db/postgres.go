@@ -14,14 +14,19 @@ import (
 
 // Config keys (INI)
 // [postgres]
-// PG_DSN=postgres://user:pass@localhost:5432/dbname?sslmode=disable
-// HOST=localhost
-// PORT=5432
-// USER=postgres
-// PASSWORD=postgres
-// DBNAME=go_thing
-// SSLMODE=disable
-// MIGRATIONS_DIR=./migrations
+// Preferred (DB_-prefixed):
+// DB_DSN=postgres://user:pass@localhost:5432/dbname?sslmode=disable  # optional
+// DB_HOST=localhost
+// DB_PORT=5432
+// DB_USER=postgres
+// DB_PASSWORD=postgres
+// DB_NAME=go_thing
+// DB_SSLMODE=disable
+// DB_MIGRATIONS_DIR=./migrations
+// 
+// Backward-compatibility: the legacy keys without DB_ prefix are still supported
+// (PG_DSN, HOST, PORT, USER, PASSWORD, DBNAME, SSLMODE, MIGRATIONS_DIR) and
+// standard env vars are honored (e.g., PG_DSN, PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE).
 
 type PGConfig struct {
 	DSN           string
@@ -63,14 +68,59 @@ func loadPGConfig(cfg *ini.File) *PGConfig {
 	secDef := cfg.Section("default")
 
 	pg := &PGConfig{
-		DSN:           firstNonEmpty(secPG.Key("PG_DSN").String(), secDef.Key("PG_DSN").String(), os.Getenv("PG_DSN")),
-		Host:          keyOrEnv2(secPG, secDef, "HOST", "PGHOST", "localhost"),
-		Port:          keyOrEnv2(secPG, secDef, "PORT", "PGPORT", "5432"),
-		User:          keyOrEnv2(secPG, secDef, "USER", "PGUSER", "postgres"),
-		Password:      keyOrEnv2(secPG, secDef, "PASSWORD", "PGPASSWORD", ""),
-		DBName:        keyOrEnv2(secPG, secDef, "DBNAME", "PGDATABASE", "postgres"),
-		SSLMode:       firstNonEmpty(secPG.Key("SSLMODE").String(), secDef.Key("SSLMODE").String(), "disable"),
-		MigrationsDir: firstNonEmpty(secPG.Key("MIGRATIONS_DIR").String(), secDef.Key("MIGRATIONS_DIR").String(), "./migrations"),
+		// DSN: prefer DB_DSN, then legacy PG_DSN, then env PG_DSN
+		DSN: firstNonEmpty(
+			secPG.Key("DB_DSN").String(), secDef.Key("DB_DSN").String(),
+			secPG.Key("PG_DSN").String(), secDef.Key("PG_DSN").String(),
+			os.Getenv("PG_DSN"),
+		),
+		// Host: DB_HOST -> HOST -> PGHOST -> default
+		Host: firstNonEmpty(
+			secPG.Key("DB_HOST").String(), secDef.Key("DB_HOST").String(),
+			secPG.Key("HOST").String(), secDef.Key("HOST").String(),
+			os.Getenv("PGHOST"),
+			"localhost",
+		),
+		// Port: DB_PORT -> PORT -> PGPORT -> default
+		Port: firstNonEmpty(
+			secPG.Key("DB_PORT").String(), secDef.Key("DB_PORT").String(),
+			secPG.Key("PORT").String(), secDef.Key("PORT").String(),
+			os.Getenv("PGPORT"),
+			"5432",
+		),
+		// User: DB_USER -> USER -> PGUSER -> default
+		User: firstNonEmpty(
+			secPG.Key("DB_USER").String(), secDef.Key("DB_USER").String(),
+			secPG.Key("USER").String(), secDef.Key("USER").String(),
+			os.Getenv("PGUSER"),
+			"postgres",
+		),
+		// Password: DB_PASSWORD -> PASSWORD -> PGPASSWORD -> default empty
+		Password: firstNonEmpty(
+			secPG.Key("DB_PASSWORD").String(), secDef.Key("DB_PASSWORD").String(),
+			secPG.Key("PASSWORD").String(), secDef.Key("PASSWORD").String(),
+			os.Getenv("PGPASSWORD"),
+			"",
+		),
+		// DBName: DB_NAME -> DBNAME -> PGDATABASE -> default postgres
+		DBName: firstNonEmpty(
+			secPG.Key("DB_NAME").String(), secDef.Key("DB_NAME").String(),
+			secPG.Key("DBNAME").String(), secDef.Key("DBNAME").String(),
+			os.Getenv("PGDATABASE"),
+			"postgres",
+		),
+		// SSLMode: DB_SSLMODE -> SSLMODE -> default disable
+		SSLMode: firstNonEmpty(
+			secPG.Key("DB_SSLMODE").String(), secDef.Key("DB_SSLMODE").String(),
+			secPG.Key("SSLMODE").String(), secDef.Key("SSLMODE").String(),
+			"disable",
+		),
+		// Migrations dir: DB_MIGRATIONS_DIR -> MIGRATIONS_DIR -> default ./migrations
+		MigrationsDir: firstNonEmpty(
+			secPG.Key("DB_MIGRATIONS_DIR").String(), secDef.Key("DB_MIGRATIONS_DIR").String(),
+			secPG.Key("MIGRATIONS_DIR").String(), secDef.Key("MIGRATIONS_DIR").String(),
+			"./migrations",
+		),
 	}
 	return pg
 }
