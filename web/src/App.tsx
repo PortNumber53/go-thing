@@ -27,6 +27,8 @@ export default function App() {
   const accountMenuRef = React.useRef<HTMLDivElement | null>(null)
   // Simple hash routing: '/' (chat) or '/settings'
   const [route, setRoute] = React.useState<string>(() => window.location.hash.replace(/^#/, '') || '/')
+  // Settings tab state lifted to App for a fixed toolbar under header
+  const [settingsTab, setSettingsTab] = React.useState<'profile' | 'password' | 'docker'>('profile')
 
   React.useEffect(() => {
     autoResize()
@@ -203,8 +205,29 @@ export default function App() {
           </nav>
         </div>
       </header>
+      {route === '/settings' && (
+        <div
+          role="tablist"
+          aria-label="Settings Sections"
+          className="settings-tabs"
+          style={{
+            position: 'sticky',
+            top: 0,
+            background: '#fff',
+            zIndex: 10,
+            borderBottom: '1px solid #ddd',
+            padding: '0.5rem 1rem',
+            display: 'flex',
+            gap: '0.5rem',
+          }}
+        >
+          <button role="tab" aria-selected={settingsTab === 'profile'} className={settingsTab === 'profile' ? 'link active' : 'link'} onClick={() => setSettingsTab('profile')}>Profile</button>
+          <button role="tab" aria-selected={settingsTab === 'password'} className={settingsTab === 'password' ? 'link active' : 'link'} onClick={() => setSettingsTab('password')}>Password</button>
+          <button role="tab" aria-selected={settingsTab === 'docker'} className={settingsTab === 'docker' ? 'link active' : 'link'} onClick={() => setSettingsTab('docker')}>Docker Settings</button>
+        </div>
+      )}
       {route === '/settings' ? (
-        <SettingsPage me={me} onNameUpdated={(newName) => setMe(me => me ? { ...me, name: newName } : me)} />
+        <SettingsPage me={me} tab={settingsTab} onChangeTab={setSettingsTab} onNameUpdated={(newName) => setMe(me => me ? { ...me, name: newName } : me)} />
       ) : (
         <>
           <main id="chat" ref={chatRef} aria-live="polite" aria-atomic="false">
@@ -262,16 +285,14 @@ function safeMarked(s: string): string {
   }
 }
 
-type SettingsProps = { me: User | null, onNameUpdated: (newName: string) => void }
+type SettingsProps = { me: User | null, tab: 'profile' | 'password' | 'docker', onChangeTab: (t: 'profile' | 'password' | 'docker') => void, onNameUpdated: (newName: string) => void }
 
-function SettingsPage({ me, onNameUpdated }: SettingsProps) {
+function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
   const [username, setUsername] = React.useState('')
   const [name, setName] = React.useState('')
   const [loading, setLoading] = React.useState(true)
   const [saving, setSaving] = React.useState(false)
   const [message, setMessage] = React.useState<string | null>(null)
-  // Tabs: profile | password | docker
-  const [tab, setTab] = React.useState<'profile' | 'password' | 'docker'>('profile')
 
   const [curPass, setCurPass] = React.useState('')
   const [newPass, setNewPass] = React.useState('')
@@ -413,12 +434,7 @@ function SettingsPage({ me, onNameUpdated }: SettingsProps) {
       ) : (
         <>
           {message && <div className="system-msg" role="status" style={{ marginBottom: '1rem' }}>{message}</div>}
-          {/* Tabs */}
-          <div className="row" role="tablist" aria-label="Settings Sections" style={{ gap: '0.5rem', marginBottom: '1rem' }}>
-            <button role="tab" aria-selected={tab === 'profile'} className={tab === 'profile' ? 'link active' : 'link'} onClick={() => setTab('profile')}>Profile</button>
-            <button role="tab" aria-selected={tab === 'password'} className={tab === 'password' ? 'link active' : 'link'} onClick={() => setTab('password')}>Password</button>
-            <button role="tab" aria-selected={tab === 'docker'} className={tab === 'docker' ? 'link active' : 'link'} onClick={() => setTab('docker')}>Docker Settings</button>
-          </div>
+          {/* Tabs moved to fixed toolbar in App */}
 
           {tab === 'profile' && (
             <section style={{ marginBottom: '2rem' }}>

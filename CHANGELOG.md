@@ -5,6 +5,9 @@
 ### Added
 - Frontend: Added a tabbed UI to the Settings page with a new "Docker Settings" tab (placeholder form for container name, image, extra args, auto-remove). Save is disabled until backend APIs are added.
 
+### Changed
+- Frontend: Settings tabs moved to a fixed horizontal toolbar under the header for consistent navigation.
+
 ## [2.1.1] - 2025-08-31
 
 ### Changed
