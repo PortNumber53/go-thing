@@ -21,6 +21,7 @@
   - Shell session + WebSocket endpoints → `routes/shell_routes.go` (RegisterShellRoutes; reuses existing wsUpgrader for origin policy)
   - Authenticated Settings APIs (profile, password, docker) → `routes/api_settings_routes.go` (RegisterAPISettingsRoutes)
   - Docker SSH key endpoints (download/generate) → `routes/api_docker_routes.go` (RegisterAPIDockerRoutes)
+  - Current user endpoint → `routes/me_routes.go` (RegisterMeRoutes)
 
 ## [2.1.5] - 2025-09-07
 
