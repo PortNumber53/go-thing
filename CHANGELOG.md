@@ -10,6 +10,15 @@
 - Updated references across `agent.go` and tests (`agent_github_test.go`).
 - Removed unused imports from `agent.go` after extraction.
 
+### Routes extraction
+- Moved HTTP handlers out of `agent.go` into `routes/`:
+  - Slack webhook → `routes/slack_routes.go` (RegisterSlackRoutes)
+  - GitHub webhook → `routes/github_routes.go` (RegisterGithubRoutes)
+  - Signup → `routes/signup_routes.go` (RegisterSignupRoutes)
+  - Login → `routes/login_routes.go` (RegisterLoginRoutes; injected limiter/session helpers)
+  - Authenticated SSH key generation → `routes/api_ssh_routes.go` (RegisterAPISSHRoutes; injected Docker/ssh-keygen helpers)
+  - Jira webhook → `routes/jira_routes.go` (RegisterJiraRoutes)
+
 ## [2.1.5] - 2025-09-07
 
 ### Added
