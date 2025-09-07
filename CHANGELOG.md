@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.1.6] - 2025-09-07
+
+### Changed
+- Backend refactor: moved several helpers from `agent.go` into the `utility/` package for reuse and maintainability.
+  - Password strength checker → `utility/password.go` (`IsStrongPassword`)
+  - CSRF + HTTPS/HMAC helpers → `utility/security.go` (`NewCSRFToken`, `SetCSRFCookie`, `ValidateCSRF`, `IsSecure`, `IsSecureRequest`, `HMACSHA256`, `HMACEqual`)
+  - Session helpers → `utility/session.go` (`SetSessionCookie`, `ClearSessionCookie`, `ParseSession`)
+- Updated references across `agent.go` and tests (`agent_github_test.go`).
+- Removed unused imports from `agent.go` after extraction.
+
 ## [2.1.5] - 2025-09-07
 
 ### Added

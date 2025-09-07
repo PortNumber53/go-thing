@@ -10,10 +10,7 @@ import (
 	"fmt"
 	"io"
 
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"log"
 	"net/http"
 	"net/url"
@@ -26,7 +23,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/go-github/v66/github"
@@ -49,35 +45,12 @@ type slackViewInfo struct {
 	Hash string `json:"hash"`
 }
 
-// isStrongPassword requires at least 12 chars including upper, lower, digit, and special
-func isStrongPassword(s string) bool {
-	// Count runes to handle Unicode safely
-	if len([]rune(s)) < 12 {
-		return false
-	}
-	var hasLower, hasUpper, hasDigit, hasSpecial bool
-	for _, r := range s {
-		switch {
-		case unicode.IsLower(r):
-			hasLower = true
-		case unicode.IsUpper(r):
-			hasUpper = true
-		case unicode.IsDigit(r):
-			hasDigit = true
-		default:
-			// Any rune that is not letter, digit, or space counts as special
-			if !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.IsSpace(r) {
-				hasSpecial = true
-			}
-		}
-	}
-	return hasLower && hasUpper && hasDigit && hasSpecial
-}
+// isStrongPassword moved to utility/password.go as utility.IsStrongPassword
 
 // requireAuth is a Gin middleware that enforces a valid session and stores userID in context
 func requireAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if uid, ok := parseSession(c.Request); ok {
+		if uid, ok := utility.ParseSession(c.Request, sessionSecret); ok {
 			c.Set("userID", uid)
 			c.Next()
 			return
@@ -98,110 +71,6 @@ type ToolResponse struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data,omitempty"`
 	Error   string      `json:"error,omitempty"`
-}
-
-// newCSRFToken generates a random token (hex) for CSRF protection
-func newCSRFToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
-// setCSRFCookie sets the CSRF cookie. We also return the token to the client via JSON from /csrf
-func setCSRFCookie(c *gin.Context, token string) {
-	ck := &http.Cookie{
-		Name:  "csrf_token",
-		Value: token,
-		Path:  "/",
-		// HttpOnly true is acceptable because clients obtain the token from GET /csrf response body
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-		// Session cookie is fine; rotate by calling /csrf as needed
-	}
-	if isSecureRequest(c) {
-		ck.Secure = true
-	}
-	http.SetCookie(c.Writer, ck)
-}
-
-// validateCSRF verifies the Origin/Referer (if present) and double-submit cookie/header token
-func validateCSRF(c *gin.Context) bool {
-	// --- Origin allowlist or same-origin check ---
-	origin := strings.TrimSpace(c.Request.Header.Get("Origin"))
-	if origin != "" {
-		// Lazy-load ALLOWED_ORIGINS from config once
-		allowedOriginsOnce.Do(func() {
-			allowedOrigins = make(map[string]struct{})
-			if cfg, err := utility.LoadConfig(); err == nil && cfg != nil {
-				if raw := strings.TrimSpace(cfg["ALLOWED_ORIGINS"]); raw != "" {
-					for _, item := range strings.Split(raw, ",") {
-						a := strings.TrimSpace(item)
-						if a != "" {
-							allowedOrigins[a] = struct{}{}
-						}
-					}
-				}
-			} else if err != nil {
-				log.Printf("[CSRF] failed to load config for allowed origins: %v. Falling back to same-origin policy.", err)
-			}
-		})
-		if len(allowedOrigins) > 0 {
-			if _, ok := allowedOrigins[origin]; !ok {
-				log.Printf("[CSRF] reject: origin not in allowlist: origin=%q", origin)
-				return false
-			}
-			log.Printf("[CSRF] origin allowed via allowlist: %s", origin)
-		} else {
-			scheme := "http"
-			if isSecureRequest(c) {
-				scheme = "https"
-			}
-			sameOrigin := fmt.Sprintf("%s://%s", scheme, c.Request.Host)
-			if !strings.EqualFold(origin, sameOrigin) {
-				log.Printf("[CSRF] reject: origin mismatch: origin=%q sameOrigin=%q", origin, sameOrigin)
-				return false
-			}
-			log.Printf("[CSRF] origin allowed via same-origin: %s", origin)
-		}
-	}
-
-	// --- Double submit: header must equal cookie ---
-	headerTok := strings.TrimSpace(c.Request.Header.Get("X-CSRF-Token"))
-	if headerTok == "" {
-		log.Printf("[CSRF] reject: missing X-CSRF-Token header")
-		return false
-	}
-	ck, err := c.Request.Cookie("csrf_token")
-	if err != nil || ck == nil || strings.TrimSpace(ck.Value) == "" {
-		log.Printf("[CSRF] reject: missing csrf_token cookie (err=%v)", err)
-		return false
-	}
-	if !hmac.Equal([]byte(headerTok), []byte(strings.TrimSpace(ck.Value))) {
-		log.Printf("[CSRF] reject: token mismatch (header vs cookie)")
-		return false
-	}
-	log.Printf("[CSRF] passed: origin and token validated")
-	return true
-}
-
-// hmacSha256 computes the GitHub signature header value for the given secret and body.
-// Returns the string in the format "sha256=<hex>" to compare against X-Hub-Signature-256.
-func hmacSha256(secret string, body []byte) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(body)
-	sum := mac.Sum(nil)
-	return "sha256=" + hex.EncodeToString(sum)
-}
-
-// hmacEqual performs a constant-time comparison between the received signature header
-// and the expected value. Comparison is case-insensitive for hex digits.
-func hmacEqual(gotHeader, expected string) bool {
-	// Normalize to lowercase and trim spaces
-	g := strings.ToLower(strings.TrimSpace(gotHeader))
-	e := strings.ToLower(strings.TrimSpace(expected))
-	return hmac.Equal([]byte(g), []byte(e))
 }
 
 // emailRegex caches a simple email validation regex.
@@ -354,11 +223,6 @@ func isSecure(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
-// isSecureRequest determines if the request is effectively HTTPS (directly or via proxy header)
-func isSecureRequest(c *gin.Context) bool {
-	return isSecure(c.Request)
-}
-
 // runDockerExec runs `docker exec` with the given args inside the specified container.
 // Returns stdout/stderr as strings with a timeout.
 func runDockerExec(container string, args []string, timeout time.Duration) (string, string, error) {
@@ -389,81 +253,7 @@ func ensureSSHKeygenAvailable(container string) error {
 	return nil
 }
 
-// setSessionCookie sets an HttpOnly cookie with a signed token for the user id.
-func setSessionCookie(c *gin.Context, userID int64) {
-	// session expiry
-	exp := time.Now().Add(sessionDuration)
-	base := fmt.Sprintf("%d.%d", userID, exp.Unix())
-	mac := hmac.New(sha256.New, sessionSecret)
-	mac.Write([]byte(base))
-	sig := hex.EncodeToString(mac.Sum(nil))
-	token := base + "." + sig
-	cookie := &http.Cookie{
-		Name:     "session",
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Expires:  exp,
-	}
-	// If request came over HTTPS (directly or via proxy header), set Secure
-	if isSecureRequest(c) {
-		cookie.Secure = true
-	}
-	http.SetCookie(c.Writer, cookie)
-}
-
-// clearSessionCookie expires the session cookie
-func clearSessionCookie(c *gin.Context) {
-	cookie := &http.Cookie{
-		Name:     "session",
-		Value:    "",
-		Path:     "/",
-		Expires:  time.Unix(0, 0),
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	}
-	// If request came over HTTPS (directly or via proxy header), set Secure
-	if isSecureRequest(c) {
-		cookie.Secure = true
-	}
-	http.SetCookie(c.Writer, cookie)
-}
-
-// parseSession verifies the cookie and returns userID if valid
-func parseSession(r *http.Request) (int64, bool) {
-	ck, err := r.Cookie("session")
-	if err != nil || ck == nil || strings.TrimSpace(ck.Value) == "" {
-		return 0, false
-	}
-	parts := strings.Split(ck.Value, ".")
-	if len(parts) != 3 {
-		return 0, false
-	}
-	userStr, expStr, sig := parts[0], parts[1], parts[2]
-	base := userStr + "." + expStr
-	mac := hmac.New(sha256.New, sessionSecret)
-	mac.Write([]byte(base))
-	expectedMAC := mac.Sum(nil)
-	sigBytes, err := hex.DecodeString(sig)
-	if err != nil {
-		return 0, false
-	}
-	if !hmac.Equal(sigBytes, expectedMAC) {
-		return 0, false
-	}
-	// Check expiry
-	expUnix, err := strconv.ParseInt(expStr, 10, 64)
-	if err != nil || time.Now().After(time.Unix(expUnix, 0)) {
-		return 0, false
-	}
-	uid, err := strconv.ParseInt(userStr, 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	return uid, true
-}
+// Session helpers moved to utility/session.go: utility.SetSessionCookie, utility.ClearSessionCookie, utility.ParseSession
 
 // isUniqueViolation returns true when err is a Postgres unique constraint violation (SQLSTATE 23505).
 func isUniqueViolation(err error) bool {
@@ -749,18 +539,18 @@ func main() {
 	})
 	// CSRF token issuer. Returns {token} and sets csrf_token cookie.
 	r.GET("/csrf", func(c *gin.Context) {
-		tok, err := newCSRFToken()
+		tok, err := utility.NewCSRFToken()
 		if err != nil {
 			log.Printf("[CSRF] token gen error: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
 			return
 		}
-		setCSRFCookie(c, tok)
+		utility.SetCSRFCookie(c, tok)
 		c.JSON(http.StatusOK, gin.H{"token": tok})
 	})
 	// Sign up endpoint (CSRF protected)
 	r.POST("/signup", func(c *gin.Context) {
-		if !validateCSRF(c) {
+		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
@@ -861,7 +651,7 @@ func main() {
 
 	// Generate an ed25519 SSH key inside the Docker container and return the public key
 	r.POST("/api/docker/ssh-key", requireAuth(), func(c *gin.Context) {
-		if !validateCSRF(c) {
+		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
@@ -896,7 +686,7 @@ func main() {
 
 	// Login endpoint with basic rate limiting and lockouts (CSRF protected)
 	r.POST("/login", func(c *gin.Context) {
-		if !validateCSRF(c) {
+		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
@@ -956,23 +746,23 @@ func main() {
 		}
 		// Success: clear failure state
 		lr.recordSuccess(u)
-		setSessionCookie(c, id)
+		utility.SetSessionCookie(c, id, sessionSecret, sessionDuration)
 		c.JSON(http.StatusOK, gin.H{"ok": true, "user": gin.H{"id": id, "username": username, "name": name}})
 	})
 
 	// Logout endpoint (CSRF protected)
 	r.POST("/logout", func(c *gin.Context) {
-		if !validateCSRF(c) {
+		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
-		clearSessionCookie(c)
+		utility.ClearSessionCookie(c)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
 	// Current user endpoint
 	r.GET("/me", func(c *gin.Context) {
-		uid, ok := parseSession(c.Request)
+		uid, ok := utility.ParseSession(c.Request, sessionSecret)
 		if !ok {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
 			return
@@ -986,7 +776,7 @@ func main() {
 		if err := dbc.QueryRow(`SELECT username, name FROM users WHERE id=$1`, uid).Scan(&username, &name); err != nil {
 			if err == sql.ErrNoRows {
 				log.Printf("[Me] WARN: valid session for non-existent user ID %d", uid)
-				clearSessionCookie(c)
+				utility.ClearSessionCookie(c)
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
 				return
 			}
@@ -1021,7 +811,7 @@ func main() {
 		var username, name string
 		if err := dbc.QueryRow(`SELECT username, name FROM users WHERE id=$1`, uid).Scan(&username, &name); err != nil {
 			if err == sql.ErrNoRows {
-				clearSessionCookie(c)
+				utility.ClearSessionCookie(c)
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
 				return
 			}
@@ -1034,7 +824,7 @@ func main() {
 
 	// Update profile (name)
 	auth.POST("/api/settings", func(c *gin.Context) {
-		if !validateCSRF(c) {
+		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
@@ -1075,7 +865,7 @@ func main() {
 
 	// Change password
 	auth.POST("/api/settings/password", func(c *gin.Context) {
-		if !validateCSRF(c) {
+		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
@@ -1091,7 +881,7 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "new password must be at least 8 characters"})
 			return
 		}
-		if !isStrongPassword(req.New) {
+		if !utility.IsStrongPassword(req.New) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "password must be 12+ chars and include upper, lower, digit, and special character"})
 			return
 		}
@@ -1113,7 +903,7 @@ func main() {
 		var hash string
 		if err := dbc.QueryRow(`SELECT password_hash FROM users WHERE id=$1`, uid).Scan(&hash); err != nil {
 			if err == sql.ErrNoRows {
-				clearSessionCookie(c)
+				utility.ClearSessionCookie(c)
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
 				return
 			}
@@ -1159,7 +949,7 @@ func main() {
 		var settingsRaw sql.NullString
 		if err := dbc.QueryRow(`SELECT settings::text FROM users WHERE id=$1`, uid).Scan(&settingsRaw); err != nil {
 			if err == sql.ErrNoRows {
-				clearSessionCookie(c)
+				utility.ClearSessionCookie(c)
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
 				return
 			}
@@ -1182,7 +972,7 @@ func main() {
 	})
 
 	auth.POST("/api/settings/docker", func(c *gin.Context) {
-		if !validateCSRF(c) {
+		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
@@ -1241,7 +1031,7 @@ func main() {
 
 	// Generate SSH keys inside the Docker container and return them
 	auth.POST("/api/ssh-keys", func(c *gin.Context) {
-		if !validateCSRF(c) {
+		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
@@ -1337,7 +1127,7 @@ func main() {
 
 	// GitHub direct API caller (CSRF protected)
 	r.POST("/github/call", func(c *gin.Context) {
-		if !validateCSRF(c) {
+		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
@@ -1463,8 +1253,8 @@ func main() {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 			return
 		}
-		expected := hmacSha256(secret, body)
-		if !hmacEqual(signature, expected) {
+		expected := utility.HMACSHA256(secret, body)
+		if !utility.HMACEqual(signature, expected) {
 			log.Printf("[GitHubWebhook] reject: invalid X-Hub-Signature-256")
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 			return
