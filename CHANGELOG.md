@@ -1,5 +1,39 @@
 # Changelog
 
+## [2.1.5] - 2025-09-07
+
+### Added
+- Backend (`agent.go`): Docker container SSH key endpoints (authenticated):
+  - `GET /api/docker/ssh-keys/download?which=public|private` streams `$HOME/.ssh/id_ed25519(.pub)` as a download.
+  - `POST /api/docker/ssh-key` generates a new ed25519 keypair inside the container and returns the public key.
+  - Both require session auth; POST is CSRF-protected.
+- Frontend (`web/src/App.tsx`): Implemented `downloadDockerKey(which)` and wired the "Download public/private key" buttons to call the new endpoint and trigger download.
+
+### Fixed
+- Resolved Gin panic due to duplicate route registrations for `/api/docker/ssh-key` by removing duplicates and registering with inline `requireAuth()`.
+
+## [2.1.4] - 2025-09-07
+
+### Changed
+- Frontend: Switched Settings URLs from hash fragments to path-based routes for deep-linking and consistency.
+  - Old: `/account/settings#docker`
+  - New: `/account/settings/docker`
+- Implementation in `web/src/App.tsx`:
+  - Parse tab from `window.location.pathname`.
+  - Tab buttons navigate to `/account/settings`, `/account/settings/password`, `/account/settings/docker`.
+  - Render Settings UI for any path starting with `/account/settings`.
+
+## [2.1.3] - 2025-09-03
+
+### Added
+- Backend: Implemented authenticated Docker settings endpoints in `agent.go`:
+  - `GET /api/settings/docker` to load per-user Docker config from `users.settings` JSONB
+  - `POST /api/settings/docker` (CSRF-protected) to persist `{container,image,args,auto_remove}` using `jsonb_set`
+- Frontend: Wired Docker Settings tab in `web/src/App.tsx` to load/save via the new endpoints with CSRF.
+
+### Fixed
+- Resolved 404 for `/api/settings/docker` and the missing `saveDocker` handler error in the Settings page.
+
 ## [2.1.2] - 2025-08-31
 
 ### Added

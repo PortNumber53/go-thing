@@ -822,6 +822,78 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
+	// Download SSH key from the running container (without hardcoding user). Uses $HOME/.ssh paths.
+	// GET /api/docker/ssh-keys/download?which=public|private
+	r.GET("/api/docker/ssh-keys/download", requireAuth(), func(c *gin.Context) {
+		which := strings.ToLower(strings.TrimSpace(c.Query("which")))
+		var rel string
+		var fname string
+		switch which {
+		case "public", "pub":
+			rel = "$HOME/.ssh/id_ed25519.pub"
+			fname = "id_ed25519.pub"
+		case "private", "priv":
+			rel = "$HOME/.ssh/id_ed25519"
+			fname = "id_ed25519"
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "which must be 'public' or 'private'"})
+			return
+		}
+
+		containerName, err := toolsrv.EnsureDockerContainer()
+		if err != nil {
+			log.Printf("[DockerSSHDownload] ensure container error: %v", err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to start container"})
+			return
+		}
+		cmd := fmt.Sprintf("cat %s", rel)
+		out, stderr, err := runDockerExec(containerName, []string{"bash", "-lc", cmd}, 5*time.Second)
+		if err != nil {
+			log.Printf("[DockerSSHDownload] read error: %v (stderr: %s)", err, strings.TrimSpace(stderr))
+			c.JSON(http.StatusNotFound, gin.H{"error": "key not found"})
+			return
+		}
+		// Stream as attachment
+		c.Header("Content-Type", "text/plain; charset=utf-8")
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", fname))
+		c.String(http.StatusOK, out)
+	})
+
+	// Generate an ed25519 SSH key inside the Docker container and return the public key
+	r.POST("/api/docker/ssh-key", requireAuth(), func(c *gin.Context) {
+		if !validateCSRF(c) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+			return
+		}
+		// Ensure docker container is running
+		containerName, err := toolsrv.EnsureDockerContainer()
+		if err != nil {
+			log.Printf("[DockerSSHKey] ensure container error: %v", err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to start container"})
+			return
+		}
+		if err := ensureSSHKeygenAvailable(containerName); err != nil {
+			log.Printf("[DockerSSHKey] ensure ssh-keygen error: %v", err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to prepare ssh-keygen in container"})
+			return
+		}
+		// Create ~/.ssh, remove existing keys, and generate a new one
+		cmd := "set -e; mkdir -p ~/.ssh; chmod 700 ~/.ssh; rm -f ~/.ssh/id_ed25519 ~/.ssh/id_ed25519.pub; ssh-keygen -t ed25519 -C 'developer@container.local' -N '' -f ~/.ssh/id_ed25519 -q; chmod 600 ~/.ssh/id_ed25519; chmod 644 ~/.ssh/id_ed25519.pub"
+		if _, stderr, err := runDockerExec(containerName, []string{"bash", "-lc", cmd}, 20*time.Second); err != nil {
+			log.Printf("[DockerSSHKey] ssh-keygen error: %v (stderr: %s)", err, strings.TrimSpace(stderr))
+			c.JSON(http.StatusBadGateway, gin.H{"error": "ssh-keygen failed"})
+			return
+		}
+		// Read public key
+		pub, perr, err := runDockerExec(containerName, []string{"bash", "-lc", "cat ~/.ssh/id_ed25519.pub"}, 5*time.Second)
+		if err != nil {
+			log.Printf("[DockerSSHKey] read public key error: %v (stderr: %s)", err, strings.TrimSpace(perr))
+			c.JSON(http.StatusBadGateway, gin.H{"error": "failed reading public key"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "public_key": strings.TrimSpace(pub)})
+	})
+
 	// Login endpoint with basic rate limiting and lockouts (CSRF protected)
 	r.POST("/login", func(c *gin.Context) {
 		if !validateCSRF(c) {
@@ -1061,6 +1133,106 @@ func main() {
 		}
 		if _, err := dbc.Exec(`UPDATE users SET password_hash=$1, updated_at=now() WHERE id=$2`, string(newHash), uid); err != nil {
 			log.Printf("[Settings] update pass error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	// Docker settings: GET current and POST to update
+	auth.GET("/api/settings/docker", func(c *gin.Context) {
+		v, ok := c.Get("userID")
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+			return
+		}
+		uid, ok := v.(int64)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+			return
+		}
+		dbc := db.Get()
+		if dbc == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+			return
+		}
+		var settingsRaw sql.NullString
+		if err := dbc.QueryRow(`SELECT settings::text FROM users WHERE id=$1`, uid).Scan(&settingsRaw); err != nil {
+			if err == sql.ErrNoRows {
+				clearSessionCookie(c)
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+				return
+			}
+			log.Printf("[DockerSettings] select err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+			return
+		}
+		var settings map[string]interface{}
+		if settingsRaw.Valid && strings.TrimSpace(settingsRaw.String) != "" {
+			_ = json.Unmarshal([]byte(settingsRaw.String), &settings)
+		}
+		if settings == nil {
+			settings = map[string]interface{}{}
+		}
+		dockerVal, _ := settings["docker"].(map[string]interface{})
+		if dockerVal == nil {
+			dockerVal = map[string]interface{}{}
+		}
+		c.JSON(http.StatusOK, gin.H{"docker": dockerVal})
+	})
+
+	auth.POST("/api/settings/docker", func(c *gin.Context) {
+		if !validateCSRF(c) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+			return
+		}
+		v, ok := c.Get("userID")
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+			return
+		}
+		uid, ok := v.(int64)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+			return
+		}
+		var req struct {
+			Container  string `json:"container"`
+			Image      string `json:"image"`
+			Args       string `json:"args"`
+			Dockerfile string `json:"dockerfile"`
+			AutoRemove *bool  `json:"auto_remove"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+			return
+		}
+		// minimal validation/normalization
+		container := strings.TrimSpace(req.Container)
+		image := strings.TrimSpace(req.Image)
+		args := strings.TrimSpace(req.Args)
+		dockerfile := req.Dockerfile // allow multi-line, do not trim internally to preserve intended formatting
+		autoRemove := true
+		if req.AutoRemove != nil {
+			autoRemove = *req.AutoRemove
+		}
+		dockerObj := map[string]interface{}{
+			"container":   container,
+			"image":       image,
+			"args":        args,
+			"dockerfile":  dockerfile,
+			"auto_remove": autoRemove,
+		}
+		dbc := db.Get()
+		if dbc == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+			return
+		}
+		// Update docker key within JSONB using jsonb_set for atomic update
+		const upd = `UPDATE users SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), '{docker}', to_jsonb($1::json), true), updated_at=now() WHERE id=$2`
+		b, _ := json.Marshal(dockerObj)
+		if _, err := dbc.Exec(upd, string(b), uid); err != nil {
+			log.Printf("[DockerSettings] update err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update"})
 			return
 		}

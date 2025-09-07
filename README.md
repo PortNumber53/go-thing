@@ -191,3 +191,14 @@ To add new tools:
 4. Update documentation
 
 The tool system is designed to be easily extensible while maintaining security and consistency.
+
+
+
+## Running Notes
+
+```
+VITE_HMR_HOST=gothing.dev.portnumber53.com \
+VITE_HMR_PROTOCOL=wss \
+VITE_HMR_CLIENT_PORT=443 \
+npm run dev -- --host 127.0.0.1
+```

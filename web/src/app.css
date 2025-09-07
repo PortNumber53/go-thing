@@ -71,3 +71,10 @@ button#sendBtn:disabled { opacity: 0.6; cursor: not-allowed; }
 .btn { background: var(--primary); border: 1px solid var(--border); color: white; border-radius: 8px; padding: 8px 12px; cursor: pointer; font-weight: 600; }
 .icon { background: transparent; border: none; color: var(--text); font-size: 1.2rem; cursor: pointer; }
 @media (max-width: 640px) { .row { grid-template-columns: 1fr auto; gap: 6px; } button#sendBtn { height: 40px; padding: 0 14px; } }
+
+/* Settings layout: use full available width */
+.settings { width: 100%; max-width: none; margin: 0; }
+.settings .row { max-width: none; margin: 0; display: grid; grid-template-columns: 220px 1fr; }
+@media (max-width: 640px) {
+  .settings .row { grid-template-columns: 1fr; }
+}
