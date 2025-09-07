@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.1.7] - 2025-09-07
+
+### Added
+- Utility: new `utility/common.go` providing common helpers
+  - `RunDockerExec(container, args, timeout)` to run commands inside the running Docker container with timeout and capture stdout/stderr
+  - `EnsureSSHKeygenAvailable(container)` to check/install `openssh` (for `ssh-keygen`) within the container
+  - `DummyBcryptCompare(password)` to normalize login timing between unknown user vs wrong password
+
+### Changed
+- Security: Enforce strict WebSocket origin checks for shell broker upgrades
+  - Added `isAllowedWSOrigin` and wired it into `wsUpgrader.CheckOrigin` in `agent.go`
+  - Configurable allowlist via `[default] ALLOWED_ORIGINS` (comma-separated origins). When unset, falls back to proxy-aware same-origin using `utility.IsSecure`
+- Wiring updates:
+  - `routes.RegisterAPIDockerRoutes` and `routes.RegisterAPISSHRoutes` now use `utility.EnsureSSHKeygenAvailable` and `utility.RunDockerExec`
+  - `routes.RegisterLoginRoutes` now receives `utility.DummyBcryptCompare` for timing mitigation
+
 ## [2.1.6] - 2025-09-07
 
 ### Changed

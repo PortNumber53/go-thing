@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -13,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"regexp"
 	"strings"
@@ -24,7 +22,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5/pgconn"
-	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/time/rate"
 	"gopkg.in/ini.v1"
 
@@ -95,27 +92,6 @@ var lr = &loginRateLimiter{
 	ip:        make(map[string]*rate.Limiter),
 	ipSeen:    make(map[string]time.Time),
 	userFails: make(map[string]*userFail),
-}
-
-// dummyBcryptCompare performs a bcrypt comparison against a dummy hash to
-// normalize timing between "user not found" and "wrong password" cases.
-// The dummy hash is generated once at runtime to avoid shipping a hardcoded hash.
-var (
-	dummyHashOnce sync.Once
-	dummyHash     []byte
-)
-
-func dummyBcryptCompare(password string) {
-	dummyHashOnce.Do(func() {
-		// Generate a hash once; cost matches default user hashing cost.
-		h, err := bcrypt.GenerateFromPassword([]byte("dummy-password-for-timing-only"), bcrypt.DefaultCost)
-		if err != nil {
-			log.Fatalf("[Auth] CRITICAL: failed to generate dummy bcrypt hash for timing attack mitigation: %v", err)
-		}
-		dummyHash = h
-	})
-	// The dummyHash is guaranteed to be non-empty here due to log.Fatalf on error.
-	_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))
 }
 
 // getLimiter returns the IP limiter, creating one if needed.
@@ -198,46 +174,6 @@ func (l *loginRateLimiter) cleanup() {
 		}
 	}
 }
-
-// isSecure determines if the request is effectively HTTPS (directly or via proxy header)
-func isSecure(r *http.Request) bool {
-	if r.TLS != nil {
-		return true
-	}
-	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
-}
-
-// runDockerExec runs `docker exec` with the given args inside the specified container.
-// Returns stdout/stderr as strings with a timeout.
-func runDockerExec(container string, args []string, timeout time.Duration) (string, string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	full := append([]string{"exec", container}, args...)
-	cmd := exec.CommandContext(ctx, "docker", full...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return stdout.String(), stderr.String(), err
-}
-
-// ensureSSHKeygenAvailable ensures ssh-keygen exists in the container; if missing, installs openssh via pacman.
-func ensureSSHKeygenAvailable(container string) error {
-	if _, _, err := runDockerExec(container, []string{"ssh-keygen", "-V"}, 10*time.Second); err == nil {
-		return nil
-	}
-	// Attempt install on Arch base
-	if _, stderr, err := runDockerExec(container, []string{"bash", "-lc", "pacman -Sy --noconfirm && pacman -S --noconfirm openssh"}, 2*time.Minute); err != nil {
-		return fmt.Errorf("failed to install openssh in container: %v (stderr: %s)", err, strings.TrimSpace(stderr))
-	}
-	// Re-check
-	if _, _, err := runDockerExec(container, []string{"ssh-keygen", "-V"}, 10*time.Second); err != nil {
-		return fmt.Errorf("ssh-keygen still unavailable after install: %v", err)
-	}
-	return nil
-}
-
-// Session helpers moved to utility/session.go: utility.SetSessionCookie, utility.ClearSessionCookie, utility.ParseSession
 
 // isUniqueViolation returns true when err is a Postgres unique constraint violation (SQLSTATE 23505).
 func isUniqueViolation(err error) bool {
@@ -420,9 +356,9 @@ func isAllowedWSOrigin(r *http.Request) bool {
 	}
 
 	// Fallback: allow same-origin only
-	// Use shared isSecure(*http.Request) to determine scheme (TLS or proxy-aware).
+	// Use shared utility.IsSecure(*http.Request) to determine scheme (TLS or proxy-aware).
 	scheme := "http"
-	if isSecure(r) {
+	if utility.IsSecure(r) {
 		scheme = "https"
 	}
 	sameOrigin := fmt.Sprintf("%s://%s", scheme, r.Host)
@@ -537,8 +473,8 @@ func main() {
     // Docker SSH key endpoints moved to routes/api_docker_routes.go
     routes.RegisterAPIDockerRoutes(r, requireAuth(), routes.APIDockerDeps{
         EnsureDockerContainer:    toolsrv.EnsureDockerContainer,
-        EnsureSSHKeygenAvailable: ensureSSHKeygenAvailable,
-        RunDockerExec:            runDockerExec,
+        EnsureSSHKeygenAvailable: utility.EnsureSSHKeygenAvailable,
+        RunDockerExec:            utility.RunDockerExec,
     })
 
     // Login endpoint moved to routes/login_routes.go
@@ -547,7 +483,7 @@ func main() {
         IsLocked: func(user string) (bool, time.Duration) { return lr.isLocked(user) },
         RecordFailure: lr.recordFailure,
         RecordSuccess: lr.recordSuccess,
-        DummyBcryptCompare: dummyBcryptCompare,
+        DummyBcryptCompare: utility.DummyBcryptCompare,
         SetSessionCookie: func(c *gin.Context, userID int64) {
             utility.SetSessionCookie(c, userID, sessionSecret, sessionDuration)
         },
@@ -576,8 +512,8 @@ func main() {
     // Generate SSH keys inside the Docker container and return them (moved to routes)
     routes.RegisterAPISSHRoutes(auth, routes.APISSHDeps{
         EnsureDockerContainer:    toolsrv.EnsureDockerContainer,
-        EnsureSSHKeygenAvailable: ensureSSHKeygenAvailable,
-        RunDockerExec:            runDockerExec,
+        EnsureSSHKeygenAvailable: utility.EnsureSSHKeygenAvailable,
+        RunDockerExec:            utility.RunDockerExec,
     })
 
 	// GitHub direct API caller moved to routes/github_routes.go
