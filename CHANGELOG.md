@@ -15,9 +15,10 @@
 - Wiring updates:
   - `routes.RegisterAPIDockerRoutes` and `routes.RegisterAPISSHRoutes` now use `utility.EnsureSSHKeygenAvailable` and `utility.RunDockerExec`
   - `routes.RegisterLoginRoutes` now receives `utility.DummyBcryptCompare` for timing mitigation
- - Refactor: centralize Postgres unique violation detection to `utility.IsUniqueViolation`
-   - Added `utility/db_errors.go`
-   - Removed duplicate helper from `agent.go` and `routes/signup_routes.go`; updated signup route to call the utility function
+- Refactor: centralize Postgres unique violation detection to `utility.IsUniqueViolation`
+  - Added `utility/db_errors.go`
+  - Removed duplicate helper from `agent.go` and `routes/signup_routes.go`; updated signup route to call the utility function
+ - Cleanup: removed a leftover local `isUniqueViolation` helper and unused imports from `agent.go` to complete the refactor
 
 ## [2.1.6] - 2025-09-07
 

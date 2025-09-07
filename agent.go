@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"flag"
 	"fmt"
 
@@ -21,7 +20,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/jackc/pgx/v5/pgconn"
 	"golang.org/x/time/rate"
 	"gopkg.in/ini.v1"
 
@@ -173,15 +171,6 @@ func (l *loginRateLimiter) cleanup() {
 			delete(l.userFails, user)
 		}
 	}
-}
-
-// isUniqueViolation returns true when err is a Postgres unique constraint violation (SQLSTATE 23505).
-func isUniqueViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		return pgErr.Code == "23505"
-	}
-	return false
 }
 
 // getOrCreateAnyThread returns the most recently updated thread id if one exists,
