@@ -2,9 +2,11 @@ package routes
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -16,6 +18,79 @@ import (
 
 // RegisterGithubRoutes registers the GitHub webhook endpoint with HMAC validation
 func RegisterGithubRoutes(r *gin.Engine) {
+	// Direct GitHub API caller (CSRF protected)
+	r.POST("/github/call", func(c *gin.Context) {
+		if !utility.ValidateCSRF(c) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+			return
+		}
+		// limit body to 1MB
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+		var req struct {
+			Method string                 `json:"method"`
+			Path   string                 `json:"path"`
+			Query  map[string]interface{} `json:"query"`
+			Body   interface{}            `json:"body"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+			return
+		}
+		m := strings.ToUpper(strings.TrimSpace(req.Method))
+		if m == "" {
+			m = "GET"
+		}
+		p := strings.TrimSpace(req.Path)
+		if p == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "path is required"})
+			return
+		}
+		q := url.Values{}
+		for k, v := range req.Query {
+			key := strings.TrimSpace(k)
+			if key == "" {
+				continue
+			}
+			switch tv := v.(type) {
+			case string:
+				if tv != "" {
+					q.Set(key, tv)
+				}
+			case float64:
+				q.Set(key, strconv.FormatInt(int64(tv), 10))
+			case bool:
+				q.Set(key, strconv.FormatBool(tv))
+			case []interface{}:
+				// join as comma list
+				parts := make([]string, 0, len(tv))
+				for _, iv := range tv {
+					parts = append(parts, fmt.Sprint(iv))
+				}
+				if len(parts) > 0 {
+					q.Set(key, strings.Join(parts, ","))
+				}
+			default:
+				// fallback to fmt.Sprint
+				s := fmt.Sprint(tv)
+				if strings.TrimSpace(s) != "" {
+					q.Set(key, s)
+				}
+			}
+		}
+		status, body, hdrs, err := utility.GitHubDo(m, p, q, req.Body)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		// Try JSON parse
+		var obj interface{}
+		if len(body) > 0 && json.Unmarshal(body, &obj) == nil {
+			c.JSON(status, gin.H{"ok": status >= 200 && status < 300, "data": obj, "headers": hdrs})
+			return
+		}
+		c.JSON(status, gin.H{"ok": status >= 200 && status < 300, "data": string(body), "headers": hdrs})
+	})
+
 	r.POST("/webhook/github", func(c *gin.Context) {
 		// Read body with a reasonable limit
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20) // 1MB

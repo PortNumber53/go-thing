@@ -17,7 +17,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -906,78 +905,7 @@ func main() {
         RunDockerExec:            runDockerExec,
     })
 
-	// GitHub direct API caller (CSRF protected)
-	r.POST("/github/call", func(c *gin.Context) {
-		if !utility.ValidateCSRF(c) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
-			return
-		}
-		// limit body to 1MB
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
-		var req struct {
-			Method string                 `json:"method"`
-			Path   string                 `json:"path"`
-			Query  map[string]interface{} `json:"query"`
-			Body   interface{}            `json:"body"`
-		}
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
-			return
-		}
-		m := strings.ToUpper(strings.TrimSpace(req.Method))
-		if m == "" {
-			m = "GET"
-		}
-		p := strings.TrimSpace(req.Path)
-		if p == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "path is required"})
-			return
-		}
-		q := url.Values{}
-		for k, v := range req.Query {
-			key := strings.TrimSpace(k)
-			if key == "" {
-				continue
-			}
-			switch tv := v.(type) {
-			case string:
-				if tv != "" {
-					q.Set(key, tv)
-				}
-			case float64:
-				q.Set(key, strconv.FormatInt(int64(tv), 10))
-			case bool:
-				q.Set(key, strconv.FormatBool(tv))
-			case []interface{}:
-				// join as comma list
-				parts := make([]string, 0, len(tv))
-				for _, iv := range tv {
-					parts = append(parts, fmt.Sprint(iv))
-				}
-				if len(parts) > 0 {
-					q.Set(key, strings.Join(parts, ","))
-				}
-			default:
-				// fallback to fmt.Sprint
-				s := fmt.Sprint(tv)
-				if strings.TrimSpace(s) != "" {
-					q.Set(key, s)
-				}
-			}
-		}
-		status, body, hdrs, err := utility.GitHubDo(m, p, q, req.Body)
-		if err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-			return
-		}
-		// Try JSON parse
-		var obj interface{}
-		if len(body) > 0 && json.Unmarshal(body, &obj) == nil {
-			c.JSON(status, gin.H{"ok": status >= 200 && status < 300, "data": obj, "headers": hdrs})
-			return
-		}
-		c.JSON(status, gin.H{"ok": status >= 200 && status < 300, "data": string(body), "headers": hdrs})
-	})
+	// GitHub direct API caller moved to routes/github_routes.go
 
 	routes.RegisterGithubRoutes(r)
 
@@ -1095,49 +1023,7 @@ func main() {
 		}
 		closeDone()
 	})
-	r.POST("/chat", func(c *gin.Context) {
-		var req struct {
-			Message string `json:"message" binding:"required"`
-		}
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
-			return
-		}
-		threadID, err := getOrCreateAnyThread()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to ensure thread"})
-			return
-		}
-		if err := utility.StoreMessage(threadID, "user", req.Message, map[string]interface{}{"source": "http"}); err != nil {
-			log.Printf("[DB] Failed to store user message: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist user message"})
-			return
-		}
-		// Load last persisted context for this thread
-		initialCtx, err := utility.GetLastContextForThread(threadID)
-		if err != nil {
-			log.Printf("[Context] load error: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load conversation context"})
-			return
-		}
-		log.Printf("[Context] Using initial current_context for HTTP: %v", initialCtx)
-		resp, updatedCtx, err := utility.GeminiAPIHandler(c.Request.Context(), req.Message, initialCtx)
-		if err != nil {
-			log.Printf("[Chat] gemini error: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process message. Please try again later."})
-			return
-		}
-		if strings.TrimSpace(resp) == "" {
-			resp = "**No response available. Please try again.**"
-		}
-		log.Printf("[Context] Persisting updated current_context (HTTP): %v", updatedCtx)
-		if err := utility.StoreMessage(threadID, "assistant", resp, map[string]interface{}{"source": "http", "current_context": updatedCtx}); err != nil {
-			log.Printf("[DB] Failed to store assistant message: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist assistant message"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"response": resp, "thread_id": threadID})
-	})
+	routes.RegisterChatRoutes(r, getOrCreateAnyThread)
     // Slack webhook routes moved to routes/slack_routes.go
     routes.RegisterSlackRoutes(r, getOrCreateAnyThread)
 	r.POST("/webhook", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "webhook received"}) })
