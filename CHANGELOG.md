@@ -23,6 +23,10 @@
   - Docker SSH key endpoints (download/generate) → `routes/api_docker_routes.go` (RegisterAPIDockerRoutes)
   - Current user endpoint → `routes/me_routes.go` (RegisterMeRoutes)
 
+### Jira tools refactor
+- Extracted Jira create-issue helpers and executor from `tools/jira_issue_ops.go` into `tools/jira_issue_create_ops.go`.
+- No behavior change; build passes.
+
 ## [2.1.5] - 2025-09-07
 
 ### Added
