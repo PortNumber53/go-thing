@@ -20,6 +20,7 @@
   - Jira webhook → `routes/jira_routes.go` (RegisterJiraRoutes)
   - Shell session + WebSocket endpoints → `routes/shell_routes.go` (RegisterShellRoutes; reuses existing wsUpgrader for origin policy)
   - Authenticated Settings APIs (profile, password, docker) → `routes/api_settings_routes.go` (RegisterAPISettingsRoutes)
+  - Docker SSH key endpoints (download/generate) → `routes/api_docker_routes.go` (RegisterAPIDockerRoutes)
 
 ## [2.1.5] - 2025-09-07
 
