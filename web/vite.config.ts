@@ -6,7 +6,7 @@ import os from 'os'
 import path from 'path'
 
 // https://vitejs.dev/config/
-const proxyPaths = ['/chat', '/webhook', '/signup', '/login', '/logout', '/me', '/csrf'] as const
+const proxyPaths = ['/chat', '/webhook', '/signup', '/login', '/logout', '/me', '/csrf', '/api'] as const
 const proxyConfig = proxyPaths.reduce<Record<string, { target: string; changeOrigin: boolean }>>((acc, path) => {
   acc[path] = {
     target: 'http://127.0.0.1:7866',
@@ -48,10 +48,15 @@ function getAllowedHostsFromINI(): string[] | null {
   }
 }
 
-const allowedHosts = getAllowedHostsFromINI() ?? [
-  'gothing.stage.portnumber53.com',
-  'gothing.dev.portnumber53.com',
-]
+const allowedHosts = Array.from(new Set([
+  ...(getAllowedHostsFromINI() ?? [
+    'gothing.stage.portnumber53.com',
+    'gothing.dev.portnumber53.com',
+    'zenbook.tail87917.ts.net',
+  ]),
+  'localhost',
+  '127.0.0.1',
+]))
 
 export default defineConfig({
   plugins: [react()],
@@ -59,5 +64,30 @@ export default defineConfig({
     allowedHosts,
     port: 5174,
     proxy: proxyConfig,
+    // Optional: enable polling for filesystems where native FS events are unreliable (NFS/WSL/Docker bind mounts)
+    watch: (() => {
+      const usePolling = process.env.VITE_WATCH_POLL === '1' || process.env.VITE_WATCH_POLL === 'true'
+      if (!usePolling) return undefined
+      const interval = process.env.VITE_WATCH_INTERVAL ? Number(process.env.VITE_WATCH_INTERVAL) : 200
+      return { usePolling, interval }
+    })(),
+    // Ensure Vite HMR websocket connects to the public HTTPS domain when behind a proxy
+    // Only enable this override when VITE_HMR_HOST is provided; otherwise, let Vite default for localhost.
+    hmr: (() => {
+      const envHost = process.env.VITE_HMR_HOST
+      if (!envHost) return undefined
+      const envProtocol = process.env.VITE_HMR_PROTOCOL
+      const envClientPort = process.env.VITE_HMR_CLIENT_PORT
+      const host = envHost
+      const protocol = (envProtocol || 'wss') as 'ws' | 'wss'
+      const clientPort = envClientPort ? Number(envClientPort) : 443
+      const path = '/vite-hmr'
+      return { protocol, host, clientPort, path }
+    })(),
+    // Helps Vite construct absolute URLs in proxy scenarios; only set when overriding HMR
+    origin: (() => {
+      const envHost = process.env.VITE_HMR_HOST
+      return envHost ? `https://${envHost}` : undefined
+    })(),
   },
 })

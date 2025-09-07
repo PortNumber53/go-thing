@@ -31,40 +31,6 @@ Get disk space information for a specified path.
 
 **Usage:**
 ```
-
-## Database Migrations
-
-Migrations are simple SQL files stored in the `migrations/` directory.
-
-- On startup, the agent automatically applies all pending "up" migrations.
-- You can manage migrations manually with the CLI.
-
-### File naming conventions
-
-- Up migrations: either legacy `NNNN_name.sql` or explicit `NNNN_name.up.sql`
-- Down migrations: `NNNN_name.down.sql`
-
-The migration engine prefers `.up.sql`/`.down.sql` pairs but will also accept legacy `.sql` for up.
-
-### CLI usage
-
-Run from the project root:
-
-```bash
-# Apply all pending up migrations
-go run agent.go migrate up
-
-# Apply at most 2 up migrations
-go run agent.go migrate up --step 2
-
-# Roll back the last migration
-go run agent.go migrate down --step 1
-
-# Show status
-go run agent.go migrate status
-```
-
-Migrations are tracked in the `schema_migrations` table.
 /tool disk_space                    # Check current directory
 /tool disk_space --path /home       # Check /home directory
 /tool disk_space --help             # Show help
@@ -106,13 +72,16 @@ Write content to a file in the configured write directory.
    SLACK_BOT_TOKEN=xoxb-your_slack_bot_token_here
    CHROOT_DIR=/home/username/writable_directory
    [postgres]
-   HOST=localhost
-   PORT=5432
-   USERNAME=your_username
-   PASSWORD=your_password
-   DATABASE=your_database
+   # Either provide DB_DSN or individual fields below
+   # DB_DSN=postgres://user:pass@localhost:5432/your_database?sslmode=disable
+   DB_HOST=localhost
+   DB_PORT=5432
+   DB_USER=your_username
+   DB_PASSWORD=your_password
+   DB_NAME=your_database
+   DB_SSLMODE=disable
    # Optional: directory containing SQL migrations (default: ./migrations)
-   MIGRATIONS_DIR=./migrations
+   DB_MIGRATIONS_DIR=./migrations
    ```
 
 2. **Quick Start** (Recommended):
@@ -222,3 +191,14 @@ To add new tools:
 4. Update documentation
 
 The tool system is designed to be easily extensible while maintaining security and consistency.
+
+
+
+## Running Notes
+
+```
+VITE_HMR_HOST=gothing.dev.portnumber53.com \
+VITE_HMR_PROTOCOL=wss \
+VITE_HMR_CLIENT_PORT=443 \
+npm run dev -- --host 127.0.0.1
+```
