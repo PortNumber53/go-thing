@@ -2,17 +2,12 @@ package routes
 
 import (
     "net/http"
-    "regexp"
     "strings"
 
     "github.com/gin-gonic/gin"
     "golang.org/x/crypto/bcrypt"
     "go-thing/db"
     "go-thing/utility"
-)
-
-var (
-    emailRegexCompiled = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 )
 
 // RegisterSignupRoutes registers the CSRF-protected signup endpoint
@@ -39,7 +34,7 @@ func RegisterSignupRoutes(r *gin.Engine) {
             c.JSON(http.StatusBadRequest, gin.H{"error": "all fields are required"})
             return
         }
-        if !emailRegexCompiled.MatchString(u) {
+        if !utility.IsValidEmail(u) {
             c.JSON(http.StatusBadRequest, gin.H{"error": "username must be a valid email"})
             return
         }

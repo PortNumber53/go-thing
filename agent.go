@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -52,19 +51,7 @@ type ToolResponse struct {
 	Error   string      `json:"error,omitempty"`
 }
 
-// emailRegex caches a simple email validation regex.
-var (
-	emailRegexOnce     sync.Once
-	emailRegexCompiled *regexp.Regexp
-)
-
-func emailRegex() *regexp.Regexp {
-	emailRegexOnce.Do(func() {
-		// Simple pattern: non-space/non-@ local, @, non-space/non-@ domain, dot, tld
-		emailRegexCompiled = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
-	})
-	return emailRegexCompiled
-}
+// Email validation moved to utility/validation.go (utility.EmailRegex / utility.IsValidEmail)
 
 // sessionSecret holds the HMAC key for signing session cookies
 var sessionSecret []byte
