@@ -23,6 +23,7 @@
  - Jira: Switch to thread-per-issue for webhook events. The handler in `routes/jira_routes.go` now uses `utility.GetOrCreateThreadByTitle("Jira: <ISSUE-KEY>")` so all events for the same issue accumulate in a single thread. Previously a new thread was created per event.
  - Validation: Centralized email validation. Added `utility/validation.go` with `EmailRegex()`/`IsValidEmail()`. Updated `routes/signup_routes.go` to use it and removed the duplicate regex from `agent.go`.
  - Slack: Restored error logging for App Home publishing in `routes/slack_routes.go` when `utility.PublishSlackHomeTab(...)` fails.
+ - Migrations: Moved CLI logic from `agent.go` (`runMigrateCLI`) to `utility/migrations.go` as exported `utility.RunMigrateCLI`. Updated `main()` to call the new function and removed the local implementation.
 
 ## [2.1.6] - 2025-09-07
 
