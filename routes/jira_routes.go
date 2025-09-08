@@ -236,7 +236,11 @@ func RegisterJiraRoutes(r *gin.Engine) {
 
 		// Dispatch a background Gemini task to process this event (log-only)
 		go func(promptStr, issueKey string) {
-			threadID, err := utility.CreateNewThread("Jira Webhook Event")
+			title := "Jira Webhook Event"
+			if strings.TrimSpace(issueKey) != "" {
+				title = "Jira: " + strings.TrimSpace(issueKey)
+			}
+			threadID, err := utility.GetOrCreateThreadByTitle(title)
 			if err != nil {
 				log.Printf("[JiraWebhook][DB] create thread error: %v", err)
 				return
