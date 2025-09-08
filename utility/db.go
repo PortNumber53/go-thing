@@ -1,6 +1,7 @@
 package utility
 
 import (
+    "database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -20,6 +21,27 @@ func CreateNewThread(title string) (int64, error) {
 		return 0, err
 	}
 	return id, nil
+}
+
+// GetOrCreateThreadByTitle finds the most recently updated thread with the given title,
+// or creates a new one if none exist. Returns the thread ID.
+func GetOrCreateThreadByTitle(title string) (int64, error) {
+    dbc := db.Get()
+    if dbc == nil {
+        return 0, fmt.Errorf("db not initialized")
+    }
+    var id int64
+    // Prefer the most recently updated matching title, if any
+    err := dbc.QueryRow(`SELECT id FROM threads WHERE title = $1 ORDER BY updated_at DESC LIMIT 1`, title).Scan(&id)
+    if err == nil {
+        return id, nil
+    }
+    if err == sql.ErrNoRows {
+        // Not found: create new
+        return CreateNewThread(title)
+    }
+    // Other DB error
+    return 0, err
 }
 
 // StoreMessage inserts a message into the specified thread.

@@ -1,5 +1,58 @@
 # Changelog
 
+## [2.1.7] - 2025-09-07
+
+### Added
+- Utility: new `utility/common.go` providing common helpers
+  - `RunDockerExec(container, args, timeout)` to run commands inside the running Docker container with timeout and capture stdout/stderr
+  - `EnsureSSHKeygenAvailable(container)` to check/install `openssh` (for `ssh-keygen`) within the container
+  - `DummyBcryptCompare(password)` to normalize login timing between unknown user vs wrong password
+
+### Changed
+- Security: Enforce strict WebSocket origin checks for shell broker upgrades
+  - Added `isAllowedWSOrigin` and wired it into `wsUpgrader.CheckOrigin` in `agent.go`
+  - Configurable allowlist via `[default] ALLOWED_ORIGINS` (comma-separated origins). When unset, falls back to proxy-aware same-origin using `utility.IsSecure`
+- Wiring updates:
+  - `routes.RegisterAPIDockerRoutes` and `routes.RegisterAPISSHRoutes` now use `utility.EnsureSSHKeygenAvailable` and `utility.RunDockerExec`
+  - `routes.RegisterLoginRoutes` now receives `utility.DummyBcryptCompare` for timing mitigation
+- Refactor: centralize Postgres unique violation detection to `utility.IsUniqueViolation`
+  - Added `utility/db_errors.go`
+  - Removed duplicate helper from `agent.go` and `routes/signup_routes.go`; updated signup route to call the utility function
+- Cleanup: removed a leftover local `isUniqueViolation` helper and unused imports from `agent.go` to complete the refactor
+- GitHub: Restored AI follow-up logic for PR reviews from `gemini-code-assist[bot]` after routes extraction. The handler in `routes/github_routes.go` now detects `pull_request_review` and `pull_request_review_comment`, extracts the review/comment body and PR number, and asynchronously invokes `utility.GeminiAPIHandler` with a 3-minute timeout. The response is logged.
+- Jira: Switch to thread-per-issue for webhook events. The handler in `routes/jira_routes.go` now uses `utility.GetOrCreateThreadByTitle("Jira: <ISSUE-KEY>")` so all events for the same issue accumulate in a single thread. Previously a new thread was created per event.
+- Validation: Centralized email validation. Added `utility/validation.go` with `EmailRegex()`/`IsValidEmail()`. Updated `routes/signup_routes.go` to use it and removed the duplicate regex from `agent.go`.
+- Slack: Restored error logging for App Home publishing in `routes/slack_routes.go` when `utility.PublishSlackHomeTab(...)` fails.
+- Migrations: Moved CLI logic from `agent.go` (`runMigrateCLI`) to `utility/migrations.go` as exported `utility.RunMigrateCLI`. Updated `main()` to call the new function and removed the local implementation.
+ - Maintainability: Replaced hardcoded occurrences of the GitHub bot username with a package-level constant `geminiBotUsername` in `routes/github_routes.go`.
+
+## [2.1.6] - 2025-09-07
+
+### Changed
+- Backend refactor: moved several helpers from `agent.go` into the `utility/` package for reuse and maintainability.
+  - Password strength checker → `utility/password.go` (`IsStrongPassword`)
+  - CSRF + HTTPS/HMAC helpers → `utility/security.go` (`NewCSRFToken`, `SetCSRFCookie`, `ValidateCSRF`, `IsSecure`, `IsSecureRequest`, `HMACSHA256`, `HMACEqual`)
+  - Session helpers → `utility/session.go` (`SetSessionCookie`, `ClearSessionCookie`, `ParseSession`)
+- Updated references across `agent.go` and tests (`agent_github_test.go`).
+- Removed unused imports from `agent.go` after extraction.
+
+### Routes extraction
+- Moved HTTP handlers out of `agent.go` into `routes/`:
+  - Slack webhook → `routes/slack_routes.go` (RegisterSlackRoutes)
+  - GitHub webhook → `routes/github_routes.go` (RegisterGithubRoutes)
+  - Signup → `routes/signup_routes.go` (RegisterSignupRoutes)
+  - Login → `routes/login_routes.go` (RegisterLoginRoutes; injected limiter/session helpers)
+  - Authenticated SSH key generation → `routes/api_ssh_routes.go` (RegisterAPISSHRoutes; injected Docker/ssh-keygen helpers)
+  - Jira webhook → `routes/jira_routes.go` (RegisterJiraRoutes)
+  - Shell session + WebSocket endpoints → `routes/shell_routes.go` (RegisterShellRoutes; reuses existing wsUpgrader for origin policy)
+  - Authenticated Settings APIs (profile, password, docker) → `routes/api_settings_routes.go` (RegisterAPISettingsRoutes)
+  - Docker SSH key endpoints (download/generate) → `routes/api_docker_routes.go` (RegisterAPIDockerRoutes)
+  - Current user endpoint → `routes/me_routes.go` (RegisterMeRoutes)
+
+### Jira tools refactor
+- Extracted Jira create-issue helpers and executor from `tools/jira_issue_ops.go` into `tools/jira_issue_create_ops.go`.
+- No behavior change; build passes.
+
 ## [2.1.5] - 2025-09-07
 
 ### Added

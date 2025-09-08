@@ -4,12 +4,14 @@ import (
 	"encoding/hex"
 	"strings"
 	"testing"
+
+	"go-thing/utility"
 )
 
 func TestHMACSha256_FormatAndLength(t *testing.T) {
 	secret := "topsecret"
 	body := []byte("hello world")
-	sig := hmacSha256(secret, body)
+	sig := utility.HMACSHA256(secret, body)
 	if !strings.HasPrefix(sig, "sha256=") {
 		t.Fatalf("expected prefix sha256=, got %q", sig)
 	}
@@ -26,13 +28,13 @@ func TestHMACSha256_FormatAndLength(t *testing.T) {
 func TestHMACEqual_CaseInsensitive(t *testing.T) {
 	secret := "s3cr3t"
 	body := []byte("payload")
-	want := hmacSha256(secret, body)
+	want := utility.HMACSHA256(secret, body)
 	upper := strings.ToUpper(want)
 	lower := strings.ToLower(want)
-	if !hmacEqual(upper, want) {
+	if !utility.HMACEqual(upper, want) {
 		t.Fatalf("expected upper to equal want in constant time")
 	}
-	if !hmacEqual(lower, want) {
+	if !utility.HMACEqual(lower, want) {
 		t.Fatalf("expected lower to equal want in constant time")
 	}
 }
@@ -40,9 +42,9 @@ func TestHMACEqual_CaseInsensitive(t *testing.T) {
 func TestHMACEqual_NotEqual(t *testing.T) {
 	secret := "a"
 	body := []byte("x")
-	good := hmacSha256(secret, body)
-	bad := hmacSha256("b", body)
-	if hmacEqual(bad, good) {
+	good := utility.HMACSHA256(secret, body)
+	bad := utility.HMACSHA256("b", body)
+	if utility.HMACEqual(bad, good) {
 		t.Fatalf("expected signatures to differ")
 	}
 }
