@@ -19,6 +19,7 @@
   - Added `utility/db_errors.go`
   - Removed duplicate helper from `agent.go` and `routes/signup_routes.go`; updated signup route to call the utility function
  - Cleanup: removed a leftover local `isUniqueViolation` helper and unused imports from `agent.go` to complete the refactor
+ - GitHub: Restored AI follow-up logic for PR reviews from `gemini-code-assist[bot]` after routes extraction. The handler in `routes/github_routes.go` now detects `pull_request_review` and `pull_request_review_comment`, extracts the review/comment body and PR number, and asynchronously invokes `utility.GeminiAPIHandler` with a 3-minute timeout. The response is logged.
 
 ## [2.1.6] - 2025-09-07
 

@@ -1,6 +1,7 @@
 package routes
 
 import (
+    "context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -211,7 +212,79 @@ func RegisterGithubRoutes(r *gin.Engine) {
 		}
 		log.Printf("[GitHubWebhook] parsed action=%q repo=%q full=%q id=%q sender=%q installation=%q ref=%q before=%q after=%q pusher=%q", action, repoName, repoFull, repoID, sender, installation, ref, before, after, pusher)
 
-		// Downstream typed parsing and AI follow-up may occur elsewhere in the handler chain; here we simply ack
+		// Restore AI follow-up for PR reviews from gemini-code-assist[bot]
+		// We only trigger on pull_request_review and pull_request_review_comment events authored by this bot.
+		if evt == "pull_request_review" || evt == "pull_request_review_comment" {
+			// Verify author is gemini-code-assist[bot]
+			isFromGeminiBot := false
+			var reviewBody string
+			var prNumber int64
+			if evt == "pull_request_review" {
+				if rv, ok := payload["review"].(map[string]interface{}); ok {
+					// author
+					if u, ok := rv["user"].(map[string]interface{}); ok {
+						if lg, ok := u["login"].(string); ok && lg == "gemini-code-assist[bot]" {
+							isFromGeminiBot = true
+						}
+					}
+					if b, ok := rv["body"].(string); ok {
+						reviewBody = b
+					}
+				}
+				// PR number
+				if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
+					switch nv := pr["number"].(type) {
+					case float64:
+						prNumber = int64(nv)
+					case json.Number:
+						if n, err := nv.Int64(); err == nil { prNumber = n }
+					case string:
+						if n, err := strconv.ParseInt(nv, 10, 64); err == nil { prNumber = n }
+					}
+				}
+			} else if evt == "pull_request_review_comment" {
+				if cm, ok := payload["comment"].(map[string]interface{}); ok {
+					if u, ok := cm["user"].(map[string]interface{}); ok {
+						if lg, ok := u["login"].(string); ok && lg == "gemini-code-assist[bot]" {
+							isFromGeminiBot = true
+						}
+					}
+					if b, ok := cm["body"].(string); ok {
+						reviewBody = b
+					}
+				}
+				if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
+					switch nv := pr["number"].(type) {
+					case float64:
+						prNumber = int64(nv)
+					case json.Number:
+						if n, err := nv.Int64(); err == nil { prNumber = n }
+					case string:
+						if n, err := strconv.ParseInt(nv, 10, 64); err == nil { prNumber = n }
+					}
+				}
+			}
+
+			if isFromGeminiBot && strings.TrimSpace(reviewBody) != "" && prNumber > 0 {
+				log.Printf("[GitHubWebhook][AI] triggering follow-up for repo=%s pr#%d event=%s body_len=%d", repoFull, prNumber, evt, len(reviewBody))
+				go func(repo string, pr int64, body string, event string) {
+					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+					defer cancel()
+					task := fmt.Sprintf("You are assisting with a GitHub PR review follow-up. Repo: %s, PR #%d. Review event: %s.\nReview text:\n%s\n\nApply actionable suggestions if appropriate using available tools. When there is nothing left to do, respond with 'ALL_DONE!'.", repo, pr, event, body)
+					resp, _, err := utility.GeminiAPIHandler(ctx, task, nil)
+					if err != nil {
+						log.Printf("[GitHubWebhook][AI] Gemini error for %s#%d: %v", repo, pr, err)
+						return
+					}
+					// For now, just log the response; posting back to GitHub can be added later.
+					trim := resp
+					if len(trim) > 500 { trim = trim[:500] + "…" }
+					log.Printf("[GitHubWebhook][AI] Gemini response for %s#%d: %s", repo, pr, trim)
+				}(repoFull, prNumber, reviewBody, evt)
+			}
+		}
+
+		// Downstream typed parsing and other handlers may process further; acknowledge webhook
 		_ = time.Now() // ensure time import retained for possible future use
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
