@@ -17,6 +17,10 @@ import (
 	"go-thing/utility"
 )
 
+// geminiBotUsername is the GitHub username of the Gemini code assistant bot.
+// Defining it as a constant avoids magic strings and eases future changes.
+const geminiBotUsername = "gemini-code-assist[bot]"
+
 // RegisterGithubRoutes registers the GitHub webhook endpoint with HMAC validation
 func RegisterGithubRoutes(r *gin.Engine) {
 	// Direct GitHub API caller (CSRF protected)
@@ -223,7 +227,7 @@ func RegisterGithubRoutes(r *gin.Engine) {
 				if rv, ok := payload["review"].(map[string]interface{}); ok {
 					// author
 					if u, ok := rv["user"].(map[string]interface{}); ok {
-						if lg, ok := u["login"].(string); ok && lg == "gemini-code-assist[bot]" {
+						if lg, ok := u["login"].(string); ok && lg == geminiBotUsername {
 							isFromGeminiBot = true
 						}
 					}
@@ -245,7 +249,7 @@ func RegisterGithubRoutes(r *gin.Engine) {
 			} else if evt == "pull_request_review_comment" {
 				if cm, ok := payload["comment"].(map[string]interface{}); ok {
 					if u, ok := cm["user"].(map[string]interface{}); ok {
-						if lg, ok := u["login"].(string); ok && lg == "gemini-code-assist[bot]" {
+						if lg, ok := u["login"].(string); ok && lg == geminiBotUsername {
 							isFromGeminiBot = true
 						}
 					}
@@ -253,6 +257,7 @@ func RegisterGithubRoutes(r *gin.Engine) {
 						reviewBody = b
 					}
 				}
+				// PR number
 				if pr, ok := payload["pull_request"].(map[string]interface{}); ok {
 					switch nv := pr["number"].(type) {
 					case float64:
