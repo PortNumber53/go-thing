@@ -2,6 +2,7 @@ package routes
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 
@@ -87,7 +88,7 @@ func RegisterSlackRoutes(r *gin.Engine, getOrCreateAnyThread func() (int64, erro
 					hash = strings.TrimSpace(ah.View.Hash)
 				}
 				if err := utility.PublishSlackHomeTab(c.Request.Context(), ah.User, hash); err != nil {
-					// logging remains in agent layer; ignore here
+					log.Printf("[Slack Home] publish failed for user %s: %v", ah.User, err)
 				}
 				c.JSON(http.StatusOK, gin.H{"status": "home updated"})
 				return
