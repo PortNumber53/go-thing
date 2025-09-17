@@ -467,6 +467,9 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
   const [copyingWhich, setCopyingWhich] = React.useState<
     "public" | "private" | null
   >(null);
+  const [downloadingWhich, setDownloadingWhich] = React.useState<
+    "public" | "private" | null
+  >(null);
 
   React.useEffect(() => {
     let aborted = false;
@@ -692,6 +695,7 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
   async function downloadDockerKey(which: "public" | "private") {
     try {
       setMessage(null);
+      setDownloadingWhich(which);
       const res = await fetch(
         `/api/docker/ssh-keys/download?which=${encodeURIComponent(which)}`,
         {
@@ -707,6 +711,8 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
       download(text, filename);
     } catch (e: any) {
       setMessage(`Failed to download ${which} key: ${e?.message ?? e}`);
+    } finally {
+      setDownloadingWhich(null);
     }
   }
 
@@ -1015,14 +1021,20 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
                   <button
                     type="button"
                     onClick={() => downloadDockerKey("public")}
+                    disabled={downloadingWhich !== null}
                   >
-                    Download public key
+                    {downloadingWhich === "public"
+                      ? "Downloading…"
+                      : "Download public key"}
                   </button>
                   <button
                     type="button"
                     onClick={() => downloadDockerKey("private")}
+                    disabled={downloadingWhich !== null}
                   >
-                    Download private key
+                    {downloadingWhich === "private"
+                      ? "Downloading…"
+                      : "Download private key"}
                   </button>
                   <button
                     type="button"
