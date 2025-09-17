@@ -2,10 +2,12 @@ package tools
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -23,7 +25,8 @@ const (
 
 // EnsureDockerContainer ensures an Arch-based container is running with CHROOT_DIR mounted at /app.
 // Optional config keys in [default]:
-//   DOCKER_CONTAINER_NAME, DOCKER_IMAGE, DOCKER_EXTRA_ARGS, DOCKER_AUTO_REMOVE
+//
+//	DOCKER_CONTAINER_NAME, DOCKER_IMAGE, DOCKER_EXTRA_ARGS, DOCKER_AUTO_REMOVE
 func EnsureDockerContainer() (string, error) {
 	name, image, extra, absChroot, err := resolveDockerSettings()
 	if err != nil {
@@ -54,12 +57,12 @@ func EnsureDockerContainer() (string, error) {
 
 // Cached settings to avoid repeated config reads
 var (
-	settingsOnce              sync.Once
-	cachedName                string
-	cachedImage               string
-	cachedExtra               string
-	cachedAbsChroot           string
-	cachedSettingsLoadErr     error
+	settingsOnce          sync.Once
+	cachedName            string
+	cachedImage           string
+	cachedExtra           string
+	cachedAbsChroot       string
+	cachedSettingsLoadErr error
 )
 
 // resolveDockerSettings reads INI config once and returns (name, image, extraArgs, absChroot)
@@ -104,12 +107,84 @@ func resolveDockerSettings() (string, string, string, string, error) {
 	return cachedName, cachedImage, cachedExtra, cachedAbsChroot, cachedSettingsLoadErr
 }
 
+// imageSupportsArm64 returns true if the given image manifest advertises linux/arm64.
+// If the manifest cannot be inspected, it returns false with the error.
+func imageSupportsArm64(image string) (bool, error) {
+	out, err := exec.Command("docker", "manifest", "inspect", image).Output()
+	if err != nil {
+		return false, err
+	}
+	// Prefer parsing JSON over substring checks to avoid false positives
+	// Case 1: Manifest list/index with per-platform entries
+	type platform struct {
+		Architecture string `json:"architecture"`
+		OS           string `json:"os"`
+	}
+	type manifestIndex struct {
+		Manifests []struct {
+			Platform platform `json:"platform"`
+		} `json:"manifests"`
+	}
+	var idx manifestIndex
+	if err := json.Unmarshal(out, &idx); err == nil && len(idx.Manifests) > 0 {
+		for _, m := range idx.Manifests {
+			if strings.EqualFold(m.Platform.OS, "linux") && m.Platform.Architecture == "arm64" {
+				return true, nil
+			}
+		}
+	}
+	// Case 2: Single manifest may have architecture/os at top-level or under config
+	var generic map[string]interface{}
+	if err := json.Unmarshal(out, &generic); err == nil {
+		if arch, ok := generic["architecture"].(string); ok {
+			osv, _ := generic["os"].(string)
+			if arch == "arm64" && (osv == "" || strings.EqualFold(osv, "linux")) {
+				return true, nil
+			}
+		}
+		if cfg, ok := generic["config"].(map[string]interface{}); ok {
+			if arch, ok := cfg["architecture"].(string); ok && arch == "arm64" {
+				osv, _ := cfg["os"].(string)
+				if osv == "" || strings.EqualFold(osv, "linux") {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
+}
+
+// platformArgsIfNeeded determines whether we should add a --platform flag automatically.
+// On Apple Silicon (darwin/arm64), many images (like archlinux) do not have arm64 builds.
+// If no platform is already specified via extra args and the image lacks arm64, we force amd64.
+func platformArgsIfNeeded(image, extra string) []string {
+    if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+        hasPlatform := false
+        for _, arg := range strings.Fields(extra) {
+            if strings.HasPrefix(arg, "--platform") {
+                hasPlatform = true
+                break
+            }
+        }
+        if !hasPlatform {
+            if ok, _ := imageSupportsArm64(image); !ok {
+                return []string{"--platform=linux/amd64"}
+            }
+        }
+    }
+    return nil
+}
+
 func dockerRunDetached(name, image, extra, absChroot string) error {
 	// Build docker run args: detached container that stays up, CHROOT_DIR mounted at /app, workdir /app
 	args := []string{
 		"run", "-d", "--name", name,
 		"-v", fmt.Sprintf("%s:/app", absChroot),
 		"-w", "/app",
+	}
+	// Platform fixups for macOS/arm64 environments when the image doesn't support arm64
+	if plat := platformArgsIfNeeded(image, extra); len(plat) > 0 {
+		args = append(args, plat...)
 	}
 	if extra != "" {
 		// Split on whitespace to get individual flags; if advanced quoting is required later,
@@ -135,7 +210,18 @@ func dockerRunDetached(name, image, extra, absChroot string) error {
 				return fmt.Errorf("docker run failed after pull: %v; stderr: %s", err2, strings.TrimSpace(stderr.String()))
 			}
 		} else {
-			return fmt.Errorf("docker run failed: %v; stderr: %s", err, strings.TrimSpace(stderr.String()))
+			// Provide more actionable diagnostics for common macOS issues
+			trimmed := strings.TrimSpace(errStr)
+			switch {
+			case strings.Contains(trimmed, "no matching manifest for linux/arm64") || strings.Contains(trimmed, "requested image's platform"):
+				return fmt.Errorf("docker run failed: %w; stderr: %s. Hint: on Apple Silicon, add DOCKER_EXTRA_ARGS=\"--platform=linux/amd64\" or use an arm64-compatible image.", err, trimmed)
+			case strings.Contains(trimmed, "Mounts denied") || strings.Contains(trimmed, "is not shared from the host"):
+				return fmt.Errorf("docker run failed: %w; stderr: %s. Hint: share the CHROOT_DIR path in Docker Desktop (Settings → Resources → File sharing) or move CHROOT_DIR under $HOME.", err, trimmed)
+			case strings.Contains(trimmed, "Cannot connect to the Docker daemon") || strings.Contains(trimmed, "error during connect"):
+				return fmt.Errorf("docker run failed: %w; stderr: %s. Hint: ensure Docker Desktop/daemon is running.", err, trimmed)
+			default:
+				return fmt.Errorf("docker run failed: %w; stderr: %s", err, trimmed)
+			}
 		}
 	}
 	return nil
