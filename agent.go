@@ -2,10 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"fmt"
-
-	"crypto/rand"
 	"log"
 	"net/http"
 	"net/url"
@@ -23,8 +22,8 @@ import (
 
 	"go-thing/db"
 	"go-thing/internal/config"
-	"go-thing/routes"
 	logging "go-thing/internal/logging"
+	"go-thing/routes"
 	toolsrv "go-thing/tools"
 	"go-thing/utility"
 )
@@ -299,7 +298,6 @@ func main() {
 				log.Printf("[Postgres] Migrations applied from %s", pgcfg.MigrationsDir)
 			}
 		}
-
 	} else {
 		log.Printf("[Config] Load failed (%v); continuing with defaults", iniErr)
 	}
@@ -374,62 +372,55 @@ func main() {
 	})
 	routes.RegisterSignupRoutes(r)
 
-    // Docker SSH key endpoints moved to routes/api_docker_routes.go
-    routes.RegisterAPIDockerRoutes(r, requireAuth(), routes.APIDockerDeps{
-        EnsureDockerContainer:    toolsrv.EnsureDockerContainer,
-        EnsureSSHKeygenAvailable: utility.EnsureSSHKeygenAvailable,
-        RunDockerExec:            utility.RunDockerExec,
-    })
-
-    // Login endpoint moved to routes/login_routes.go
-    routes.RegisterLoginRoutes(r, routes.LoginDeps{
-        GetLimiter: func(ip string) bool { return lr.getLimiter(ip).Allow() },
-        IsLocked: func(user string) (bool, time.Duration) { return lr.isLocked(user) },
-        RecordFailure: lr.recordFailure,
-        RecordSuccess: lr.recordSuccess,
-        DummyBcryptCompare: utility.DummyBcryptCompare,
-        SetSessionCookie: func(c *gin.Context, userID int64) {
-            utility.SetSessionCookie(c, userID, sessionSecret, sessionDuration)
-        },
-    })
-
-	// Logout endpoint (CSRF protected)
-	r.POST("/logout", func(c *gin.Context) {
-		if !utility.ValidateCSRF(c) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
-			return
-		}
-		utility.ClearSessionCookie(c)
-		c.JSON(http.StatusOK, gin.H{"ok": true})
+	// Docker SSH key endpoints moved to routes/api_docker_routes.go
+	routes.RegisterAPIDockerRoutes(r, requireAuth(), routes.APIDockerDeps{
+		EnsureDockerContainer:    toolsrv.EnsureDockerContainer,
+		EnsureSSHKeygenAvailable: utility.EnsureSSHKeygenAvailable,
+		RunDockerExec:            utility.RunDockerExec,
 	})
 
-    // Current user endpoint moved to routes/me_routes.go
-    routes.RegisterMeRoutes(r, sessionSecret)
+	// Login endpoint moved to routes/login_routes.go
+	routes.RegisterLoginRoutes(r, routes.LoginDeps{
+		GetLimiter:         func(ip string) bool { return lr.getLimiter(ip).Allow() },
+		IsLocked:           func(user string) (bool, time.Duration) { return lr.isLocked(user) },
+		RecordFailure:      lr.recordFailure,
+		RecordSuccess:      lr.recordSuccess,
+		DummyBcryptCompare: utility.DummyBcryptCompare,
+		SetSessionCookie: func(c *gin.Context, userID int64) {
+			utility.SetSessionCookie(c, userID, sessionSecret, sessionDuration)
+		},
+	})
+
+	// Logout endpoint moved to routes/logout_routes.go
+	routes.RegisterLogoutRoutes(r)
+
+	// Current user endpoint moved to routes/me_routes.go
+	routes.RegisterMeRoutes(r, sessionSecret)
 
 	// Authenticated User Settings routes
 	auth := r.Group("/", requireAuth())
 	// Settings page is now rendered by the web frontend (#/settings)
 
-	    // Settings APIs moved to routes/api_settings_routes.go
-    routes.RegisterAPISettingsRoutes(auth)
+	// Settings APIs moved to routes/api_settings_routes.go
+	routes.RegisterAPISettingsRoutes(auth)
 
-    // Generate SSH keys inside the Docker container and return them (moved to routes)
-    routes.RegisterAPISSHRoutes(auth, routes.APISSHDeps{
-        EnsureDockerContainer:    toolsrv.EnsureDockerContainer,
-        EnsureSSHKeygenAvailable: utility.EnsureSSHKeygenAvailable,
-        RunDockerExec:            utility.RunDockerExec,
-    })
+	// Generate SSH keys inside the Docker container and return them (moved to routes)
+	routes.RegisterAPISSHRoutes(auth, routes.APISSHDeps{
+		EnsureDockerContainer:    toolsrv.EnsureDockerContainer,
+		EnsureSSHKeygenAvailable: utility.EnsureSSHKeygenAvailable,
+		RunDockerExec:            utility.RunDockerExec,
+	})
 
 	// GitHub direct API caller moved to routes/github_routes.go
 
 	routes.RegisterGithubRoutes(r)
 
 	routes.RegisterJiraRoutes(r)
-    // Shell session management endpoints (moved to routes/shell_routes.go)
-    routes.RegisterShellRoutes(r, &wsUpgrader)
+	// Shell session management endpoints (moved to routes/shell_routes.go)
+	routes.RegisterShellRoutes(r, &wsUpgrader)
 	routes.RegisterChatRoutes(r, getOrCreateAnyThread)
-    // Slack webhook routes moved to routes/slack_routes.go
-    routes.RegisterSlackRoutes(r, getOrCreateAnyThread)
+	// Slack webhook routes moved to routes/slack_routes.go
+	routes.RegisterSlackRoutes(r, getOrCreateAnyThread)
 	r.POST("/webhook", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "webhook received"}) })
 
 	// HTTP server with graceful shutdown
