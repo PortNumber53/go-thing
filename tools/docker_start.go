@@ -124,14 +124,21 @@ func imageSupportsArm64(image string) (bool, error) {
 // On Apple Silicon (darwin/arm64), many images (like archlinux) do not have arm64 builds.
 // If no platform is already specified via extra args and the image lacks arm64, we force amd64.
 func platformArgsIfNeeded(image, extra string) []string {
-	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
-		if !strings.Contains(extra, "--platform") {
-			if ok, _ := imageSupportsArm64(image); !ok {
-				return []string{"--platform=linux/amd64"}
-			}
-		}
-	}
-	return nil
+    if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+        hasPlatform := false
+        for _, arg := range strings.Fields(extra) {
+            if strings.HasPrefix(arg, "--platform") {
+                hasPlatform = true
+                break
+            }
+        }
+        if !hasPlatform {
+            if ok, _ := imageSupportsArm64(image); !ok {
+                return []string{"--platform=linux/amd64"}
+            }
+        }
+    }
+    return nil
 }
 
 func dockerRunDetached(name, image, extra, absChroot string) error {
