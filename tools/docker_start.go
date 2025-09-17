@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -113,9 +114,42 @@ func imageSupportsArm64(image string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	s := string(out)
-	if strings.Contains(s, "linux/arm64") || strings.Contains(s, "\"architecture\": \"arm64\"") {
-		return true, nil
+	// Prefer parsing JSON over substring checks to avoid false positives
+	// Case 1: Manifest list/index with per-platform entries
+	type platform struct {
+		Architecture string `json:"architecture"`
+		OS           string `json:"os"`
+	}
+	type manifestIndex struct {
+		Manifests []struct {
+			Platform platform `json:"platform"`
+		} `json:"manifests"`
+	}
+	var idx manifestIndex
+	if err := json.Unmarshal(out, &idx); err == nil && len(idx.Manifests) > 0 {
+		for _, m := range idx.Manifests {
+			if strings.EqualFold(m.Platform.OS, "linux") && m.Platform.Architecture == "arm64" {
+				return true, nil
+			}
+		}
+	}
+	// Case 2: Single manifest may have architecture/os at top-level or under config
+	var generic map[string]interface{}
+	if err := json.Unmarshal(out, &generic); err == nil {
+		if arch, ok := generic["architecture"].(string); ok {
+			osv, _ := generic["os"].(string)
+			if arch == "arm64" && (osv == "" || strings.EqualFold(osv, "linux")) {
+				return true, nil
+			}
+		}
+		if cfg, ok := generic["config"].(map[string]interface{}); ok {
+			if arch, ok := cfg["architecture"].(string); ok && arch == "arm64" {
+				osv, _ := cfg["os"].(string)
+				if osv == "" || strings.EqualFold(osv, "linux") {
+					return true, nil
+				}
+			}
+		}
 	}
 	return false, nil
 }
