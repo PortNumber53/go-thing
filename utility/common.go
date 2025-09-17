@@ -39,7 +39,7 @@ func EnsureSSHKeygenAvailable(container string) error {
 	}
 	// Re-check using command -v again
 	if out, _, err := RunDockerExec(container, []string{"bash", "-lc", "command -v ssh-keygen"}, 10*time.Second); err != nil || strings.TrimSpace(out) == "" {
-		return fmt.Errorf("ssh-keygen still unavailable after install: %v", err)
+		return fmt.Errorf("ssh-keygen still unavailable after install (err: %v, output: %q)", err, out)
 	}
 	return nil
 }
