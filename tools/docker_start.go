@@ -214,13 +214,13 @@ func dockerRunDetached(name, image, extra, absChroot string) error {
 			trimmed := strings.TrimSpace(errStr)
 			switch {
 			case strings.Contains(trimmed, "no matching manifest for linux/arm64") || strings.Contains(trimmed, "requested image's platform"):
-				return fmt.Errorf("docker run failed: %v; stderr: %s. Hint: on Apple Silicon, add DOCKER_EXTRA_ARGS=\"--platform=linux/amd64\" or use an arm64-compatible image.", err, trimmed)
+				return fmt.Errorf("docker run failed: %w; stderr: %s. Hint: on Apple Silicon, add DOCKER_EXTRA_ARGS=\"--platform=linux/amd64\" or use an arm64-compatible image.", err, trimmed)
 			case strings.Contains(trimmed, "Mounts denied") || strings.Contains(trimmed, "is not shared from the host"):
-				return fmt.Errorf("docker run failed: %v; stderr: %s. Hint: share the CHROOT_DIR path in Docker Desktop (Settings → Resources → File sharing) or move CHROOT_DIR under $HOME.", err, trimmed)
+				return fmt.Errorf("docker run failed: %w; stderr: %s. Hint: share the CHROOT_DIR path in Docker Desktop (Settings → Resources → File sharing) or move CHROOT_DIR under $HOME.", err, trimmed)
 			case strings.Contains(trimmed, "Cannot connect to the Docker daemon") || strings.Contains(trimmed, "error during connect"):
-				return fmt.Errorf("docker run failed: %v; stderr: %s. Hint: ensure Docker Desktop/daemon is running.", err, trimmed)
+				return fmt.Errorf("docker run failed: %w; stderr: %s. Hint: ensure Docker Desktop/daemon is running.", err, trimmed)
 			default:
-				return fmt.Errorf("docker run failed: %v; stderr: %s", err, trimmed)
+				return fmt.Errorf("docker run failed: %w; stderr: %s", err, trimmed)
 			}
 		}
 	}
