@@ -245,12 +245,8 @@ func RegisterJiraRoutes(r *gin.Engine) {
 				log.Printf("[JiraWebhook][DB] create thread error: %v", err)
 				return
 			}
-			if err := utility.StoreMessage(threadID, "system", promptStr, map[string]interface{}{"source": "jira", "issue_key": issueKey}); err != nil {
+            if err := utility.StoreMessage(threadID, "system", promptStr, map[string]interface{}{"source": "jira", "issue_key": issueKey}); err != nil {
 				log.Printf("[JiraWebhook][DB] store system message error: %v", err)
-				return
-			}
-			if err := utility.StoreMessage(threadID, "user", promptStr, map[string]interface{}{"source": "jira", "issue_key": issueKey}); err != nil {
-				log.Printf("[JiraWebhook][DB] store user message error: %v", err)
 				return
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
