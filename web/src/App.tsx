@@ -727,6 +727,7 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
       const text = await res.text();
       await navigator.clipboard.writeText(text);
       setMessage(`Copied ${which} key to clipboard`);
+      setTimeout(() => setMessage(null), 3000);
     } catch (e: any) {
       setMessage(`Failed to copy ${which} key: ${e?.message ?? e}`);
     } finally {
