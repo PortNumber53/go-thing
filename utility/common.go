@@ -1,16 +1,16 @@
 package utility
 
 import (
-    "bytes"
-    "context"
-    "fmt"
-    "log"
-    "os/exec"
-    "strings"
-    "sync"
-    "time"
+	"bytes"
+	"context"
+	"fmt"
+	"log"
+	"os/exec"
+	"strings"
+	"sync"
+	"time"
 
-    "golang.org/x/crypto/bcrypt"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // RunDockerExec runs `docker exec` with the given args inside the specified container.
@@ -29,15 +29,16 @@ func RunDockerExec(container string, args []string, timeout time.Duration) (stri
 
 // EnsureSSHKeygenAvailable ensures ssh-keygen exists in the container; if missing, installs openssh via pacman.
 func EnsureSSHKeygenAvailable(container string) error {
-	if _, _, err := RunDockerExec(container, []string{"ssh-keygen", "-V"}, 10*time.Second); err == nil {
+	// Check presence using shell built-in to avoid relying on ssh-keygen exit codes
+	if out, _, err := RunDockerExec(container, []string{"bash", "-lc", "command -v ssh-keygen"}, 10*time.Second); err == nil && strings.TrimSpace(out) != "" {
 		return nil
 	}
 	// Attempt install on Arch base
-	if _, stderr, err := RunDockerExec(container, []string{"bash", "-lc", "pacman -Sy --noconfirm && pacman -S --noconfirm openssh"}, 2*time.Minute); err != nil {
+	if _, stderr, err := RunDockerExec(container, []string{"bash", "-lc", "pacman -Sy --noconfirm && pacman -S --noconfirm --needed openssh"}, 2*time.Minute); err != nil {
 		return fmt.Errorf("failed to install openssh in container: %v (stderr: %s)", err, strings.TrimSpace(stderr))
 	}
-	// Re-check
-	if _, _, err := RunDockerExec(container, []string{"ssh-keygen", "-V"}, 10*time.Second); err != nil {
+	// Re-check using command -v again
+	if out, _, err := RunDockerExec(container, []string{"bash", "-lc", "command -v ssh-keygen"}, 10*time.Second); err != nil || strings.TrimSpace(out) == "" {
 		return fmt.Errorf("ssh-keygen still unavailable after install: %v", err)
 	}
 	return nil
@@ -67,6 +68,6 @@ func DummyBcryptCompare(password string) {
 
 // Small indirection helpers to keep this file decoupled for testing/mocking
 var (
-	bcryptGenerateFromPassword = func(pw []byte) ([]byte, error) { return bcrypt.GenerateFromPassword(pw, bcrypt.DefaultCost) }
+	bcryptGenerateFromPassword   = func(pw []byte) ([]byte, error) { return bcrypt.GenerateFromPassword(pw, bcrypt.DefaultCost) }
 	bcryptCompareHashAndPassword = func(hash, pw []byte) error { return bcrypt.CompareHashAndPassword(hash, pw) }
 )
