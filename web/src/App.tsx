@@ -1103,6 +1103,217 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
     };
   }
 
+  // Personal Settings: System Prompts state
+  type Prompt = {
+    id: number;
+    name: string;
+    content: string;
+    preferred_llms: string[];
+    active: boolean;
+    default: boolean;
+    created_at?: string;
+    updated_at?: string;
+  };
+  const [prompts, setPrompts] = React.useState<Prompt[]>([]);
+  const [selectedPromptId, setSelectedPromptId] = React.useState<number | null>(
+    null
+  );
+  const [pName, setPName] = React.useState("");
+  const [pContent, setPContent] = React.useState("");
+  const [pLLMs, setPLLMs] = React.useState(""); // comma-separated
+  const [pActive, setPActive] = React.useState(false);
+  const [pDefault, setPDefault] = React.useState(false);
+  const [pLoading, setPLoading] = React.useState(false);
+  const [pSaving, setPSaving] = React.useState(false);
+
+  React.useEffect(() => {
+    if (tab !== "personal") return;
+    let aborted = false;
+    setPLoading(true);
+    (async () => {
+      try {
+        const res = await fetch("/api/settings/prompts");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const list: Prompt[] = Array.isArray(data?.prompts) ? data.prompts : [];
+        if (!aborted) {
+          setPrompts(list);
+          if (list.length > 0) {
+            const first = list[0];
+            setSelectedPromptId(first.id);
+            setPName(first.name || "");
+            setPContent(first.content || "");
+            setPLLMs((first.preferred_llms || []).join(", "));
+            setPActive(!!first.active);
+            setPDefault(!!first.default);
+          } else {
+            setSelectedPromptId(null);
+            setPName("");
+            setPContent("");
+            setPLLMs("");
+            setPActive(false);
+            setPDefault(false);
+          }
+        }
+      } catch (e: any) {
+        if (!aborted)
+          setMessage(`Failed to load System Prompts: ${e?.message ?? e}`);
+      } finally {
+        if (!aborted) setPLoading(false);
+      }
+    })();
+    return () => {
+      aborted = true;
+    };
+  }, [tab]);
+
+  function onSelectPrompt(p: Prompt) {
+    setSelectedPromptId(p.id);
+    setPName(p.name || "");
+    setPContent(p.content || "");
+    setPLLMs((p.preferred_llms || []).join(", "));
+    setPActive(!!p.active);
+    setPDefault(!!p.default);
+    setMessage(null);
+  }
+
+  function newPrompt() {
+    setSelectedPromptId(null);
+    setPName("");
+    setPContent("");
+    setPLLMs("");
+    setPActive(false);
+    setPDefault(false);
+    setMessage(null);
+  }
+
+  async function errorMessageFromResponse(res: Response): Promise<string> {
+    try {
+      const text = await res.text();
+      if (!text) return `HTTP ${res.status}`;
+      try {
+        const json = JSON.parse(text);
+        if (json && typeof json.error === "string") return json.error;
+      } catch (_) {}
+      return text;
+    } catch (_) {
+      return `HTTP ${res.status}`;
+    }
+  }
+
+  async function savePrompt() {
+    try {
+      setPSaving(true);
+      setMessage(null);
+      const name = pName.trim();
+      if (!name || !pContent.trim()) {
+        setMessage("Name and content are required");
+        return;
+      }
+      const preferred_llms = pLLMs
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const token = await fetchCSRFToken();
+      if (selectedPromptId == null) {
+        const res = await fetch("/api/settings/prompts", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": token,
+          },
+          body: JSON.stringify({
+            name,
+            content: pContent,
+            preferred_llms,
+            active: !!pActive,
+            default: !!pDefault,
+          }),
+        });
+        if (!res.ok) throw new Error(await errorMessageFromResponse(res));
+        const payload = await res.json();
+        const created: Prompt | null = payload?.prompt || null;
+        if (!created) throw new Error("Malformed response");
+        // Update local state without refetch; if default, clear others
+        setPrompts((prev) => {
+          const cleared = created.default
+            ? prev.map((p) => ({ ...p, default: false }))
+            : prev;
+          return [created, ...cleared.filter((p) => p.id !== created.id)];
+        });
+        // Select created prompt
+        onSelectPrompt(created);
+        setMessage("Prompt created");
+      } else {
+        const res = await fetch(`/api/settings/prompts/${selectedPromptId}`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": token,
+          },
+          body: JSON.stringify({
+            name,
+            content: pContent,
+            preferred_llms,
+            active: !!pActive,
+            default: !!pDefault,
+          }),
+        });
+        if (!res.ok) throw new Error(await errorMessageFromResponse(res));
+        const payload = await res.json();
+        const updated: Prompt | null = payload?.prompt || null;
+        if (!updated) throw new Error("Malformed response");
+        // Update local state: replace the item; if default true, clear others
+        setPrompts((prev) => {
+          let next = prev.map((p) => (p.id === updated.id ? updated : p));
+          if (updated.default) {
+            next = next.map((p) =>
+              p.id === updated.id ? p : { ...p, default: false }
+            );
+          }
+          // Move updated to front to roughly mimic updated_at DESC
+          return [updated, ...next.filter((p) => p.id !== updated.id)];
+        });
+        onSelectPrompt(updated);
+        setMessage("Prompt saved");
+      }
+    } catch (e: any) {
+      setMessage(typeof e?.message === "string" ? e.message : "Failed to save");
+    } finally {
+      setPSaving(false);
+    }
+  }
+
+  async function deletePrompt() {
+    if (selectedPromptId == null) return;
+    try {
+      setMessage(null);
+      const token = await fetchCSRFToken();
+      const res = await fetch(`/api/settings/prompts/${selectedPromptId}`, {
+        method: "DELETE",
+        headers: { "X-CSRF-Token": token },
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      // Update local state instead of reloading
+      setPrompts((prev) => {
+        const next = prev.filter((p) => p.id !== selectedPromptId);
+        if (next.length > 0) {
+          onSelectPrompt(next[0]);
+        } else {
+          newPrompt();
+        }
+        return next;
+      });
+      setMessage("Prompt deleted");
+    } catch (e: any) {
+      setMessage(
+        typeof e?.message === "string" ? e.message : "Failed to delete"
+      );
+    }
+  }
+
   React.useEffect(() => {
     let aborted = false;
     (async () => {
