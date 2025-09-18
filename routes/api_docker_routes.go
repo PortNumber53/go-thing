@@ -178,7 +178,12 @@ if err := json.Unmarshal([]byte(settingsRaw.String), &settings); err != nil {
 		// If we rewrote the tag, persist back into settings so future starts use the built image
 		if targetTag != image {
 			dockerVal["image"] = targetTag
-			b, _ := json.Marshal(dockerVal)
+			b, err := json.Marshal(dockerVal)
+			if err != nil {
+				log.Printf("[DockerBuild] failed to marshal settings for update: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to prepare settings for update"})
+				return
+			}
 			const upd = `UPDATE users SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), '{docker}', to_jsonb($1::json), true), updated_at=now() WHERE id=$2`
 			if _, err := dbc.Exec(upd, string(b), uid); err != nil {
 				log.Printf("[DockerBuild] update image tag err: %v", err)
