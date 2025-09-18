@@ -15,21 +15,28 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// getUserID fetches the authenticated user ID from Gin context and writes an error response on failure.
+func getUserID(c *gin.Context) (int64, bool) {
+    v, ok := c.Get("userID")
+    if !ok {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+        return 0, false
+    }
+    uid, ok := v.(int64)
+    if !ok {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+        return 0, false
+    }
+    return uid, true
+}
+
 // RegisterAPISettingsRoutes registers authenticated settings-related endpoints under the provided auth group.
 // Expects the group to already include requireAuth() middleware.
 func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 	// Read current settings
-	auth.GET("/api/settings", func(c *gin.Context) {
-		v, ok := c.Get("userID")
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
-			return
-		}
-		uid, ok := v.(int64)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
-			return
-		}
+		auth.GET("/api/settings", func(c *gin.Context) {
+			uid, ok := getUserID(c)
+			if !ok { return }
 		dbc := db.Get()
 		if dbc == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
@@ -50,7 +57,7 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 	})
 
 	// Update profile (name)
-	auth.POST("/api/settings", func(c *gin.Context) {
+		auth.POST("/api/settings", func(c *gin.Context) {
 		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
@@ -67,16 +74,8 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 			return
 		}
-		v, ok := c.Get("userID")
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
-			return
-		}
-		uid, ok := v.(int64)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
-			return
-		}
+			uid, ok := getUserID(c)
+			if !ok { return }
 		dbc := db.Get()
 		if dbc == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
@@ -91,7 +90,7 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 	})
 
 	// Change password
-	auth.POST("/api/settings/password", func(c *gin.Context) {
+		auth.POST("/api/settings/password", func(c *gin.Context) {
 		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
@@ -112,16 +111,8 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "password must be 12+ chars and include upper, lower, digit, and special character"})
 			return
 		}
-		v, ok := c.Get("userID")
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
-			return
-		}
-		uid, ok := v.(int64)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
-			return
-		}
+			uid, ok := getUserID(c)
+			if !ok { return }
 		dbc := db.Get()
 		if dbc == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
@@ -157,17 +148,9 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 	})
 
 	// Docker settings: GET current and POST to update
-	auth.GET("/api/settings/docker", func(c *gin.Context) {
-		v, ok := c.Get("userID")
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
-			return
-		}
-		uid, ok := v.(int64)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
-			return
-		}
+		auth.GET("/api/settings/docker", func(c *gin.Context) {
+			uid, ok := getUserID(c)
+			if !ok { return }
 		dbc := db.Get()
 		if dbc == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
@@ -198,21 +181,13 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 		c.JSON(http.StatusOK, gin.H{"docker": dockerVal})
 	})
 
-	auth.POST("/api/settings/docker", func(c *gin.Context) {
+		auth.POST("/api/settings/docker", func(c *gin.Context) {
 		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
-		v, ok := c.Get("userID")
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
-			return
-		}
-		uid, ok := v.(int64)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
-			return
-		}
+			uid, ok := getUserID(c)
+			if !ok { return }
 		var req struct {
 			Container  string `json:"container"`
 			Image      string `json:"image"`
@@ -258,23 +233,15 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 
 	// System Prompts CRUD
 	// List prompts for current user
-	auth.GET("/api/settings/prompts", func(c *gin.Context) {
-		v, ok := c.Get("userID")
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
-			return
-		}
-		uid, ok := v.(int64)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
-			return
-		}
+		auth.GET("/api/settings/prompts", func(c *gin.Context) {
+			uid, ok := getUserID(c)
+			if !ok { return }
 		dbc := db.Get()
 		if dbc == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
 			return
 		}
-		rows, err := dbc.Query(`SELECT id, name, content, COALESCE(to_json(preferred_llms)::text,'[]') AS preferred_json, active, is_default, created_at, updated_at FROM system_prompts WHERE user_id=$1 ORDER BY updated_at DESC`, uid)
+		rows, err := dbc.Query(`SELECT id, name, content, preferred_llms, active, is_default, created_at, updated_at FROM system_prompts WHERE user_id=$1 ORDER BY updated_at DESC`, uid)
 		if err != nil {
 			log.Printf("[Prompts] list err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
@@ -294,36 +261,27 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 		prompts := []Prompt{}
 		for rows.Next() {
 			var p Prompt
-			var prefJSON string
-			if err := rows.Scan(&p.ID, &p.Name, &p.Content, &prefJSON, &p.Active, &p.IsDefault, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			if err := rows.Scan(&p.ID, &p.Name, &p.Content, &p.PreferredLLMs, &p.Active, &p.IsDefault, &p.CreatedAt, &p.UpdatedAt); err != nil {
 				log.Printf("[Prompts] scan err: %v", err)
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
 				return
 			}
-			var arr []string
-			_ = json.Unmarshal([]byte(prefJSON), &arr)
-			p.PreferredLLMs = arr
+			if p.PreferredLLMs == nil {
+				p.PreferredLLMs = []string{}
+			}
 			prompts = append(prompts, p)
 		}
 		c.JSON(http.StatusOK, gin.H{"prompts": prompts})
 	})
 
 	// Create prompt
-	auth.POST("/api/settings/prompts", func(c *gin.Context) {
+		auth.POST("/api/settings/prompts", func(c *gin.Context) {
 		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
-		v, ok := c.Get("userID")
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
-			return
-		}
-		uid, ok := v.(int64)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
-			return
-		}
+			uid, ok := getUserID(c)
+			if !ok { return }
 		var req struct {
 			Name          string   `json:"name"`
 			Content       string   `json:"content"`
@@ -388,21 +346,13 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 	})
 
 	// Update prompt
-	auth.PUT("/api/settings/prompts/:id", func(c *gin.Context) {
+		auth.PUT("/api/settings/prompts/:id", func(c *gin.Context) {
 		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
-		v, ok := c.Get("userID")
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
-			return
-		}
-		uid, ok := v.(int64)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
-			return
-		}
+			uid, ok := getUserID(c)
+			if !ok { return }
 		pidStr := c.Param("id")
 		pid, err := strconv.ParseInt(pidStr, 10, 64)
 		if err != nil || pid <= 0 {
@@ -518,21 +468,13 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 	})
 
 	// Delete prompt
-	auth.DELETE("/api/settings/prompts/:id", func(c *gin.Context) {
+		auth.DELETE("/api/settings/prompts/:id", func(c *gin.Context) {
 		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
-		v, ok := c.Get("userID")
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
-			return
-		}
-		uid, ok := v.(int64)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
-			return
-		}
+			uid, ok := getUserID(c)
+			if !ok { return }
 		pidStr := c.Param("id")
 		pid, err := strconv.ParseInt(pidStr, 10, 64)
 		if err != nil || pid <= 0 {
