@@ -449,16 +449,16 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			args = append(args, name)
 			idx++
 		}
-        if req.Content != nil {
-            content := strings.TrimSpace(*req.Content)
-            if content == "" {
-                c.JSON(http.StatusBadRequest, gin.H{"error": "content cannot be empty"})
-                return
-            }
-            setParts = append(setParts, "content=$"+strconv.Itoa(idx))
-            args = append(args, content)
-            idx++
-        }
+		if req.Content != nil {
+			content := strings.TrimSpace(*req.Content)
+			if content == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "content cannot be empty"})
+				return
+			}
+			setParts = append(setParts, "content=$"+strconv.Itoa(idx))
+			args = append(args, content)
+			idx++
+		}
 		if req.IsDefault != nil {
 			setParts = append(setParts, "is_default=$"+strconv.Itoa(idx))
 			// If making default, also ensure active=true implicitly
