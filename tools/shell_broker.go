@@ -58,110 +58,67 @@ type ShellSession struct {
 // CreateOrGet starts (or returns) a session with the given id and optional subdir inside CHROOT_DIR.
 // subdir may be empty; when provided, it is joined to CHROOT_DIR and mapped to /app/<subdir> in container.
 func (b *ShellBroker) CreateOrGet(id string, subdir string) (*ShellSession, error) {
-	if strings.TrimSpace(id) == "" {
-		return nil, errors.New("session id required")
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if s, ok := b.sessions[id]; ok {
-		return s, nil
-	}
-
-	containerName, err := EnsureDockerContainer()
-	if err != nil {
-		return nil, fmt.Errorf("ensure container: %w", err)
-	}
-
-	workdir := "/app"
-	if sub := strings.TrimSpace(subdir); sub != "" {
-		// Sanitize the subdirectory path to prevent path traversal attacks.
-		// filepath.Join will resolve elements like ".." and create a canonical path.
-		joinedPath := filepath.Join("/app", sub)
-
-		// Ensure the resulting path is still within the intended /app directory.
-		if !strings.HasPrefix(joinedPath, "/app/") && joinedPath != "/app" {
-			return nil, fmt.Errorf("invalid subdir, potential path traversal: %q", sub)
-		}
-		workdir = filepath.ToSlash(joinedPath)
-	}
-
-	// docker exec with TTY; attach a real PTY so the shell is truly interactive
-	execArgs := []string{"exec", "-i", "-t", "-w", workdir, "-e", "TERM=xterm-256color", "-e", "COLORTERM=truecolor", "-e", "LC_ALL=C.UTF-8", containerName, "/bin/bash", "-i"}
-	cmd := exec.Command("docker", execArgs...)
-	// Clear env for safety
-	cmd.Env = []string{}
-	// Start the command with an attached PTY
-	tty, err := pty.Start(cmd)
-	if err != nil {
-		return nil, fmt.Errorf("start docker exec PTY: %w", err)
-	}
-
-	s := &ShellSession{
-		ID:          id,
-		Workdir:     workdir,
-		cmd:         cmd,
-		tty:         tty,
-		inputQueue:  make(chan []byte, 4096),
-		subscribers: make(map[chan []byte]struct{}),
-		closed:      make(chan struct{}),
-	}
-	b.sessions[id] = s
-	log.Printf("[Shell] session %s started: workdir=%s container=%s", id, workdir, containerName)
-	go s.run()
-	go func() {
-		// Wait for the command to exit to release process resources and prevent zombies.
-		if err := s.cmd.Wait(); err != nil {
-			log.Printf("[Shell %s] command process exited with error: %v", s.ID, err)
-		}
-		// Ensure the session is fully cleaned up if the process exits for any reason.
-		s.Close()
-	}()
-	return s, nil
+    if strings.TrimSpace(id) == "" {
+        return nil, errors.New("session id required")
+    }
+    containerName, err := EnsureDockerContainer()
+    if err != nil {
+        return nil, fmt.Errorf("ensure container: %w", err)
+    }
+    return b.createOrGetWithContainer(containerName, id, subdir)
 }
 
 // CreateOrGetInContainer is like CreateOrGet but attaches to a specific container name.
 // The caller is responsible for ensuring the container exists and is running.
 func (b *ShellBroker) CreateOrGetInContainer(containerName string, id string, subdir string) (*ShellSession, error) {
-	if strings.TrimSpace(id) == "" {
-		return nil, errors.New("session id required")
-	}
-	if strings.TrimSpace(containerName) == "" {
-		return nil, errors.New("container name required")
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if s, ok := b.sessions[id]; ok {
-		return s, nil
-	}
+    return b.createOrGetWithContainer(containerName, id, subdir)
+}
 
-	workdir := "/app"
-	if sub := strings.TrimSpace(subdir); sub != "" {
-		joinedPath := filepath.Join("/app", sub)
-		if !strings.HasPrefix(joinedPath, "/app/") && joinedPath != "/app" {
-			return nil, fmt.Errorf("invalid subdir, potential path traversal: %q", sub)
-		}
-		workdir = filepath.ToSlash(joinedPath)
-	}
+// createOrGetWithContainer centralizes session creation/lookup given a container name.
+// It acquires the broker lock, validates inputs, prepares workdir, starts PTY, and
+// registers the session. Callers should pass an already ensured container name.
+func (b *ShellBroker) createOrGetWithContainer(containerName string, id string, subdir string) (*ShellSession, error) {
+    if strings.TrimSpace(id) == "" {
+        return nil, errors.New("session id required")
+    }
+    if strings.TrimSpace(containerName) == "" {
+        return nil, errors.New("container name required")
+    }
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    if s, ok := b.sessions[id]; ok {
+        return s, nil
+    }
 
-	execArgs := []string{"exec", "-i", "-t", "-w", workdir, "-e", "TERM=xterm-256color", "-e", "COLORTERM=truecolor", "-e", "LC_ALL=C.UTF-8", containerName, "/bin/bash", "-i"}
-	cmd := exec.Command("docker", execArgs...)
-	cmd.Env = []string{}
-	tty, err := pty.Start(cmd)
-	if err != nil {
-		return nil, fmt.Errorf("start docker exec PTY: %w", err)
-	}
+    workdir := "/app"
+    if sub := strings.TrimSpace(subdir); sub != "" {
+        // Sanitize the subdirectory path to prevent path traversal attacks.
+        joinedPath := filepath.Join("/app", sub)
+        if !strings.HasPrefix(joinedPath, "/app/") && joinedPath != "/app" {
+            return nil, fmt.Errorf("invalid subdir, potential path traversal: %q", sub)
+        }
+        workdir = filepath.ToSlash(joinedPath)
+    }
 
-	s := &ShellSession{ID: id, Workdir: workdir, cmd: cmd, tty: tty, inputQueue: make(chan []byte, 4096), subscribers: make(map[chan []byte]struct{}), closed: make(chan struct{})}
-	b.sessions[id] = s
-	log.Printf("[Shell] session %s started: workdir=%s container=%s", id, workdir, containerName)
-	go s.run()
-	go func() {
-		if err := s.cmd.Wait(); err != nil {
-			log.Printf("[Shell %s] command process exited with error: %v", s.ID, err)
-		}
-		s.Close()
-	}()
-	return s, nil
+    execArgs := []string{"exec", "-i", "-t", "-w", workdir, "-e", "TERM=xterm-256color", "-e", "COLORTERM=truecolor", "-e", "LC_ALL=C.UTF-8", containerName, "/bin/bash", "-i"}
+    cmd := exec.Command("docker", execArgs...)
+    cmd.Env = []string{}
+    tty, err := pty.Start(cmd)
+    if err != nil {
+        return nil, fmt.Errorf("start docker exec PTY: %w", err)
+    }
+
+    s := &ShellSession{ID: id, Workdir: workdir, cmd: cmd, tty: tty, inputQueue: make(chan []byte, 4096), subscribers: make(map[chan []byte]struct{}), closed: make(chan struct{})}
+    b.sessions[id] = s
+    log.Printf("[Shell] session %s started: workdir=%s container=%s", id, workdir, containerName)
+    go s.run()
+    go func() {
+        if err := s.cmd.Wait(); err != nil {
+            log.Printf("[Shell %s] command process exited with error: %v", s.ID, err)
+        }
+        s.Close()
+    }()
+    return s, nil
 }
 
 // Get returns a session by id.
