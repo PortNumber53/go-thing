@@ -1,14 +1,19 @@
 package routes
 
 import (
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
+	"go-thing/db"
+	toolsrv "go-thing/tools"
 	"go-thing/utility"
+
+	"github.com/gin-gonic/gin"
 )
 
 // APIDockerDeps defines required dependencies for Docker SSH key routes
@@ -92,5 +97,293 @@ func RegisterAPIDockerRoutes(r *gin.Engine, requireAuth gin.HandlerFunc, deps AP
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true, "public_key": strings.TrimSpace(pub)})
+	})
+
+	// Build Docker image from user's saved Dockerfile and tag as their configured image
+	r.POST("/api/docker/build", requireAuth, func(c *gin.Context) {
+		if !utility.ValidateCSRF(c) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+			return
+		}
+		// Request body allows { no_cache: boolean }
+		var req struct {
+			NoCache bool `json:"no_cache"`
+		}
+		_ = c.ShouldBindJSON(&req)
+
+		// Load user's docker settings from DB
+		v, ok := c.Get("userID")
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+			return
+		}
+		uid, ok := v.(int64)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+			return
+		}
+		dbc := db.Get()
+		if dbc == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+			return
+		}
+		var settingsRaw sql.NullString
+		if err := dbc.QueryRow(`SELECT settings::text FROM users WHERE id=$1`, uid).Scan(&settingsRaw); err != nil {
+			if err == sql.ErrNoRows {
+				utility.ClearSessionCookie(c)
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+				return
+			}
+			log.Printf("[DockerBuild] select err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+			return
+		}
+		var settings map[string]interface{}
+		if settingsRaw.Valid && strings.TrimSpace(settingsRaw.String) != "" {
+			_ = json.Unmarshal([]byte(settingsRaw.String), &settings)
+		}
+		dockerVal, _ := settings["docker"].(map[string]interface{})
+		if dockerVal == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "no docker settings configured"})
+			return
+		}
+		image, _ := dockerVal["image"].(string)
+		dockerfile, _ := dockerVal["dockerfile"].(string)
+		image = strings.TrimSpace(image)
+		if image == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "docker image tag is required in settings"})
+			return
+		}
+		if strings.TrimSpace(dockerfile) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Dockerfile content is empty"})
+			return
+		}
+
+		// Avoid clobbering official images like "archlinux:latest": if the image has no slash
+		// we will prefix with "go-thing-<uid>-" to create a unique local tag and update settings.
+		targetTag := image
+		if !strings.Contains(image, "/") {
+			targetTag = fmt.Sprintf("go-thing-%d-%s", uid, image)
+		}
+
+		if err := toolsrv.BuildDockerImageFromDockerfile(targetTag, dockerfile, req.NoCache); err != nil {
+			log.Printf("[DockerBuild] error: %v", err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		// If we rewrote the tag, persist back into settings so future starts use the built image
+		if targetTag != image {
+			dockerVal["image"] = targetTag
+			b, _ := json.Marshal(dockerVal)
+			const upd = `UPDATE users SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), '{docker}', to_jsonb($1::json), true), updated_at=now() WHERE id=$2`
+			if _, err := dbc.Exec(upd, string(b), uid); err != nil {
+				log.Printf("[DockerBuild] update image tag err: %v", err)
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "image": targetTag})
+	})
+
+	// Start (or create) the container using saved settings (name, image, args)
+	r.POST("/api/docker/start", requireAuth, func(c *gin.Context) {
+		if !utility.ValidateCSRF(c) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+			return
+		}
+		v, ok := c.Get("userID")
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+			return
+		}
+		uid, ok := v.(int64)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+			return
+		}
+		dbc := db.Get()
+		if dbc == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+			return
+		}
+		var settingsRaw sql.NullString
+		if err := dbc.QueryRow(`SELECT settings::text FROM users WHERE id=$1`, uid).Scan(&settingsRaw); err != nil {
+			if err == sql.ErrNoRows {
+				utility.ClearSessionCookie(c)
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+				return
+			}
+			log.Printf("[DockerStart] select err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+			return
+		}
+		var settings map[string]interface{}
+		if settingsRaw.Valid && strings.TrimSpace(settingsRaw.String) != "" {
+			_ = json.Unmarshal([]byte(settingsRaw.String), &settings)
+		}
+		dockerVal, _ := settings["docker"].(map[string]interface{})
+		if dockerVal == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "no docker settings configured"})
+			return
+		}
+		container, _ := dockerVal["container"].(string)
+		image, _ := dockerVal["image"].(string)
+		args, _ := dockerVal["args"].(string)
+		container = strings.TrimSpace(container)
+		image = strings.TrimSpace(image)
+		if container == "" || image == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "container name and image are required"})
+			return
+		}
+
+		name, err := toolsrv.StartContainerWithSettings(container, image, args)
+		if err != nil {
+			log.Printf("[DockerStart] error: %v", err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "container": name})
+	})
+
+	// Remove the configured image (force=false)
+	r.POST("/api/docker/remove-image", requireAuth, func(c *gin.Context) {
+		if !utility.ValidateCSRF(c) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+			return
+		}
+		v, ok := c.Get("userID")
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+			return
+		}
+		uid, ok := v.(int64)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+			return
+		}
+		dbc := db.Get()
+		if dbc == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+			return
+		}
+		var settingsRaw sql.NullString
+		if err := dbc.QueryRow(`SELECT settings::text FROM users WHERE id=$1`, uid).Scan(&settingsRaw); err != nil {
+			if err == sql.ErrNoRows {
+				utility.ClearSessionCookie(c)
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+				return
+			}
+			log.Printf("[DockerRemoveImage] select err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+			return
+		}
+		var settings map[string]interface{}
+		if settingsRaw.Valid && strings.TrimSpace(settingsRaw.String) != "" {
+			_ = json.Unmarshal([]byte(settingsRaw.String), &settings)
+		}
+		dockerVal, _ := settings["docker"].(map[string]interface{})
+		if dockerVal == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "no docker settings configured"})
+			return
+		}
+		image, _ := dockerVal["image"].(string)
+		image = strings.TrimSpace(image)
+		if image == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "docker image tag is required in settings"})
+			return
+		}
+		if err := toolsrv.RemoveDockerImage(image, false); err != nil {
+			log.Printf("[DockerRemoveImage] error: %v", err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true, "image": image})
+	})
+
+	// Stop the configured container (if exists/running)
+	r.POST("/api/docker/stop", requireAuth, func(c *gin.Context) {
+		if !utility.ValidateCSRF(c) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+			return
+		}
+		v, ok := c.Get("userID")
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+			return
+		}
+		uid, ok := v.(int64)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+			return
+		}
+		dbc := db.Get()
+		if dbc == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+			return
+		}
+		var settingsRaw sql.NullString
+		if err := dbc.QueryRow(`SELECT settings::text FROM users WHERE id=$1`, uid).Scan(&settingsRaw); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+			return
+		}
+		var settings map[string]interface{}
+		if settingsRaw.Valid && strings.TrimSpace(settingsRaw.String) != "" {
+			_ = json.Unmarshal([]byte(settingsRaw.String), &settings)
+		}
+		dockerVal, _ := settings["docker"].(map[string]interface{})
+		container, _ := dockerVal["container"].(string)
+		if strings.TrimSpace(container) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "container name missing"})
+			return
+		}
+		if err := toolsrv.StopContainerByName(container); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	// Restart the configured container (stop if needed, then start)
+	r.POST("/api/docker/restart", requireAuth, func(c *gin.Context) {
+		if !utility.ValidateCSRF(c) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+			return
+		}
+		v, ok := c.Get("userID")
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+			return
+		}
+		uid, ok := v.(int64)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+			return
+		}
+		dbc := db.Get()
+		if dbc == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+			return
+		}
+		var settingsRaw sql.NullString
+		if err := dbc.QueryRow(`SELECT settings::text FROM users WHERE id=$1`, uid).Scan(&settingsRaw); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+			return
+		}
+		var settings map[string]interface{}
+		if settingsRaw.Valid && strings.TrimSpace(settingsRaw.String) != "" {
+			_ = json.Unmarshal([]byte(settingsRaw.String), &settings)
+		}
+		dockerVal, _ := settings["docker"].(map[string]interface{})
+		container, _ := dockerVal["container"].(string)
+		image, _ := dockerVal["image"].(string)
+		args, _ := dockerVal["args"].(string)
+		if strings.TrimSpace(container) == "" || strings.TrimSpace(image) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "container/image missing"})
+			return
+		}
+		_ = toolsrv.StopContainerByName(container)
+		if _, err := toolsrv.StartContainerWithSettings(container, image, args); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 }

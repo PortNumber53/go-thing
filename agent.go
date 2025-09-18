@@ -265,7 +265,21 @@ func isAllowedWSOrigin(r *http.Request) bool {
 		scheme = "https"
 	}
 	sameOrigin := fmt.Sprintf("%s://%s", scheme, r.Host)
-	return origin == sameOrigin
+	if origin == sameOrigin {
+		return true
+	}
+	// Additionally allow local development origins to simplify DX
+	host := func() string {
+		if u, err := url.Parse(origin); err == nil {
+			return u.Hostname()
+		}
+		return ""
+	}()
+	switch host {
+	case "localhost", "127.0.0.1":
+		return true
+	}
+	return false
 }
 
 func main() {
@@ -417,7 +431,7 @@ func main() {
 
 	routes.RegisterJiraRoutes(r)
 	// Shell session management endpoints (moved to routes/shell_routes.go)
-	routes.RegisterShellRoutes(r, &wsUpgrader)
+	routes.RegisterShellRoutes(r, requireAuth(), &wsUpgrader)
 	routes.RegisterChatRoutes(r, getOrCreateAnyThread)
 	// Slack webhook routes moved to routes/slack_routes.go
 	routes.RegisterSlackRoutes(r, getOrCreateAnyThread)

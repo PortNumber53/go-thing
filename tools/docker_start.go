@@ -158,21 +158,21 @@ func imageSupportsArm64(image string) (bool, error) {
 // On Apple Silicon (darwin/arm64), many images (like archlinux) do not have arm64 builds.
 // If no platform is already specified via extra args and the image lacks arm64, we force amd64.
 func platformArgsIfNeeded(image, extra string) []string {
-    if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
-        hasPlatform := false
-        for _, arg := range strings.Fields(extra) {
-            if strings.HasPrefix(arg, "--platform") {
-                hasPlatform = true
-                break
-            }
-        }
-        if !hasPlatform {
-            if ok, _ := imageSupportsArm64(image); !ok {
-                return []string{"--platform=linux/amd64"}
-            }
-        }
-    }
-    return nil
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		hasPlatform := false
+		for _, arg := range strings.Fields(extra) {
+			if strings.HasPrefix(arg, "--platform") {
+				hasPlatform = true
+				break
+			}
+		}
+		if !hasPlatform {
+			if ok, _ := imageSupportsArm64(image); !ok {
+				return []string{"--platform=linux/amd64"}
+			}
+		}
+	}
+	return nil
 }
 
 func dockerRunDetached(name, image, extra, absChroot string) error {
@@ -307,4 +307,148 @@ func RemoveDockerContainer(force bool) error {
 		return fmt.Errorf("docker rm failed: %v; stderr: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// BuildDockerImageFromDockerfile builds a Docker image using the provided Dockerfile content.
+// The build context is an ephemeral temporary directory. The resulting image is tagged as imageTag.
+// When noCache is true, the build runs with --no-cache.
+func BuildDockerImageFromDockerfile(imageTag string, dockerfile string, noCache bool) error {
+	// Create a temporary directory to act as the build context
+	dir, err := os.MkdirTemp("", "go-thing-docker-build-")
+	if err != nil {
+		return fmt.Errorf("mktemp: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	// Normalize Dockerfile to ensure root user for package installs on rootless builders.
+	// Insert a "USER root" immediately after the first FROM (if not already present before first RUN).
+	normalized := dockerfile
+	{
+		lines := strings.Split(dockerfile, "\n")
+		fromIdx := -1
+		for i, ln := range lines {
+			lt := strings.TrimSpace(ln)
+			if strings.HasPrefix(strings.ToUpper(lt), "FROM ") {
+				fromIdx = i
+				break
+			}
+		}
+		if fromIdx >= 0 {
+			// Detect a USER before first RUN; if none, inject USER root
+			hasUserBeforeRun := false
+			for i := fromIdx + 1; i < len(lines); i++ {
+				lt := strings.TrimSpace(lines[i])
+				if lt == "" || strings.HasPrefix(lt, "#") {
+					continue
+				}
+				up := strings.ToUpper(lt)
+				if strings.HasPrefix(up, "RUN ") {
+					break
+				}
+				if strings.HasPrefix(up, "USER ") {
+					hasUserBeforeRun = true
+					break
+				}
+			}
+			if !hasUserBeforeRun {
+				// Insert after FROM line
+				out := make([]string, 0, len(lines)+1)
+				out = append(out, lines[:fromIdx+1]...)
+				out = append(out, "USER root")
+				out = append(out, lines[fromIdx+1:]...)
+				normalized = strings.Join(out, "\n")
+			}
+		}
+	}
+	// Write Dockerfile (named exactly "Dockerfile")
+	dfPath := filepath.Join(dir, "Dockerfile")
+	if err := os.WriteFile(dfPath, []byte(normalized), 0o644); err != nil {
+		return fmt.Errorf("write Dockerfile: %w", err)
+	}
+
+	// docker build -t <tag> [--no-cache] .
+	args := []string{"build", "-t", imageTag}
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		// Many base images like archlinux lack arm64 manifests; force amd64 on Apple Silicon
+		args = append(args, "--platform=linux/amd64")
+	}
+	if noCache {
+		args = append(args, "--no-cache")
+	}
+	args = append(args, ".")
+
+	cmd := exec.Command("docker", args...)
+	cmd.Dir = dir
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker build failed: %w; stderr: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// StartContainerWithSettings ensures a container with the given name is running using the given image and extra args.
+// It uses the configured CHROOT_DIR mount point resolved from config, but overrides name/image/extra with provided values.
+func StartContainerWithSettings(containerName, image, extra string) (string, error) {
+	if strings.TrimSpace(containerName) == "" {
+		return "", fmt.Errorf("container name required")
+	}
+	if strings.TrimSpace(image) == "" {
+		return "", fmt.Errorf("image required")
+	}
+
+	// Reuse CHROOT_DIR resolution from config, but ignore cached name/image/extra
+	_, _, _, absChroot, err := resolveDockerSettings()
+	if err != nil {
+		return "", err
+	}
+
+	// If container exists and running -> OK
+	running, exists, ierr := inspectContainerRunning(containerName)
+	if ierr != nil {
+		return "", ierr
+	}
+	if exists {
+		if running {
+			return containerName, nil
+		}
+		if err := dockerStart(containerName); err != nil {
+			return "", fmt.Errorf("failed to start existing container %s: %w", containerName, err)
+		}
+		return containerName, nil
+	}
+
+	if err := dockerRunDetached(containerName, image, extra, absChroot); err != nil {
+		return "", err
+	}
+	return containerName, nil
+}
+
+// RemoveDockerImage removes a Docker image by tag/name. Use force to force removal.
+func RemoveDockerImage(imageTag string, force bool) error {
+	if strings.TrimSpace(imageTag) == "" {
+		return fmt.Errorf("image tag required")
+	}
+	args := []string{"rmi"}
+	if force {
+		args = append(args, "-f")
+	}
+	args = append(args, imageTag)
+	cmd := exec.Command("docker", args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("docker rmi failed: %v; stderr: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// StopContainerByName stops a specific container by name.
+func StopContainerByName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("container name required")
+	}
+	return dockerStop(name)
 }
