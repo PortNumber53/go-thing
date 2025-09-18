@@ -1214,7 +1214,9 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
         if (!last || last.cols !== cols || last.rows !== rows) {
           try {
             (term as any).resize(cols, rows);
-          } catch {}
+          } catch (e) {
+            try { console.error("[shell] term.resize failed", e); } catch {}
+          }
           lastSizeRef.current.set(id, { cols, rows });
         }
       }
@@ -1222,7 +1224,9 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
     if (t.ws.readyState === WebSocket.OPEN) {
       try {
         t.ws.send(JSON.stringify({ type: "resize", cols, rows }));
-      } catch {}
+      } catch (e) {
+        try { console.error("[shell] failed to send resize message", e); } catch {}
+      }
     }
   }
 
