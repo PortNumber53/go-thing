@@ -1,4 +1,9 @@
 import React from "react";
+// @ts-ignore - Provided by @xterm/xterm after install; local types stub exists
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { AttachAddon } from "@xterm/addon-attach";
+import "@xterm/xterm/css/xterm.css";
 import { marked } from "marked";
 import { fetchCSRFToken } from "./utils/csrf";
 import LoginModal from "./components/LoginModal";
@@ -478,6 +483,13 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
   const [dockerDockerfile, setDockerDockerfile] = React.useState<string>("");
   const [dockerSSHGenerating, setDockerSSHGenerating] =
     React.useState<boolean>(false);
+  const [dockerSkipCache, setDockerSkipCache] = React.useState<boolean>(false);
+  const [dockerBuilding, setDockerBuilding] = React.useState<boolean>(false);
+  const [dockerStarting, setDockerStarting] = React.useState<boolean>(false);
+  const [dockerRemoving, setDockerRemoving] = React.useState<boolean>(false);
+  const [dockerStopping, setDockerStopping] = React.useState<boolean>(false);
+  const [dockerRestarting, setDockerRestarting] =
+    React.useState<boolean>(false);
   const [dockerPubKeyOut, setDockerPubKeyOut] = React.useState<string>("");
   const [keyPass, setKeyPass] = React.useState("");
   const [genLoading, setGenLoading] = React.useState(false);
@@ -622,14 +634,12 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
         const payload = await res.json();
         const created: Prompt | null = payload?.prompt || null;
         if (!created) throw new Error("Malformed response");
-        // Update local state without refetch; if default, clear others
         setPrompts((prev) => {
           const cleared = created.default
             ? prev.map((p) => ({ ...p, default: false }))
             : prev;
           return [created, ...cleared.filter((p) => p.id !== created.id)];
         });
-        // Select created prompt
         onSelectPrompt(created);
         setMessage("Prompt created");
       } else {
@@ -651,7 +661,6 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
         const payload = await res.json();
         const updated: Prompt | null = payload?.prompt || null;
         if (!updated) throw new Error("Malformed response");
-        // Update local state: replace the item; if default true, clear others
         setPrompts((prev) => {
           let next = prev.map((p) => (p.id === updated.id ? updated : p));
           if (updated.default) {
@@ -659,7 +668,6 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
               p.id === updated.id ? p : { ...p, default: false }
             );
           }
-          // Move updated to front to roughly mimic updated_at DESC
           return [updated, ...next.filter((p) => p.id !== updated.id)];
         });
         onSelectPrompt(updated);
@@ -684,7 +692,6 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
       if (!res.ok) {
         throw new Error(await errorMessageFromResponse(res));
       }
-      // Update local state instead of reloading
       setPrompts((prev) => {
         const next = prev.filter((p) => p.id !== selectedPromptId);
         if (next.length > 0) {
@@ -701,6 +708,7 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
       );
     }
   }
+
 
   React.useEffect(() => {
     let aborted = false;
@@ -752,6 +760,21 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
       aborted = true;
     };
   }, [tab]);
+
+  // Inject CSS isolation for xterm to avoid global design rules affecting it
+  React.useEffect(() => {
+    const styleId = "term-host-css";
+    if (!document.getElementById(styleId)) {
+      const style = document.createElement("style");
+      style.id = styleId;
+      style.textContent = `
+        .term-host, .term-host .xterm { position: relative; width: 100%; height: 100%; display: block; }
+        .term-host .xterm-viewport { height: 100% !important; padding: 0 !important; }
+        .term-host .xterm-rows { padding: 0 !important; }
+      `;
+      document.head.appendChild(style);
+    }
+  }, []);
 
   async function saveProfile(e: React.FormEvent) {
     e.preventDefault();
@@ -982,6 +1005,231 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+  }
+
+  function wsBase(): string {
+    const proto = window.location.protocol === "https:" ? "wss" : "ws";
+    return `${proto}://${window.location.host}`;
+  }
+
+  async function openShellTab() {
+    const id = crypto.randomUUID();
+    const idx = shellTabs.length + 1;
+    const title = `Shell ${idx}`;
+    const newTab: ShellTab = {
+      id,
+      title,
+      ws: null,
+      output: "",
+      input: "",
+      connected: false,
+    };
+    setShellTabs((tabs) => [...tabs, newTab]);
+    setActiveShellId(id);
+
+    // Defer until container is rendered then connect WS
+    setTimeout(() => {
+      connectWS(id);
+    }, 0);
+  }
+
+  function sendResize(id: string) {
+    const term = termRefMap.current.get(id);
+    const t = shellTabs.find((x) => x.id === id);
+    if (!term || !t?.ws) return;
+    let cols = (term as any)?.cols ?? 80;
+    let rows = (term as any)?.rows ?? 24;
+    try {
+      const fit = fitRefMap.current.get(id) as any;
+      const dims = fit?.proposeDimensions?.();
+      if (dims && dims.cols && dims.rows) {
+        const proposedCols = dims.cols | 0;
+        const proposedRows = dims.rows | 0;
+        // Clamp to sane bounds to avoid runaway growth loops
+        cols = Math.max(20, Math.min(240, proposedCols));
+        rows = Math.max(5, Math.min(120, proposedRows));
+        const last = lastSizeRef.current.get(id);
+        if (!last || last.cols !== cols || last.rows !== rows) {
+          try {
+            (term as any).resize(cols, rows);
+          } catch (e) {
+            try {
+              console.error("[shell] term.resize failed", e);
+            } catch {}
+          }
+          lastSizeRef.current.set(id, { cols, rows });
+        }
+      }
+    } catch {}
+    if (t.ws.readyState === WebSocket.OPEN) {
+      try {
+        t.ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      } catch (e) {
+        try {
+          console.error("[shell] failed to send resize message", e);
+        } catch {}
+      }
+    }
+  }
+
+  async function closeShellTab(id: string) {
+    const t = shellTabs.find((x) => x.id === id);
+    if (t?.ws) {
+      try {
+        t.ws.close();
+      } catch {}
+    }
+    // Clear reconnect timer
+    try {
+      const tmr = reconnectTimersRef.current.get(id);
+      if (tmr) window.clearTimeout(tmr);
+    } catch {}
+    // Dispose terminal
+    const term = termRefMap.current.get(id);
+    try {
+      term?.dispose();
+    } catch {}
+    termRefMap.current.delete(id);
+    // Best-effort notify server
+    fetch(`/shell/sessions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }).catch(() => {});
+    setShellTabs((tabs) => tabs.filter((x) => x.id !== id));
+    if (activeShellId === id) {
+      const rest = shellTabs.filter((x) => x.id !== id);
+      setActiveShellId(rest.length ? rest[rest.length - 1].id : null);
+    }
+  }
+
+  function setTabTitle(id: string, title: string) {
+    setShellTabs((tabs) =>
+      tabs.map((t) => (t.id === id ? { ...t, title } : t))
+    );
+  }
+
+  function sendToShell(id: string) {
+    const t = shellTabs.find((x) => x.id === id);
+    if (!t || !t.ws || t.ws.readyState !== WebSocket.OPEN) return;
+    const line = t.input;
+    if (!line) return;
+    try {
+      (t.ws as WebSocket).send(line);
+      setShellTabs((tabs) =>
+        tabs.map((x) => (x.id === id ? { ...x, input: "" } : x))
+      );
+    } catch {}
+  }
+
+  // xterm handles key events directly; no manual key mapping needed
+
+  async function buildImage() {
+    setMessage(null);
+    setDockerBuilding(true);
+    try {
+      const token = await fetchCSRFToken();
+      const res = await fetch("/api/docker/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": token },
+        body: JSON.stringify({ no_cache: !!dockerSkipCache }),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `HTTP ${res.status}`);
+      }
+      setMessage("Image built successfully");
+    } catch (e: any) {
+      setMessage(`Failed to build image: ${e?.message ?? e}`);
+    } finally {
+      setDockerBuilding(false);
+    }
+  }
+
+  async function startContainer() {
+    setMessage(null);
+    setDockerStarting(true);
+    try {
+      const token = await fetchCSRFToken();
+      const res = await fetch("/api/docker/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": token },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `HTTP ${res.status}`);
+      }
+      setMessage("Container started");
+    } catch (e: any) {
+      setMessage(`Failed to start container: ${e?.message ?? e}`);
+    } finally {
+      setDockerStarting(false);
+    }
+  }
+
+  async function removeImage() {
+    setMessage(null);
+    setDockerRemoving(true);
+    try {
+      const token = await fetchCSRFToken();
+      const res = await fetch("/api/docker/remove-image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": token },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `HTTP ${res.status}`);
+      }
+      setMessage("Image removed");
+    } catch (e: any) {
+      setMessage(`Failed to remove image: ${e?.message ?? e}`);
+    } finally {
+      setDockerRemoving(false);
+    }
+  }
+
+  async function stopContainer() {
+    setMessage(null);
+    setDockerStopping(true);
+    try {
+      const token = await fetchCSRFToken();
+      const res = await fetch("/api/docker/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": token },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `HTTP ${res.status}`);
+      }
+      setMessage("Container stopped");
+    } catch (e: any) {
+      setMessage(`Failed to stop container: ${e?.message ?? e}`);
+    } finally {
+      setDockerStopping(false);
+    }
+  }
+
+  async function restartContainer() {
+    setMessage(null);
+    setDockerRestarting(true);
+    try {
+      const token = await fetchCSRFToken();
+      const res = await fetch("/api/docker/restart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": token },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `HTTP ${res.status}`);
+      }
+      setMessage("Container restarted");
+    } catch (e: any) {
+      setMessage(`Failed to restart container: ${e?.message ?? e}`);
+    } finally {
+      setDockerRestarting(false);
+    }
   }
 
   return (
@@ -1426,57 +1674,128 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
                     borderTop: "1px solid #1F2937",
                     padding: "0.75rem 1rem",
                     display: "flex",
-                    justifyContent: "flex-end",
+                    justifyContent: "space-between",
                     gap: "0.5rem",
                     zIndex: 2,
                   }}
                 >
-                  <button type="submit" disabled={dockerSaving}>
-                    Save
-                  </button>
-                  <button
-                    type="button"
-                    onClick={generateContainerSSHKey}
-                    disabled={dockerSSHGenerating}
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: "0.5rem",
+                      alignItems: "center",
+                    }}
                   >
-                    {dockerSSHGenerating
-                      ? "Generating…"
-                      : "Generate ed25519 SSH key"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => downloadDockerKey("public")}
-                    disabled={downloadingWhich !== null}
+                    <button type="submit" disabled={dockerSaving}>
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      onClick={generateContainerSSHKey}
+                      disabled={dockerSSHGenerating}
+                    >
+                      {dockerSSHGenerating
+                        ? "Generating…"
+                        : "Generate ed25519 SSH key"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => downloadDockerKey("public")}
+                      disabled={downloadingWhich !== null}
+                    >
+                      {downloadingWhich === "public"
+                        ? "Downloading…"
+                        : "Download public key"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => downloadDockerKey("private")}
+                      disabled={downloadingWhich !== null}
+                    >
+                      {downloadingWhich === "private"
+                        ? "Downloading…"
+                        : "Download private key"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => copyDockerKey("public")}
+                      disabled={copyingWhich !== null}
+                    >
+                      {copyingWhich === "public"
+                        ? "Copying…"
+                        : "Copy public key"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => copyDockerKey("private")}
+                      disabled={copyingWhich !== null}
+                    >
+                      {copyingWhich === "private"
+                        ? "Copying…"
+                        : "Copy private key"}
+                    </button>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: "0.75rem",
+                      alignItems: "center",
+                    }}
                   >
-                    {downloadingWhich === "public"
-                      ? "Downloading…"
-                      : "Download public key"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => downloadDockerKey("private")}
-                    disabled={downloadingWhich !== null}
-                  >
-                    {downloadingWhich === "private"
-                      ? "Downloading…"
-                      : "Download private key"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => copyDockerKey("public")}
-                    disabled={copyingWhich !== null}
-                  >
-                    {copyingWhich === "public" ? "Copying…" : "Copy public key"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => copyDockerKey("private")}
-                    disabled={copyingWhich !== null}
-                  >
-                    {copyingWhich === "private"
-                      ? "Copying…"
-                      : "Copy private key"}
-                  </button>
+                    <label
+                      style={{
+                        display: "flex",
+                        gap: "0.25rem",
+                        alignItems: "center",
+                        color: "#D1D5DB",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={dockerSkipCache}
+                        onChange={(e) => setDockerSkipCache(e.target.checked)}
+                      />
+                      Skip cache
+                    </label>
+                    <button
+                      type="button"
+                      onClick={buildImage}
+                      disabled={dockerBuilding}
+                    >
+                      {dockerBuilding ? "Building…" : "Build"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={startContainer}
+                      disabled={dockerStarting}
+                    >
+                      {dockerStarting ? "Starting…" : "Start"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={stopContainer}
+                      disabled={dockerStopping}
+                    >
+                      {dockerStopping ? "Stopping…" : "Stop"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={restartContainer}
+                      disabled={dockerRestarting}
+                    >
+                      {dockerRestarting ? "Restarting…" : "Restart"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={removeImage}
+                      disabled={dockerRemoving}
+                    >
+                      {dockerRemoving ? "Removing…" : "Remove"}
+                    </button>
+                    <button type="button" onClick={openShellTab}>
+                      Shell into
+                    </button>
+                  </div>
                 </div>
                 {dockerPubKeyOut && (
                   <div style={{ marginTop: "0.75rem" }}>
@@ -1496,6 +1815,173 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
                   </div>
                 )}
               </form>
+              {/* Shell area */}
+              <div
+                ref={shellAreaRef}
+                style={{
+                  // marginTop: "1rem",
+                  display: "flex",
+                  flexDirection: "column",
+                  height: shellAreaHeight ? `${shellAreaHeight}px` : undefined,
+                  minHeight: 0,
+                  border: "1px solid #1F2937",
+                  borderRadius: 4,
+                  overflow: "hidden",
+                }}
+              >
+                {/* Tabs */}
+                <div
+                  style={{
+                    display: "flex",
+                    gap: "0.25rem",
+                    padding: "0.5rem",
+                    background: "#0B1220",
+                    borderBottom: "1px solid #1F2937",
+                    alignItems: "center",
+                  }}
+                >
+                  {shellTabs.map((t) => (
+                    <div
+                      key={t.id}
+                      onClick={() => setActiveShellId(t.id)}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        padding: "0.25rem 0.5rem",
+                        borderRadius: 4,
+                        cursor: "pointer",
+                        background:
+                          activeShellId === t.id ? "#111827" : "transparent",
+                        border:
+                          activeShellId === t.id
+                            ? "1px solid #1F2937"
+                            : "1px solid transparent",
+                        color: "#F9FAFB",
+                      }}
+                    >
+                      {t.renaming ? (
+                        <input
+                          autoFocus
+                          type="text"
+                          value={t.title}
+                          onChange={(e) => setTabTitle(t.id, e.target.value)}
+                          onBlur={() =>
+                            setShellTabs((tabs) =>
+                              tabs.map((x) =>
+                                x.id === t.id
+                                  ? {
+                                      ...x,
+                                      renaming: false,
+                                      title: (t.title || "Shell").trim(),
+                                    }
+                                  : x
+                              )
+                            )
+                          }
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              (e.currentTarget as HTMLInputElement).blur();
+                            }
+                          }}
+                          style={{
+                            background: "#111827",
+                            color: "#F9FAFB",
+                            border: "1px solid #374151",
+                            borderRadius: 4,
+                            padding: "2px 4px",
+                          }}
+                        />
+                      ) : (
+                        <span
+                          title={t.connected ? "connected" : "disconnected"}
+                          onDoubleClick={() =>
+                            setShellTabs((tabs) =>
+                              tabs.map((x) =>
+                                x.id === t.id ? { ...x, renaming: true } : x
+                              )
+                            )
+                          }
+                        >
+                          {t.title}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (t.renaming) {
+                            setShellTabs((tabs) =>
+                              tabs.map((x) =>
+                                x.id === t.id ? { ...x, renaming: false } : x
+                              )
+                            );
+                          } else {
+                            closeShellTab(t.id);
+                          }
+                        }}
+                        style={{
+                          background: "transparent",
+                          border: "none",
+                          color: "#9CA3AF",
+                        }}
+                        aria-label={t.renaming ? "Finish rename" : "Close tab"}
+                        title={t.renaming ? "Finish rename" : "Close tab"}
+                      >
+                        {t.renaming ? "✔" : "×"}
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={openShellTab}
+                    style={{ marginLeft: "auto" }}
+                  >
+                    + New Tab
+                  </button>
+                </div>
+                {/* Active terminal */}
+                <div
+                  style={{ flex: 1, display: "flex", flexDirection: "column" }}
+                >
+                  {shellTabs.length === 0 ? (
+                    <div style={{ padding: "1rem", color: "#9CA3AF" }}>
+                      No shell tabs. Click "Shell into" or "+ New Tab".
+                    </div>
+                  ) : (
+                    shellTabs.map((t) => (
+                      <div
+                        key={t.id}
+                        style={{
+                          display: activeShellId === t.id ? "flex" : "none",
+                          flexDirection: "column",
+                          height: "100%",
+                          minHeight: 0,
+                        }}
+                      >
+                        <div
+                          ref={(el) =>
+                            registerTermContainer(t.id, el as HTMLDivElement)
+                          }
+                          className="term-host"
+                          style={{
+                            flex: 1,
+                            background: "#0B1220",
+                            color: "#E5E7EB",
+                            overflow: "hidden",
+                            position: "relative",
+                            width: "100%",
+                            height: "100%",
+                            padding: 0,
+                            margin: 0,
+                          }}
+                        />
+                        {/* direct typing: input row removed */}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
             </section>
           )}
         </>

@@ -2,15 +2,16 @@ package tools
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -60,24 +61,39 @@ func (b *ShellBroker) CreateOrGet(id string, subdir string) (*ShellSession, erro
 	if strings.TrimSpace(id) == "" {
 		return nil, errors.New("session id required")
 	}
+	containerName, err := EnsureDockerContainer()
+	if err != nil {
+		return nil, fmt.Errorf("ensure container: %w", err)
+	}
+	return b.createOrGetWithContainer(containerName, id, subdir)
+}
+
+// CreateOrGetInContainer is like CreateOrGet but attaches to a specific container name.
+// The caller is responsible for ensuring the container exists and is running.
+func (b *ShellBroker) CreateOrGetInContainer(containerName string, id string, subdir string) (*ShellSession, error) {
+	return b.createOrGetWithContainer(containerName, id, subdir)
+}
+
+// createOrGetWithContainer centralizes session creation/lookup given a container name.
+// It acquires the broker lock, validates inputs, prepares workdir, starts PTY, and
+// registers the session. Callers should pass an already ensured container name.
+func (b *ShellBroker) createOrGetWithContainer(containerName string, id string, subdir string) (*ShellSession, error) {
+	if strings.TrimSpace(id) == "" {
+		return nil, errors.New("session id required")
+	}
+	if strings.TrimSpace(containerName) == "" {
+		return nil, errors.New("container name required")
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if s, ok := b.sessions[id]; ok {
 		return s, nil
 	}
 
-	containerName, err := EnsureDockerContainer()
-	if err != nil {
-		return nil, fmt.Errorf("ensure container: %w", err)
-	}
-
 	workdir := "/app"
 	if sub := strings.TrimSpace(subdir); sub != "" {
 		// Sanitize the subdirectory path to prevent path traversal attacks.
-		// filepath.Join will resolve elements like ".." and create a canonical path.
 		joinedPath := filepath.Join("/app", sub)
-
-		// Ensure the resulting path is still within the intended /app directory.
 		if !strings.HasPrefix(joinedPath, "/app/") && joinedPath != "/app" {
 			return nil, fmt.Errorf("invalid subdir, potential path traversal: %q", sub)
 		}
@@ -85,11 +101,9 @@ func (b *ShellBroker) CreateOrGet(id string, subdir string) (*ShellSession, erro
 	}
 
 	// docker exec with TTY; attach a real PTY so the shell is truly interactive
-	execArgs := []string{"exec", "-i", "-t", "-w", workdir, containerName, "/bin/bash"}
+	execArgs := []string{"exec", "-i", "-t", "-w", workdir, "-e", "TERM=xterm-256color", "-e", "COLORTERM=truecolor", "-e", "LC_ALL=C.UTF-8", containerName, "/bin/bash", "-i"}
 	cmd := exec.Command("docker", execArgs...)
-	// Clear env for safety
 	cmd.Env = []string{}
-	// Start the command with an attached PTY
 	tty, err := pty.Start(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("start docker exec PTY: %w", err)
@@ -100,7 +114,7 @@ func (b *ShellBroker) CreateOrGet(id string, subdir string) (*ShellSession, erro
 		Workdir:     workdir,
 		cmd:         cmd,
 		tty:         tty,
-		inputQueue:  make(chan []byte, 256),
+		inputQueue:  make(chan []byte, 4096),
 		subscribers: make(map[chan []byte]struct{}),
 		closed:      make(chan struct{}),
 	}
@@ -108,15 +122,17 @@ func (b *ShellBroker) CreateOrGet(id string, subdir string) (*ShellSession, erro
 	log.Printf("[Shell] session %s started: workdir=%s container=%s", id, workdir, containerName)
 	go s.run()
 	go func() {
-		// Wait for the command to exit to release process resources and prevent zombies.
 		if err := s.cmd.Wait(); err != nil {
 			log.Printf("[Shell %s] command process exited with error: %v", s.ID, err)
 		}
-		// Ensure the session is fully cleaned up if the process exits for any reason.
 		s.Close()
 	}()
 	return s, nil
 }
+
+// CreateOrGetInContainer is like CreateOrGet but attaches to a specific container name.
+// The caller is responsible for ensuring the container exists and is running.
+// (duplicate CreateOrGetInContainer removed)
 
 // Get returns a session by id.
 func (b *ShellBroker) Get(id string) (*ShellSession, bool) {
@@ -131,7 +147,9 @@ func (b *ShellBroker) List() []string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	out := make([]string, 0, len(b.sessions))
-	for id := range b.sessions { out = append(out, id) }
+	for id := range b.sessions {
+		out = append(out, id)
+	}
 	return out
 }
 
@@ -140,7 +158,9 @@ func (b *ShellBroker) Close(id string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	s, ok := b.sessions[id]
-	if !ok { return nil }
+	if !ok {
+		return nil
+	}
 	s.Close()
 	delete(b.sessions, id)
 	return nil
@@ -226,7 +246,26 @@ func (s *ShellSession) run() {
 		case <-s.closed:
 			return
 		case data := <-s.inputQueue:
-			_ = s.write(data)
+			// Batch drain queued inputs to reduce backpressure
+			buf := make([]byte, 0, len(data)+4096)
+			buf = append(buf, data...)
+			drain := true
+			for drain {
+				select {
+				case more := <-s.inputQueue:
+					buf = append(buf, more...)
+					// avoid runaway buffers; write in chunks if very large
+					if len(buf) > 64*1024 {
+						_ = s.write(buf)
+						buf = buf[:0]
+					}
+				default:
+					drain = false
+				}
+			}
+			if len(buf) > 0 {
+				_ = s.write(buf)
+			}
 		}
 	}
 }
@@ -234,13 +273,6 @@ func (s *ShellSession) run() {
 func (s *ShellSession) write(data []byte) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	// Avoid partial writes; add CR if writing single lines without newline
-	if len(data) > 0 {
-		if !bytes.HasSuffix(data, []byte("\n")) {
-			// For interactive shells, newline typically executes the command
-			data = append(data, '\n')
-		}
-	}
 	n, err := s.tty.Write(data)
 	if err != nil {
 		log.Printf("[Shell %s] write error: %v", s.ID, err)
@@ -248,6 +280,27 @@ func (s *ShellSession) write(data []byte) error {
 		log.Printf("[Shell %s] wrote %d bytes", s.ID, n)
 	}
 	return err
+}
+
+// Resize changes the PTY window size for the session.
+func (s *ShellSession) Resize(cols, rows int) error {
+	if cols <= 0 || rows <= 0 {
+		return nil
+	}
+	ws := &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}
+	f, ok := s.tty.(*os.File)
+	if !ok {
+		return fmt.Errorf("tty is not *os.File")
+	}
+	if err := pty.Setsize(f, ws); err != nil {
+		log.Printf("[Shell %s] resize error: %v", s.ID, err)
+		return err
+	}
+	// Trigger docker exec client to forward new size to container
+	if s.cmd != nil && s.cmd.Process != nil {
+		_ = s.cmd.Process.Signal(syscall.SIGWINCH)
+	}
+	return nil
 }
 
 func (s *ShellSession) readLoop(r io.Reader) {
@@ -284,7 +337,10 @@ func (s *ShellSession) readLoop(r io.Reader) {
 func (s *ShellSession) broadcast(data []byte) {
 	s.subsMu.Lock()
 	for ch := range s.subscribers {
-		select { case ch <- data: default: /* drop if slow */ }
+		select {
+		case ch <- data:
+		default: /* drop if slow */
+		}
 	}
 	s.subsMu.Unlock()
 }
