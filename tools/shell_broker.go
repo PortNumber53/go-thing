@@ -132,48 +132,7 @@ func (b *ShellBroker) createOrGetWithContainer(containerName string, id string, 
 
 // CreateOrGetInContainer is like CreateOrGet but attaches to a specific container name.
 // The caller is responsible for ensuring the container exists and is running.
-func (b *ShellBroker) CreateOrGetInContainer(containerName string, id string, subdir string) (*ShellSession, error) {
-	if strings.TrimSpace(id) == "" {
-		return nil, errors.New("session id required")
-	}
-	if strings.TrimSpace(containerName) == "" {
-		return nil, errors.New("container name required")
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if s, ok := b.sessions[id]; ok {
-		return s, nil
-	}
-
-	workdir := "/app"
-	if sub := strings.TrimSpace(subdir); sub != "" {
-		joinedPath := filepath.Join("/app", sub)
-		if !strings.HasPrefix(joinedPath, "/app/") && joinedPath != "/app" {
-			return nil, fmt.Errorf("invalid subdir, potential path traversal: %q", sub)
-		}
-		workdir = filepath.ToSlash(joinedPath)
-	}
-
-	execArgs := []string{"exec", "-i", "-t", "-w", workdir, "-e", "TERM=xterm-256color", "-e", "COLORTERM=truecolor", "-e", "LC_ALL=C.UTF-8", containerName, "/bin/bash", "-i"}
-	cmd := exec.Command("docker", execArgs...)
-	cmd.Env = []string{}
-	tty, err := pty.Start(cmd)
-	if err != nil {
-		return nil, fmt.Errorf("start docker exec PTY: %w", err)
-	}
-
-	s := &ShellSession{ID: id, Workdir: workdir, cmd: cmd, tty: tty, inputQueue: make(chan []byte, 4096), subscribers: make(map[chan []byte]struct{}), closed: make(chan struct{})}
-	b.sessions[id] = s
-	log.Printf("[Shell] session %s started: workdir=%s container=%s", id, workdir, containerName)
-	go s.run()
-	go func() {
-		if err := s.cmd.Wait(); err != nil {
-			log.Printf("[Shell %s] command process exited with error: %v", s.ID, err)
-		}
-		s.Close()
-	}()
-	return s, nil
-}
+// (duplicate CreateOrGetInContainer removed)
 
 // Get returns a session by id.
 func (b *ShellBroker) Get(id string) (*ShellSession, bool) {
