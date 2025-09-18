@@ -1,4 +1,9 @@
 import React from "react";
+// @ts-ignore - Provided by @xterm/xterm after install; local types stub exists
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { AttachAddon } from "@xterm/addon-attach";
+import "@xterm/xterm/css/xterm.css";
 import { marked } from "marked";
 import { fetchCSRFToken } from "./utils/csrf";
 import LoginModal from "./components/LoginModal";
@@ -458,6 +463,13 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
   const [dockerDockerfile, setDockerDockerfile] = React.useState<string>("");
   const [dockerSSHGenerating, setDockerSSHGenerating] =
     React.useState<boolean>(false);
+  const [dockerSkipCache, setDockerSkipCache] = React.useState<boolean>(false);
+  const [dockerBuilding, setDockerBuilding] = React.useState<boolean>(false);
+  const [dockerStarting, setDockerStarting] = React.useState<boolean>(false);
+  const [dockerRemoving, setDockerRemoving] = React.useState<boolean>(false);
+  const [dockerStopping, setDockerStopping] = React.useState<boolean>(false);
+  const [dockerRestarting, setDockerRestarting] =
+    React.useState<boolean>(false);
   const [dockerPubKeyOut, setDockerPubKeyOut] = React.useState<string>("");
   const [keyPass, setKeyPass] = React.useState("");
   const [genLoading, setGenLoading] = React.useState(false);
@@ -470,6 +482,395 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
   const [downloadingWhich, setDownloadingWhich] = React.useState<
     "public" | "private" | null
   >(null);
+
+  type ShellTab = {
+    id: string;
+    title: string;
+    ws: WebSocket | null;
+    output: string;
+    input: string;
+    renaming?: boolean;
+    connected?: boolean;
+    term?: Terminal;
+    nudged?: boolean;
+  };
+  const [shellTabs, setShellTabs] = React.useState<ShellTab[]>([]);
+  const [activeShellId, setActiveShellId] = React.useState<string | null>(null);
+  const termContainersRef = React.useRef<Map<string, HTMLDivElement | null>>(
+    new Map()
+  );
+  const termRefMap = React.useRef<Map<string, Terminal>>(new Map());
+  const fitRefMap = React.useRef<Map<string, FitAddon>>(new Map());
+  const attachRefMap = React.useRef<Map<string, AttachAddon>>(new Map());
+  const resizeObserverRef = React.useRef<Map<string, ResizeObserver>>(
+    new Map()
+  );
+  const resizeTimersRef = React.useRef<Map<string, number>>(new Map());
+  const lastSizeRef = React.useRef<Map<string, { cols: number; rows: number }>>(
+    new Map()
+  );
+  const reconnectTimersRef = React.useRef<Map<string, number>>(new Map());
+  const reconnectAttemptsRef = React.useRef<Map<string, number>>(new Map());
+  const nudgedRef = React.useRef<Map<string, boolean>>(new Map());
+  const shellAreaRef = React.useRef<HTMLDivElement | null>(null);
+  const [shellAreaHeight, setShellAreaHeight] = React.useState<number | null>(
+    null
+  );
+
+  function hasOpenWS(id: string): boolean {
+    const t = shellTabs.find((x) => x.id === id);
+    return !!(t?.ws && t.ws.readyState === WebSocket.OPEN);
+  }
+
+  function registerTermContainer(id: string, el: HTMLDivElement | null) {
+    termContainersRef.current.set(id, el);
+    if (el) setupTerminalForTab(id);
+  }
+
+  function fitTerminalToContainer(id: string) {
+    const t = shellTabs.find((x) => x.id === id);
+    const container = termContainersRef.current.get(id);
+    const term = t?.term;
+    if (!t || !container || !term) return;
+    // Measure character size
+    const probe = document.createElement("span");
+    probe.textContent = "W".repeat(20);
+    probe.style.visibility = "hidden";
+    probe.style.whiteSpace = "pre";
+    probe.style.fontFamily =
+      'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
+    container.appendChild(probe);
+    const w = probe.getBoundingClientRect().width / 20;
+    const h = probe.getBoundingClientRect().height;
+    probe.remove();
+    if (!w || !h) return;
+    const padding = 8;
+    const cols = Math.max(
+      20,
+      Math.floor((container.clientWidth - padding) / w)
+    );
+    const rows = Math.max(
+      5,
+      Math.floor((container.clientHeight - padding) / h)
+    );
+    try {
+      (term as any).resize(cols, rows);
+    } catch {}
+    if (t.ws && t.ws.readyState === WebSocket.OPEN) {
+      try {
+        t.ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      } catch {}
+    }
+  }
+
+  // Ensure active tab terminal is created and resized on activation
+  React.useEffect(() => {
+    if (!activeShellId) return;
+    setupTerminalForTab(activeShellId);
+    fitTerminalToContainer(activeShellId);
+  }, [activeShellId, shellTabs.length]);
+
+  function setupTerminalForTab(id: string) {
+    setShellTabs((tabs) => {
+      const t = tabs.find((x) => x.id === id);
+      if (!t) return tabs;
+      if (t.term) return tabs; // already set up
+      const container = termContainersRef.current.get(id);
+      if (!container) return tabs;
+      // Hard guard: if a terminal root already exists in this container, skip creating another
+      try {
+        if (container.querySelector(".xterm")) {
+          return tabs;
+        }
+      } catch {}
+      const term = new Terminal({
+        convertEol: true,
+        cursorBlink: true,
+        lineHeight: 1,
+        letterSpacing: 0,
+        fontSize: 15,
+        fontFamily:
+          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+        theme: { background: "#0B1220", foreground: "#E5E7EB" },
+      });
+      const fit = new FitAddon();
+      term.loadAddon(fit as any);
+      term.open(container);
+      try {
+        term.focus();
+      } catch {}
+      // Initial size using proposeDimensions
+      try {
+        sendResize(id);
+      } catch {}
+      // Ensure font metrics are loaded before final fit/resize
+      try {
+        const fontsAny: any = (document as any).fonts;
+        if (fontsAny && typeof fontsAny.ready?.then === "function") {
+          fontsAny.ready.then(() => {
+            sendResize(id);
+          });
+        }
+      } catch {}
+      fitRefMap.current.set(id, fit);
+      // Attach addon will handle both directions once WS is open
+      // Store for out-of-react handlers
+      termRefMap.current.set(id, term);
+      // If a websocket already exists and is open, attach now
+      try {
+        const existingTab = tabs.find((x) => x.id === id);
+        const existingWs = existingTab?.ws as WebSocket | null;
+        const alreadyAttached = attachRefMap.current.has(id);
+        if (
+          existingWs &&
+          existingWs.readyState === WebSocket.OPEN &&
+          !alreadyAttached
+        ) {
+          const attach = new AttachAddon(existingWs, {
+            bidirectional: true,
+            useBinary: true,
+          });
+          term.loadAddon(attach as any);
+          attachRefMap.current.set(id, attach);
+          try {
+            term.focus();
+          } catch {}
+          // Ensure terminal size synced after attaching
+          setTimeout(() => {
+            try {
+              sendResize(id);
+            } catch {}
+          }, 0);
+        }
+      } catch {}
+      // Ensure there is a connection attempt even if initial trigger was missed
+      try {
+        const existingTab = tabs.find((x) => x.id === id);
+        const wsState = existingTab?.ws?.readyState;
+        if (
+          !existingTab?.ws ||
+          wsState === WebSocket.CLOSED ||
+          wsState === WebSocket.CLOSING
+        ) {
+          setTimeout(() => {
+            try {
+              connectWS(id);
+            } catch {}
+          }, 0);
+        }
+      } catch {}
+      // Handle window resize
+      const onWinResize = () => {
+        const key = id;
+        const prev = resizeTimersRef.current.get(key);
+        if (prev) window.clearTimeout(prev);
+        const tmr = window.setTimeout(() => {
+          sendResize(id);
+          try {
+            (term as any).scrollToBottom();
+          } catch {}
+        }, 50);
+        resizeTimersRef.current.set(key, tmr);
+      };
+      window.addEventListener("resize", onWinResize);
+      // Save term in tab
+      return tabs.map((x) => (x.id === id ? { ...x, term } : x));
+    });
+  }
+
+  // Compute available space for the shell area and set explicit height
+  function layoutShellArea() {
+    const el = shellAreaRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const viewportH =
+      window.innerHeight || document.documentElement.clientHeight || 0;
+    // Reserve space for the fixed action bar (~64px) plus 8px gap
+    const reserve = 72;
+    let h = Math.max(160, Math.floor(viewportH - rect.top - reserve));
+    // Avoid excessive height
+    if (!Number.isFinite(h) || h > 2000) h = 2000;
+    setShellAreaHeight(h);
+    // Nudge active terminal to resize to the new height
+    try {
+      if (activeShellId) {
+        const prev = resizeTimersRef.current.get("shellArea");
+        if (prev) window.clearTimeout(prev);
+        const tmr = window.setTimeout(() => {
+          try {
+            sendResize(activeShellId);
+          } catch {}
+        }, 0);
+        resizeTimersRef.current.set("shellArea", tmr);
+      }
+    } catch {}
+  }
+
+  React.useEffect(() => {
+    if (tab !== "docker") return;
+    layoutShellArea();
+    const onResize = () => layoutShellArea();
+    window.addEventListener("resize", onResize);
+    const raf = window.requestAnimationFrame(() => layoutShellArea());
+    // Observe shell area element itself for size changes
+    const el = shellAreaRef.current;
+    let ro: ResizeObserver | null = null;
+    if (el) {
+      ro = new ResizeObserver(() => {
+        try {
+          if (activeShellId) sendResize(activeShellId);
+        } catch {}
+      });
+      ro.observe(el);
+    }
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.cancelAnimationFrame(raf);
+      try {
+        ro?.disconnect();
+      } catch {}
+    };
+  }, [tab, shellTabs.length, activeShellId]);
+
+  // When active shell changes or shell height changes, ensure a resize
+  React.useEffect(() => {
+    if (!activeShellId) return;
+    const prev = resizeTimersRef.current.get("activeShell");
+    if (prev) window.clearTimeout(prev);
+    const tmr = window.setTimeout(() => {
+      try {
+        sendResize(activeShellId);
+      } catch {}
+    }, 0);
+    resizeTimersRef.current.set("activeShell", tmr);
+  }, [activeShellId, shellAreaHeight]);
+
+  // Global window resize fallback to ensure active terminal fits
+  React.useEffect(() => {
+    const onGlobalResize = () => {
+      const prev = resizeTimersRef.current.get("globalWin");
+      if (prev) window.clearTimeout(prev);
+      const tmr = window.setTimeout(() => {
+        try {
+          if (activeShellId) sendResize(activeShellId);
+        } catch {}
+      }, 50);
+      resizeTimersRef.current.set("globalWin", tmr);
+    };
+    window.addEventListener("resize", onGlobalResize);
+    return () => window.removeEventListener("resize", onGlobalResize);
+  }, [activeShellId]);
+
+  // Attempt to reconnect WS for a tab
+  function scheduleReconnect(id: string) {
+    const tab = shellTabs.find((t) => t.id === id);
+    if (!tab) return;
+    const attempt = (reconnectAttemptsRef.current.get(id) || 0) + 1;
+    reconnectAttemptsRef.current.set(id, attempt);
+    const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000); // 1s,2s,4s,8s,10s cap
+    const prev = reconnectTimersRef.current.get(id);
+    if (prev) window.clearTimeout(prev);
+    const tmr = window.setTimeout(() => connectWS(id), delay);
+    reconnectTimersRef.current.set(id, tmr);
+  }
+
+  function computeInitialSize(id: string): { cols: number; rows: number } {
+    let cols = 80,
+      rows = 24;
+    try {
+      const fit = fitRefMap.current.get(id) as any;
+      const dims = fit?.proposeDimensions?.();
+      if (dims && dims.cols && dims.rows) {
+        cols = Math.max(20, Math.min(240, (dims.cols as number) | 0));
+        rows = Math.max(5, Math.min(120, (dims.rows as number) | 0));
+      }
+    } catch {}
+    return { cols, rows };
+  }
+
+  function connectWS(id: string) {
+    const existing = shellTabs.find((t) => t.id === id);
+    if (!existing) return;
+    const { cols, rows } = computeInitialSize(id);
+    const url = `${wsBase()}/shell/ws/${encodeURIComponent(
+      id
+    )}?cols=${cols}&rows=${rows}`;
+    try {
+      console.debug("[shell] connecting", { id, url, cols, rows });
+    } catch {}
+    const ws = new WebSocket(url);
+    ws.binaryType = "arraybuffer";
+    setShellTabs((tabs) => tabs.map((t) => (t.id === id ? { ...t, ws } : t)));
+    ws.onopen = () => {
+      reconnectAttemptsRef.current.set(id, 0);
+      const prevTmr = reconnectTimersRef.current.get(id);
+      if (prevTmr) window.clearTimeout(prevTmr);
+      setShellTabs((tabs) =>
+        tabs.map((t) => (t.id === id ? { ...t, connected: true } : t))
+      );
+      setupTerminalForTab(id);
+      try {
+        const term = termRefMap.current.get(id);
+        if (term) {
+          // Replace any previous attach addon with a fresh one
+          try {
+            attachRefMap.current.get(id)?.dispose();
+          } catch {}
+          const attach = new AttachAddon(ws, {
+            bidirectional: true,
+            useBinary: true,
+          });
+          term.loadAddon(attach as any);
+          attachRefMap.current.set(id, attach);
+          try {
+            term.focus();
+          } catch {}
+          // After opening, propose->resize->send
+          setTimeout(() => {
+            try {
+              sendResize(id);
+            } catch {}
+          }, 0);
+        }
+      } catch {}
+      // Observe container size changes if not already
+      const containerEl = termContainersRef.current.get(id);
+      if (containerEl && !resizeObserverRef.current.get(id)) {
+        const ro = new ResizeObserver(() => {
+          const key = id;
+          const prev = resizeTimersRef.current.get(key);
+          if (prev) window.clearTimeout(prev);
+          const tmr = window.setTimeout(() => {
+            sendResize(id);
+          }, 50);
+          resizeTimersRef.current.set(key, tmr);
+        });
+        ro.observe(containerEl);
+        resizeObserverRef.current.set(id, ro);
+      }
+    };
+    ws.onmessage = () => {};
+    ws.onclose = () => {
+      setShellTabs((tabs) =>
+        tabs.map((t) => (t.id === id ? { ...t, connected: false } : t))
+      );
+      try {
+        attachRefMap.current.get(id)?.dispose();
+      } catch {}
+      attachRefMap.current.delete(id);
+      scheduleReconnect(id);
+    };
+    ws.onerror = () => {
+      setShellTabs((tabs) =>
+        tabs.map((t) => (t.id === id ? { ...t, connected: false } : t))
+      );
+      try {
+        attachRefMap.current.get(id)?.dispose();
+      } catch {}
+      attachRefMap.current.delete(id);
+      scheduleReconnect(id);
+    };
+  }
 
   React.useEffect(() => {
     let aborted = false;
@@ -521,6 +922,21 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
       aborted = true;
     };
   }, [tab]);
+
+  // Inject CSS isolation for xterm to avoid global design rules affecting it
+  React.useEffect(() => {
+    const styleId = "term-host-css";
+    if (!document.getElementById(styleId)) {
+      const style = document.createElement("style");
+      style.id = styleId;
+      style.textContent = `
+        .term-host, .term-host .xterm { position: relative; width: 100%; height: 100%; display: block; }
+        .term-host .xterm-viewport { height: 100% !important; padding: 0 !important; }
+        .term-host .xterm-rows { padding: 0 !important; }
+      `;
+      document.head.appendChild(style);
+    }
+  }, []);
 
   async function saveProfile(e: React.FormEvent) {
     e.preventDefault();
@@ -751,6 +1167,223 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+  }
+
+  function wsBase(): string {
+    const proto = window.location.protocol === "https:" ? "wss" : "ws";
+    return `${proto}://${window.location.host}`;
+  }
+
+  async function openShellTab() {
+    const id = crypto.randomUUID();
+    const idx = shellTabs.length + 1;
+    const title = `Shell ${idx}`;
+    const newTab: ShellTab = {
+      id,
+      title,
+      ws: null,
+      output: "",
+      input: "",
+      connected: false,
+    };
+    setShellTabs((tabs) => [...tabs, newTab]);
+    setActiveShellId(id);
+
+    // Defer until container is rendered then connect WS
+    setTimeout(() => {
+      connectWS(id);
+    }, 0);
+  }
+
+  function sendResize(id: string) {
+    const term = termRefMap.current.get(id);
+    const t = shellTabs.find((x) => x.id === id);
+    if (!term || !t?.ws) return;
+    let cols = (term as any)?.cols ?? 80;
+    let rows = (term as any)?.rows ?? 24;
+    try {
+      const fit = fitRefMap.current.get(id) as any;
+      const dims = fit?.proposeDimensions?.();
+      if (dims && dims.cols && dims.rows) {
+        const proposedCols = dims.cols | 0;
+        const proposedRows = dims.rows | 0;
+        // Clamp to sane bounds to avoid runaway growth loops
+        cols = Math.max(20, Math.min(240, proposedCols));
+        rows = Math.max(5, Math.min(120, proposedRows));
+        const last = lastSizeRef.current.get(id);
+        if (!last || last.cols !== cols || last.rows !== rows) {
+          try {
+            (term as any).resize(cols, rows);
+          } catch {}
+          lastSizeRef.current.set(id, { cols, rows });
+        }
+      }
+    } catch {}
+    if (t.ws.readyState === WebSocket.OPEN) {
+      try {
+        t.ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      } catch {}
+    }
+  }
+
+  async function closeShellTab(id: string) {
+    const t = shellTabs.find((x) => x.id === id);
+    if (t?.ws) {
+      try {
+        t.ws.close();
+      } catch {}
+    }
+    // Clear reconnect timer
+    try {
+      const tmr = reconnectTimersRef.current.get(id);
+      if (tmr) window.clearTimeout(tmr);
+    } catch {}
+    // Dispose terminal
+    const term = termRefMap.current.get(id);
+    try {
+      term?.dispose();
+    } catch {}
+    termRefMap.current.delete(id);
+    // Best-effort notify server
+    fetch(`/shell/sessions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }).catch(() => {});
+    setShellTabs((tabs) => tabs.filter((x) => x.id !== id));
+    if (activeShellId === id) {
+      const rest = shellTabs.filter((x) => x.id !== id);
+      setActiveShellId(rest.length ? rest[rest.length - 1].id : null);
+    }
+  }
+
+  function setTabTitle(id: string, title: string) {
+    setShellTabs((tabs) =>
+      tabs.map((t) => (t.id === id ? { ...t, title } : t))
+    );
+  }
+
+  function sendToShell(id: string) {
+    const t = shellTabs.find((x) => x.id === id);
+    if (!t || !t.ws || t.ws.readyState !== WebSocket.OPEN) return;
+    const line = t.input;
+    if (!line) return;
+    try {
+      (t.ws as WebSocket).send(line);
+      setShellTabs((tabs) =>
+        tabs.map((x) => (x.id === id ? { ...x, input: "" } : x))
+      );
+    } catch {}
+  }
+
+  // xterm handles key events directly; no manual key mapping needed
+
+  async function buildImage() {
+    setMessage(null);
+    setDockerBuilding(true);
+    try {
+      const token = await fetchCSRFToken();
+      const res = await fetch("/api/docker/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": token },
+        body: JSON.stringify({ no_cache: !!dockerSkipCache }),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `HTTP ${res.status}`);
+      }
+      setMessage("Image built successfully");
+    } catch (e: any) {
+      setMessage(`Failed to build image: ${e?.message ?? e}`);
+    } finally {
+      setDockerBuilding(false);
+    }
+  }
+
+  async function startContainer() {
+    setMessage(null);
+    setDockerStarting(true);
+    try {
+      const token = await fetchCSRFToken();
+      const res = await fetch("/api/docker/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": token },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `HTTP ${res.status}`);
+      }
+      setMessage("Container started");
+    } catch (e: any) {
+      setMessage(`Failed to start container: ${e?.message ?? e}`);
+    } finally {
+      setDockerStarting(false);
+    }
+  }
+
+  async function removeImage() {
+    setMessage(null);
+    setDockerRemoving(true);
+    try {
+      const token = await fetchCSRFToken();
+      const res = await fetch("/api/docker/remove-image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": token },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `HTTP ${res.status}`);
+      }
+      setMessage("Image removed");
+    } catch (e: any) {
+      setMessage(`Failed to remove image: ${e?.message ?? e}`);
+    } finally {
+      setDockerRemoving(false);
+    }
+  }
+
+  async function stopContainer() {
+    setMessage(null);
+    setDockerStopping(true);
+    try {
+      const token = await fetchCSRFToken();
+      const res = await fetch("/api/docker/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": token },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `HTTP ${res.status}`);
+      }
+      setMessage("Container stopped");
+    } catch (e: any) {
+      setMessage(`Failed to stop container: ${e?.message ?? e}`);
+    } finally {
+      setDockerStopping(false);
+    }
+  }
+
+  async function restartContainer() {
+    setMessage(null);
+    setDockerRestarting(true);
+    try {
+      const token = await fetchCSRFToken();
+      const res = await fetch("/api/docker/restart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": token },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `HTTP ${res.status}`);
+      }
+      setMessage("Container restarted");
+    } catch (e: any) {
+      setMessage(`Failed to restart container: ${e?.message ?? e}`);
+    } finally {
+      setDockerRestarting(false);
+    }
   }
 
   return (
@@ -1001,57 +1634,128 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
                     borderTop: "1px solid #1F2937",
                     padding: "0.75rem 1rem",
                     display: "flex",
-                    justifyContent: "flex-end",
+                    justifyContent: "space-between",
                     gap: "0.5rem",
                     zIndex: 2,
                   }}
                 >
-                  <button type="submit" disabled={dockerSaving}>
-                    Save
-                  </button>
-                  <button
-                    type="button"
-                    onClick={generateContainerSSHKey}
-                    disabled={dockerSSHGenerating}
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: "0.5rem",
+                      alignItems: "center",
+                    }}
                   >
-                    {dockerSSHGenerating
-                      ? "Generating…"
-                      : "Generate ed25519 SSH key"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => downloadDockerKey("public")}
-                    disabled={downloadingWhich !== null}
+                    <button type="submit" disabled={dockerSaving}>
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      onClick={generateContainerSSHKey}
+                      disabled={dockerSSHGenerating}
+                    >
+                      {dockerSSHGenerating
+                        ? "Generating…"
+                        : "Generate ed25519 SSH key"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => downloadDockerKey("public")}
+                      disabled={downloadingWhich !== null}
+                    >
+                      {downloadingWhich === "public"
+                        ? "Downloading…"
+                        : "Download public key"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => downloadDockerKey("private")}
+                      disabled={downloadingWhich !== null}
+                    >
+                      {downloadingWhich === "private"
+                        ? "Downloading…"
+                        : "Download private key"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => copyDockerKey("public")}
+                      disabled={copyingWhich !== null}
+                    >
+                      {copyingWhich === "public"
+                        ? "Copying…"
+                        : "Copy public key"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => copyDockerKey("private")}
+                      disabled={copyingWhich !== null}
+                    >
+                      {copyingWhich === "private"
+                        ? "Copying…"
+                        : "Copy private key"}
+                    </button>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: "0.75rem",
+                      alignItems: "center",
+                    }}
                   >
-                    {downloadingWhich === "public"
-                      ? "Downloading…"
-                      : "Download public key"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => downloadDockerKey("private")}
-                    disabled={downloadingWhich !== null}
-                  >
-                    {downloadingWhich === "private"
-                      ? "Downloading…"
-                      : "Download private key"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => copyDockerKey("public")}
-                    disabled={copyingWhich !== null}
-                  >
-                    {copyingWhich === "public" ? "Copying…" : "Copy public key"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => copyDockerKey("private")}
-                    disabled={copyingWhich !== null}
-                  >
-                    {copyingWhich === "private"
-                      ? "Copying…"
-                      : "Copy private key"}
-                  </button>
+                    <label
+                      style={{
+                        display: "flex",
+                        gap: "0.25rem",
+                        alignItems: "center",
+                        color: "#D1D5DB",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={dockerSkipCache}
+                        onChange={(e) => setDockerSkipCache(e.target.checked)}
+                      />
+                      Skip cache
+                    </label>
+                    <button
+                      type="button"
+                      onClick={buildImage}
+                      disabled={dockerBuilding}
+                    >
+                      {dockerBuilding ? "Building…" : "Build"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={startContainer}
+                      disabled={dockerStarting}
+                    >
+                      {dockerStarting ? "Starting…" : "Start"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={stopContainer}
+                      disabled={dockerStopping}
+                    >
+                      {dockerStopping ? "Stopping…" : "Stop"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={restartContainer}
+                      disabled={dockerRestarting}
+                    >
+                      {dockerRestarting ? "Restarting…" : "Restart"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={removeImage}
+                      disabled={dockerRemoving}
+                    >
+                      {dockerRemoving ? "Removing…" : "Remove"}
+                    </button>
+                    <button type="button" onClick={openShellTab}>
+                      Shell into
+                    </button>
+                  </div>
                 </div>
                 {dockerPubKeyOut && (
                   <div style={{ marginTop: "0.75rem" }}>
@@ -1071,6 +1775,173 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
                   </div>
                 )}
               </form>
+              {/* Shell area */}
+              <div
+                ref={shellAreaRef}
+                style={{
+                  // marginTop: "1rem",
+                  display: "flex",
+                  flexDirection: "column",
+                  height: shellAreaHeight ? `${shellAreaHeight}px` : undefined,
+                  minHeight: 0,
+                  border: "1px solid #1F2937",
+                  borderRadius: 4,
+                  overflow: "hidden",
+                }}
+              >
+                {/* Tabs */}
+                <div
+                  style={{
+                    display: "flex",
+                    gap: "0.25rem",
+                    padding: "0.5rem",
+                    background: "#0B1220",
+                    borderBottom: "1px solid #1F2937",
+                    alignItems: "center",
+                  }}
+                >
+                  {shellTabs.map((t) => (
+                    <div
+                      key={t.id}
+                      onClick={() => setActiveShellId(t.id)}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        padding: "0.25rem 0.5rem",
+                        borderRadius: 4,
+                        cursor: "pointer",
+                        background:
+                          activeShellId === t.id ? "#111827" : "transparent",
+                        border:
+                          activeShellId === t.id
+                            ? "1px solid #1F2937"
+                            : "1px solid transparent",
+                        color: "#F9FAFB",
+                      }}
+                    >
+                      {t.renaming ? (
+                        <input
+                          autoFocus
+                          type="text"
+                          value={t.title}
+                          onChange={(e) => setTabTitle(t.id, e.target.value)}
+                          onBlur={() =>
+                            setShellTabs((tabs) =>
+                              tabs.map((x) =>
+                                x.id === t.id
+                                  ? {
+                                      ...x,
+                                      renaming: false,
+                                      title: (t.title || "Shell").trim(),
+                                    }
+                                  : x
+                              )
+                            )
+                          }
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              (e.currentTarget as HTMLInputElement).blur();
+                            }
+                          }}
+                          style={{
+                            background: "#111827",
+                            color: "#F9FAFB",
+                            border: "1px solid #374151",
+                            borderRadius: 4,
+                            padding: "2px 4px",
+                          }}
+                        />
+                      ) : (
+                        <span
+                          title={t.connected ? "connected" : "disconnected"}
+                          onDoubleClick={() =>
+                            setShellTabs((tabs) =>
+                              tabs.map((x) =>
+                                x.id === t.id ? { ...x, renaming: true } : x
+                              )
+                            )
+                          }
+                        >
+                          {t.title}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (t.renaming) {
+                            setShellTabs((tabs) =>
+                              tabs.map((x) =>
+                                x.id === t.id ? { ...x, renaming: false } : x
+                              )
+                            );
+                          } else {
+                            closeShellTab(t.id);
+                          }
+                        }}
+                        style={{
+                          background: "transparent",
+                          border: "none",
+                          color: "#9CA3AF",
+                        }}
+                        aria-label={t.renaming ? "Finish rename" : "Close tab"}
+                        title={t.renaming ? "Finish rename" : "Close tab"}
+                      >
+                        {t.renaming ? "✔" : "×"}
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={openShellTab}
+                    style={{ marginLeft: "auto" }}
+                  >
+                    + New Tab
+                  </button>
+                </div>
+                {/* Active terminal */}
+                <div
+                  style={{ flex: 1, display: "flex", flexDirection: "column" }}
+                >
+                  {shellTabs.length === 0 ? (
+                    <div style={{ padding: "1rem", color: "#9CA3AF" }}>
+                      No shell tabs. Click “Shell into” or “+ New Tab”.
+                    </div>
+                  ) : (
+                    shellTabs.map((t) => (
+                      <div
+                        key={t.id}
+                        style={{
+                          display: activeShellId === t.id ? "flex" : "none",
+                          flexDirection: "column",
+                          height: "100%",
+                          minHeight: 0,
+                        }}
+                      >
+                        <div
+                          ref={(el) =>
+                            registerTermContainer(t.id, el as HTMLDivElement)
+                          }
+                          className="term-host"
+                          style={{
+                            flex: 1,
+                            background: "#0B1220",
+                            color: "#E5E7EB",
+                            overflow: "hidden",
+                            position: "relative",
+                            width: "100%",
+                            height: "100%",
+                            padding: 0,
+                            margin: 0,
+                          }}
+                        />
+                        {/* direct typing: input row removed */}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
             </section>
           )}
         </>

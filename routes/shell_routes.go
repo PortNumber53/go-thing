@@ -1,28 +1,46 @@
 package routes
 
 import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"go-thing/db"
+	toolsrv "go-thing/tools"
+
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	toolsrv "go-thing/tools"
 )
+
+// parseInt returns int or 0
+func parseInt(s string) int {
+	var n int
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0
+		}
+	}
+	_, _ = fmt.Sscanf(s, "%d", &n)
+	return n
+}
 
 // RegisterShellRoutes registers shell session management routes and the WebSocket endpoint.
 // The caller must provide a configured websocket.Upgrader (e.g., with a proper CheckOrigin).
-func RegisterShellRoutes(r *gin.Engine, upgrader *websocket.Upgrader) {
+func RegisterShellRoutes(r *gin.Engine, requireAuth gin.HandlerFunc, upgrader *websocket.Upgrader) {
+	auth := r.Group("/", requireAuth)
 	// List sessions
-	r.GET("/shell/sessions", func(c *gin.Context) {
+	auth.GET("/shell/sessions", func(c *gin.Context) {
 		ids := toolsrv.GetShellBroker().List()
 		c.JSON(http.StatusOK, gin.H{"sessions": ids})
 	})
 
 	// Create or get a session
-	r.POST("/shell/sessions", func(c *gin.Context) {
+	auth.POST("/shell/sessions", func(c *gin.Context) {
 		var req struct {
 			ID     string `json:"id" binding:"required"`
 			Subdir string `json:"subdir"`
@@ -43,7 +61,7 @@ func RegisterShellRoutes(r *gin.Engine, upgrader *websocket.Upgrader) {
 	})
 
 	// Delete a session
-	r.DELETE("/shell/sessions/:id", func(c *gin.Context) {
+	auth.DELETE("/shell/sessions/:id", func(c *gin.Context) {
 		id := c.Param("id")
 		if err := toolsrv.GetShellBroker().Close(id); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -53,13 +71,57 @@ func RegisterShellRoutes(r *gin.Engine, upgrader *websocket.Upgrader) {
 	})
 
 	// WebSocket attach to a shell session (creates if missing)
-	r.GET("/shell/ws/:id", func(c *gin.Context) {
+	auth.GET("/shell/ws/:id", func(c *gin.Context) {
 		id := c.Param("id")
-		// Create if missing with default workdir
-		sess, err := toolsrv.GetShellBroker().CreateOrGet(id, "")
+		// Read user's docker settings to ensure/start the right container
+		v, ok := c.Get("userID")
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+			return
+		}
+		uid, ok := v.(int64)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user id"})
+			return
+		}
+		dbc := db.Get()
+		if dbc == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "db not initialized"})
+			return
+		}
+		var settingsRaw sql.NullString
+		if err := dbc.QueryRow(`SELECT settings::text FROM users WHERE id=$1`, uid).Scan(&settingsRaw); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load settings"})
+			return
+		}
+		var settings map[string]interface{}
+		if settingsRaw.Valid && strings.TrimSpace(settingsRaw.String) != "" {
+			_ = json.Unmarshal([]byte(settingsRaw.String), &settings)
+		}
+		dockerVal, _ := settings["docker"].(map[string]interface{})
+		container, _ := dockerVal["container"].(string)
+		image, _ := dockerVal["image"].(string)
+		args, _ := dockerVal["args"].(string)
+		if strings.TrimSpace(container) == "" || strings.TrimSpace(image) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "docker container/image not configured"})
+			return
+		}
+		if _, err := toolsrv.StartContainerWithSettings(container, image, args); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+			return
+		}
+		sess, err := toolsrv.GetShellBroker().CreateOrGetInContainer(container, id, "")
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
+		}
+		// Apply initial size from query if provided (avoid 0x0 default)
+		if colsQ := strings.TrimSpace(c.Query("cols")); colsQ != "" {
+			if rowsQ := strings.TrimSpace(c.Query("rows")); rowsQ != "" {
+				if cc, rr := parseInt(colsQ), parseInt(rowsQ); cc > 0 && rr > 0 {
+					_ = sess.Resize(cc, rr)
+				}
+			}
 		}
 		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
@@ -105,8 +167,24 @@ func RegisterShellRoutes(r *gin.Engine, upgrader *websocket.Upgrader) {
 			}
 		}()
 
+		// Keepalive ping goroutine to ensure the connection stays open when idle
+		go func() {
+			pingTicker := time.NewTicker(30 * time.Second)
+			defer pingTicker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-pingTicker.C:
+					writeMu.Lock()
+					_ = conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(5*time.Second))
+					writeMu.Unlock()
+				}
+			}
+		}()
+
 		// Read loop -> enqueue to shell with heartbeat and backpressure handling
-		const pongWait = 60 * time.Second
+		const pongWait = 90 * time.Second
 		conn.SetReadDeadline(time.Now().Add(pongWait))
 		conn.SetPongHandler(func(string) error {
 			conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -122,7 +200,26 @@ func RegisterShellRoutes(r *gin.Engine, upgrader *websocket.Upgrader) {
 				}
 				break
 			}
-			if mt == websocket.TextMessage || mt == websocket.BinaryMessage {
+			if mt == websocket.TextMessage {
+				// Try to detect resize control messages: {"type":"resize","cols":80,"rows":24}
+				var ctrl struct {
+					Type string `json:"type"`
+					Cols int    `json:"cols"`
+					Rows int    `json:"rows"`
+				}
+				if err := json.Unmarshal(msg, &ctrl); err == nil && ctrl.Type == "resize" {
+					_ = sess.Resize(ctrl.Cols, ctrl.Rows)
+					continue
+				}
+				// Treat other text frames as input (supports non-binary clients)
+				if !sess.Enqueue(msg) {
+					log.Printf("[ShellWS %s] input queue is full, closing connection.", id)
+					writeMu.Lock()
+					_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "Input queue full"))
+					writeMu.Unlock()
+					break ReadLoop
+				}
+			} else if mt == websocket.BinaryMessage {
 				if !sess.Enqueue(msg) {
 					log.Printf("[ShellWS %s] input queue is full, closing connection.", id)
 					writeMu.Lock()
