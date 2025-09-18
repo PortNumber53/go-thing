@@ -633,9 +633,8 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
             default: !!pDefault,
           }),
         });
-        const txt = await res.text();
-        if (!res.ok) throw new Error(txt || `HTTP ${res.status}`);
-        const payload = JSON.parse(txt);
+        if (!res.ok) throw new Error(await res.text());
+        const payload = await res.json();
         const updated: Prompt | null = payload?.prompt || null;
         if (!updated) throw new Error("Malformed response");
         // Update local state: replace the item; if default true, clear others
