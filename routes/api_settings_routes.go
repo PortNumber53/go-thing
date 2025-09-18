@@ -510,9 +510,14 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
 			return
 		}
-		if _, err := dbc.Exec(`DELETE FROM system_prompts WHERE id=$1 AND user_id=$2`, pid, uid); err != nil {
+		res, err := dbc.Exec(`DELETE FROM system_prompts WHERE id=$1 AND user_id=$2`, pid, uid)
+		if err != nil {
 			log.Printf("[Prompts] delete err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete"})
+			return
+		}
+		if rows, _ := res.RowsAffected(); rows == 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "prompt not found"})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
