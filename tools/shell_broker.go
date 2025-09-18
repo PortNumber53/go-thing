@@ -100,6 +100,7 @@ func (b *ShellBroker) createOrGetWithContainer(containerName string, id string, 
 		workdir = filepath.ToSlash(joinedPath)
 	}
 
+	// docker exec with TTY; attach a real PTY so the shell is truly interactive
 	execArgs := []string{"exec", "-i", "-t", "-w", workdir, "-e", "TERM=xterm-256color", "-e", "COLORTERM=truecolor", "-e", "LC_ALL=C.UTF-8", containerName, "/bin/bash", "-i"}
 	cmd := exec.Command("docker", execArgs...)
 	cmd.Env = []string{}
@@ -108,7 +109,15 @@ func (b *ShellBroker) createOrGetWithContainer(containerName string, id string, 
 		return nil, fmt.Errorf("start docker exec PTY: %w", err)
 	}
 
-	s := &ShellSession{ID: id, Workdir: workdir, cmd: cmd, tty: tty, inputQueue: make(chan []byte, 4096), subscribers: make(map[chan []byte]struct{}), closed: make(chan struct{})}
+	s := &ShellSession{
+		ID:          id,
+		Workdir:     workdir,
+		cmd:         cmd,
+		tty:         tty,
+		inputQueue:  make(chan []byte, 4096),
+		subscribers: make(map[chan []byte]struct{}),
+		closed:      make(chan struct{}),
+	}
 	b.sessions[id] = s
 	log.Printf("[Shell] session %s started: workdir=%s container=%s", id, workdir, containerName)
 	go s.run()

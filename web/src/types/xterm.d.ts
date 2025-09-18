@@ -5,6 +5,7 @@ declare module "@xterm/xterm" {
     write(data: string | Uint8Array): void;
     onData(cb: (data: string) => void): void;
     loadAddon(addon: any): void;
+    focus(): void;
     dispose(): void;
     readonly cols: number;
     readonly rows: number;
@@ -15,7 +16,10 @@ declare module "@xterm/xterm" {
 declare module "@xterm/addon-fit" {
   export class FitAddon {
     constructor();
+    activate?(terminal: any): void;
+    dispose?(): void;
     fit(): void;
+    proposeDimensions?(): { cols: number; rows: number } | undefined;
   }
 }
 
@@ -26,6 +30,7 @@ declare module "@xterm/addon-attach" {
   }
   export class AttachAddon {
     constructor(socket: WebSocket, options?: AttachOptions);
+    activate?(terminal: any): void;
     dispose(): void;
   }
 }
