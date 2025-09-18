@@ -503,404 +503,215 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
     "public" | "private" | null
   >(null);
 
-  type ShellTab = {
-    id: string;
-    title: string;
-    ws: WebSocket | null;
-    output: string;
-    input: string;
-    renaming?: boolean;
-    connected?: boolean;
-    term?: Terminal;
-    nudged?: boolean;
+  // Personal Settings: System Prompts state
+  type Prompt = {
+    id: number;
+    name: string;
+    content: string;
+    preferred_llms: string[];
+    active: boolean;
+    default: boolean;
+    created_at?: string;
+    updated_at?: string;
   };
-  const [shellTabs, setShellTabs] = React.useState<ShellTab[]>([]);
-  const [activeShellId, setActiveShellId] = React.useState<string | null>(null);
-  const termContainersRef = React.useRef<Map<string, HTMLDivElement | null>>(
-    new Map()
-  );
-  const termRefMap = React.useRef<Map<string, Terminal>>(new Map());
-  const fitRefMap = React.useRef<Map<string, FitAddon>>(new Map());
-  const attachRefMap = React.useRef<Map<string, AttachAddon>>(new Map());
-  const resizeObserverRef = React.useRef<Map<string, ResizeObserver>>(
-    new Map()
-  );
-  const resizeTimersRef = React.useRef<Map<string, number>>(new Map());
-  const lastSizeRef = React.useRef<Map<string, { cols: number; rows: number }>>(
-    new Map()
-  );
-  const reconnectTimersRef = React.useRef<Map<string, number>>(new Map());
-  const reconnectAttemptsRef = React.useRef<Map<string, number>>(new Map());
-  const nudgedRef = React.useRef<Map<string, boolean>>(new Map());
-  const shellAreaRef = React.useRef<HTMLDivElement | null>(null);
-  const [shellAreaHeight, setShellAreaHeight] = React.useState<number | null>(
+  const [prompts, setPrompts] = React.useState<Prompt[]>([]);
+  const [selectedPromptId, setSelectedPromptId] = React.useState<number | null>(
     null
   );
-
-  function hasOpenWS(id: string): boolean {
-    const t = shellTabs.find((x) => x.id === id);
-    return !!(t?.ws && t.ws.readyState === WebSocket.OPEN);
-  }
-
-  function registerTermContainer(id: string, el: HTMLDivElement | null) {
-    termContainersRef.current.set(id, el);
-    if (el) setupTerminalForTab(id);
-  }
-
-  function fitTerminalToContainer(id: string) {
-    const t = shellTabs.find((x) => x.id === id);
-    const container = termContainersRef.current.get(id);
-    const term = t?.term;
-    if (!t || !container || !term) return;
-    // Measure character size
-    const probe = document.createElement("span");
-    probe.textContent = "W".repeat(20);
-    probe.style.visibility = "hidden";
-    probe.style.whiteSpace = "pre";
-    probe.style.fontFamily =
-      'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
-    container.appendChild(probe);
-    const w = probe.getBoundingClientRect().width / 20;
-    const h = probe.getBoundingClientRect().height;
-    probe.remove();
-    if (!w || !h) return;
-    const padding = 8;
-    const cols = Math.max(
-      20,
-      Math.floor((container.clientWidth - padding) / w)
-    );
-    const rows = Math.max(
-      5,
-      Math.floor((container.clientHeight - padding) / h)
-    );
-    try {
-      (term as any).resize(cols, rows);
-    } catch (e) {
-      try {
-        console.error("[shell] term.resize failed", e);
-      } catch {}
-    }
-    if (t.ws && t.ws.readyState === WebSocket.OPEN) {
-      try {
-        t.ws.send(JSON.stringify({ type: "resize", cols, rows }));
-      } catch (e) {
-        try {
-          console.error("[shell] failed to send resize message", e);
-        } catch {}
-      }
-    }
-    lastSizeRef.current.set(id, { cols, rows });
-  }
-
-  // Ensure active tab terminal is created and resized on activation
-  React.useEffect(() => {
-    if (!activeShellId) return;
-    setupTerminalForTab(activeShellId);
-    fitTerminalToContainer(activeShellId);
-  }, [activeShellId, shellTabs.length]);
-
-  function setupTerminalForTab(id: string) {
-    setShellTabs((tabs) => {
-      const t = tabs.find((x) => x.id === id);
-      if (!t) return tabs;
-      if (t.term) return tabs; // already set up
-      const container = termContainersRef.current.get(id);
-      if (!container) return tabs;
-      // Hard guard: if a terminal root already exists in this container, skip creating another
-      try {
-        if (container.querySelector(".xterm")) {
-          return tabs;
-        }
-      } catch {}
-      const term = new Terminal({
-        convertEol: true,
-        cursorBlink: true,
-        lineHeight: 1,
-        letterSpacing: 0,
-        fontSize: 15,
-        fontFamily:
-          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-        theme: { background: "#0B1220", foreground: "#E5E7EB" },
-      });
-      const fit = new FitAddon();
-      term.loadAddon(fit as any);
-      term.open(container);
-      try {
-        term.focus();
-      } catch {}
-      // Initial size using proposeDimensions
-      try {
-        sendResize(id);
-      } catch {}
-      // Ensure font metrics are loaded before final fit/resize
-      try {
-        const fontsAny: any = (document as any).fonts;
-        if (fontsAny && typeof fontsAny.ready?.then === "function") {
-          fontsAny.ready.then(() => {
-            sendResize(id);
-          });
-        }
-      } catch {}
-      fitRefMap.current.set(id, fit);
-      // Attach addon will handle both directions once WS is open
-      // Store for out-of-react handlers
-      termRefMap.current.set(id, term);
-      // If a websocket already exists and is open, attach now
-      try {
-        const existingTab = tabs.find((x) => x.id === id);
-        const existingWs = existingTab?.ws as WebSocket | null;
-        const alreadyAttached = attachRefMap.current.has(id);
-        if (
-          existingWs &&
-          existingWs.readyState === WebSocket.OPEN &&
-          !alreadyAttached
-        ) {
-          const attach = new AttachAddon(existingWs, {
-            bidirectional: true,
-            useBinary: true,
-          });
-          term.loadAddon(attach as any);
-          attachRefMap.current.set(id, attach);
-          try {
-            term.focus();
-          } catch {}
-          // Ensure terminal size synced after attaching
-          setTimeout(() => {
-            try {
-              sendResize(id);
-            } catch {}
-          }, 0);
-        }
-      } catch {}
-      // Ensure there is a connection attempt even if initial trigger was missed
-      try {
-        const existingTab = tabs.find((x) => x.id === id);
-        const wsState = existingTab?.ws?.readyState;
-        if (
-          !existingTab?.ws ||
-          wsState === WebSocket.CLOSED ||
-          wsState === WebSocket.CLOSING
-        ) {
-          setTimeout(() => {
-            try {
-              connectWS(id);
-            } catch {}
-          }, 0);
-        }
-      } catch {}
-      // Handle window resize
-      const onWinResize = () => {
-        const key = id;
-        const prev = resizeTimersRef.current.get(key);
-        if (prev) window.clearTimeout(prev);
-        const tmr = window.setTimeout(() => {
-          sendResize(id);
-          try {
-            (term as any).scrollToBottom();
-          } catch {}
-        }, 50);
-        resizeTimersRef.current.set(key, tmr);
-      };
-      window.addEventListener("resize", onWinResize);
-      // Save term in tab
-      return tabs.map((x) => (x.id === id ? { ...x, term } : x));
-    });
-  }
-
-  // Compute available space for the shell area and set explicit height
-  function layoutShellArea() {
-    const el = shellAreaRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const viewportH =
-      window.innerHeight || document.documentElement.clientHeight || 0;
-    // Reserve space for the fixed action bar (~64px) plus 8px gap
-    const reserve = 72;
-    let h = Math.max(160, Math.floor(viewportH - rect.top - reserve));
-    // Avoid excessive height
-    if (!Number.isFinite(h) || h > 2000) h = 2000;
-    setShellAreaHeight(h);
-    // Nudge active terminal to resize to the new height
-    try {
-      if (activeShellId) {
-        const prev = resizeTimersRef.current.get("shellArea");
-        if (prev) window.clearTimeout(prev);
-        const tmr = window.setTimeout(() => {
-          try {
-            sendResize(activeShellId);
-          } catch {}
-        }, 0);
-        resizeTimersRef.current.set("shellArea", tmr);
-      }
-    } catch {}
-  }
+  const [pName, setPName] = React.useState("");
+  const [pContent, setPContent] = React.useState("");
+  const [pLLMs, setPLLMs] = React.useState(""); // comma-separated
+  const [pActive, setPActive] = React.useState(false);
+  const [pDefault, setPDefault] = React.useState(false);
+  const [pLoading, setPLoading] = React.useState(false);
+  const [pSaving, setPSaving] = React.useState(false);
 
   React.useEffect(() => {
-    if (tab !== "docker") return;
-    layoutShellArea();
-    const onResize = () => layoutShellArea();
-    window.addEventListener("resize", onResize);
-    const raf = window.requestAnimationFrame(() => layoutShellArea());
-    // Observe shell area element itself for size changes
-    const el = shellAreaRef.current;
-    let ro: ResizeObserver | null = null;
-    if (el) {
-      ro = new ResizeObserver(() => {
-        try {
-          if (activeShellId) sendResize(activeShellId);
-        } catch {}
-      });
-      ro.observe(el);
-    }
+    if (tab !== "personal") return;
+    let aborted = false;
+    setPLoading(true);
+    (async () => {
+      try {
+        const res = await fetch("/api/settings/prompts");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const list: Prompt[] = Array.isArray(data?.prompts) ? data.prompts : [];
+        if (!aborted) {
+          setPrompts(list);
+          if (list.length > 0) {
+            const first = list[0];
+            setSelectedPromptId(first.id);
+            setPName(first.name || "");
+            setPContent(first.content || "");
+            setPLLMs((first.preferred_llms || []).join(", "));
+            setPActive(!!first.active);
+            setPDefault(!!first.default);
+          } else {
+            setSelectedPromptId(null);
+            setPName("");
+            setPContent("");
+            setPLLMs("");
+            setPActive(false);
+            setPDefault(false);
+          }
+        }
+      } catch (e: any) {
+        if (!aborted)
+          setMessage(`Failed to load System Prompts: ${e?.message ?? e}`);
+      } finally {
+        if (!aborted) setPLoading(false);
+      }
+    })();
     return () => {
-      window.removeEventListener("resize", onResize);
-      window.cancelAnimationFrame(raf);
-      try {
-        ro?.disconnect();
-      } catch {}
+      aborted = true;
     };
-  }, [tab, shellTabs.length, activeShellId]);
+  }, [tab]);
 
-  // When active shell changes or shell height changes, ensure a resize
-  React.useEffect(() => {
-    if (!activeShellId) return;
-    const prev = resizeTimersRef.current.get("activeShell");
-    if (prev) window.clearTimeout(prev);
-    const tmr = window.setTimeout(() => {
-      try {
-        sendResize(activeShellId);
-      } catch {}
-    }, 0);
-    resizeTimersRef.current.set("activeShell", tmr);
-  }, [activeShellId, shellAreaHeight]);
-
-  // Global window resize fallback to ensure active terminal fits
-  React.useEffect(() => {
-    const onGlobalResize = () => {
-      const prev = resizeTimersRef.current.get("globalWin");
-      if (prev) window.clearTimeout(prev);
-      const tmr = window.setTimeout(() => {
-        try {
-          if (activeShellId) sendResize(activeShellId);
-        } catch {}
-      }, 50);
-      resizeTimersRef.current.set("globalWin", tmr);
-    };
-    window.addEventListener("resize", onGlobalResize);
-    return () => window.removeEventListener("resize", onGlobalResize);
-  }, [activeShellId]);
-
-  // Attempt to reconnect WS for a tab
-  function scheduleReconnect(id: string) {
-    const tab = shellTabs.find((t) => t.id === id);
-    if (!tab) return;
-    const attempt = (reconnectAttemptsRef.current.get(id) || 0) + 1;
-    reconnectAttemptsRef.current.set(id, attempt);
-    const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000); // 1s,2s,4s,8s,10s cap
-    const prev = reconnectTimersRef.current.get(id);
-    if (prev) window.clearTimeout(prev);
-    const tmr = window.setTimeout(() => connectWS(id), delay);
-    reconnectTimersRef.current.set(id, tmr);
+  function onSelectPrompt(p: Prompt) {
+    setSelectedPromptId(p.id);
+    setPName(p.name || "");
+    setPContent(p.content || "");
+    setPLLMs((p.preferred_llms || []).join(", "));
+    setPActive(!!p.active);
+    setPDefault(!!p.default);
+    setMessage(null);
   }
 
-  function computeInitialSize(id: string): { cols: number; rows: number } {
-    let cols = 80,
-      rows = 24;
+  function newPrompt() {
+    setSelectedPromptId(null);
+    setPName("");
+    setPContent("");
+    setPLLMs("");
+    setPActive(false);
+    setPDefault(false);
+    setMessage(null);
+  }
+
+  async function errorMessageFromResponse(res: Response): Promise<string> {
     try {
-      const fit = fitRefMap.current.get(id) as any;
-      const dims = fit?.proposeDimensions?.();
-      if (dims && dims.cols && dims.rows) {
-        cols = Math.max(20, Math.min(240, (dims.cols as number) | 0));
-        rows = Math.max(5, Math.min(120, (dims.rows as number) | 0));
-      }
-    } catch {}
-    return { cols, rows };
+      const text = await res.text();
+      if (!text) return `HTTP ${res.status}`;
+      try {
+        const json = JSON.parse(text);
+        if (json && typeof json.error === "string") return json.error;
+      } catch (_) {}
+      return text;
+    } catch (_) {
+      return `HTTP ${res.status}`;
+    }
   }
 
-  function connectWS(id: string) {
-    const existing = shellTabs.find((t) => t.id === id);
-    if (!existing) return;
-    const { cols, rows } = computeInitialSize(id);
-    const url = `${wsBase()}/shell/ws/${encodeURIComponent(
-      id
-    )}?cols=${cols}&rows=${rows}`;
-    if ((import.meta as any)?.env?.DEV) {
-      try {
-        console.debug("[shell] connecting", { id, url, cols, rows });
-      } catch {}
-    }
-    const ws = new WebSocket(url);
-    ws.binaryType = "arraybuffer";
-    setShellTabs((tabs) => tabs.map((t) => (t.id === id ? { ...t, ws } : t)));
-    ws.onopen = () => {
-      reconnectAttemptsRef.current.set(id, 0);
-      const prevTmr = reconnectTimersRef.current.get(id);
-      if (prevTmr) window.clearTimeout(prevTmr);
-      setShellTabs((tabs) =>
-        tabs.map((t) => (t.id === id ? { ...t, connected: true } : t))
-      );
-      setupTerminalForTab(id);
-      try {
-        const term = termRefMap.current.get(id);
-        if (term) {
-          // Replace any previous attach addon with a fresh one
-          try {
-            attachRefMap.current.get(id)?.dispose();
-          } catch {}
-          const attach = new AttachAddon(ws, {
-            bidirectional: true,
-            useBinary: true,
-          });
-          term.loadAddon(attach as any);
-          attachRefMap.current.set(id, attach);
-          try {
-            term.focus();
-          } catch {}
-          // After opening, propose->resize->send
-          setTimeout(() => {
-            try {
-              sendResize(id);
-            } catch {}
-          }, 0);
-        }
-      } catch {}
-      // Observe container size changes if not already
-      const containerEl = termContainersRef.current.get(id);
-      if (containerEl && !resizeObserverRef.current.get(id)) {
-        const ro = new ResizeObserver(() => {
-          const key = id;
-          const prev = resizeTimersRef.current.get(key);
-          if (prev) window.clearTimeout(prev);
-          const tmr = window.setTimeout(() => {
-            sendResize(id);
-          }, 50);
-          resizeTimersRef.current.set(key, tmr);
-        });
-        ro.observe(containerEl);
-        resizeObserverRef.current.set(id, ro);
+  async function savePrompt() {
+    try {
+      setPSaving(true);
+      setMessage(null);
+      const name = pName.trim();
+      if (!name || !pContent.trim()) {
+        setMessage("Name and content are required");
+        return;
       }
-    };
-    ws.onmessage = () => {};
-    ws.onclose = () => {
-      setShellTabs((tabs) =>
-        tabs.map((t) => (t.id === id ? { ...t, connected: false } : t))
+      const preferred_llms = pLLMs
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const token = await fetchCSRFToken();
+      if (selectedPromptId == null) {
+        const res = await fetch("/api/settings/prompts", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": token,
+          },
+          body: JSON.stringify({
+            name,
+            content: pContent,
+            preferred_llms,
+            active: !!pActive,
+            default: !!pDefault,
+          }),
+        });
+        if (!res.ok) throw new Error(await errorMessageFromResponse(res));
+        const payload = await res.json();
+        const created: Prompt | null = payload?.prompt || null;
+        if (!created) throw new Error("Malformed response");
+        // Update local state without refetch; if default, clear others
+        setPrompts((prev) => {
+          const cleared = created.default
+            ? prev.map((p) => ({ ...p, default: false }))
+            : prev;
+          return [created, ...cleared.filter((p) => p.id !== created.id)];
+        });
+        // Select created prompt
+        onSelectPrompt(created);
+        setMessage("Prompt created");
+      } else {
+        const res = await fetch(`/api/settings/prompts/${selectedPromptId}`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": token,
+          },
+          body: JSON.stringify({
+            name,
+            content: pContent,
+            preferred_llms,
+            active: !!pActive,
+            default: !!pDefault,
+          }),
+        });
+        if (!res.ok) throw new Error(await errorMessageFromResponse(res));
+        const payload = await res.json();
+        const updated: Prompt | null = payload?.prompt || null;
+        if (!updated) throw new Error("Malformed response");
+        // Update local state: replace the item; if default true, clear others
+        setPrompts((prev) => {
+          let next = prev.map((p) => (p.id === updated.id ? updated : p));
+          if (updated.default) {
+            next = next.map((p) =>
+              p.id === updated.id ? p : { ...p, default: false }
+            );
+          }
+          // Move updated to front to roughly mimic updated_at DESC
+          return [updated, ...next.filter((p) => p.id !== updated.id)];
+        });
+        onSelectPrompt(updated);
+        setMessage("Prompt saved");
+      }
+    } catch (e: any) {
+      setMessage(typeof e?.message === "string" ? e.message : "Failed to save");
+    } finally {
+      setPSaving(false);
+    }
+  }
+
+  async function deletePrompt() {
+    if (selectedPromptId == null) return;
+    try {
+      setMessage(null);
+      const token = await fetchCSRFToken();
+      const res = await fetch(`/api/settings/prompts/${selectedPromptId}`, {
+        method: "DELETE",
+        headers: { "X-CSRF-Token": token },
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      // Update local state instead of reloading
+      setPrompts((prev) => {
+        const next = prev.filter((p) => p.id !== selectedPromptId);
+        if (next.length > 0) {
+          onSelectPrompt(next[0]);
+        } else {
+          newPrompt();
+        }
+        return next;
+      });
+      setMessage("Prompt deleted");
+    } catch (e: any) {
+      setMessage(
+        typeof e?.message === "string" ? e.message : "Failed to delete"
       );
-      try {
-        attachRefMap.current.get(id)?.dispose();
-      } catch {}
-      attachRefMap.current.delete(id);
-      scheduleReconnect(id);
-    };
-    ws.onerror = () => {
-      setShellTabs((tabs) =>
-        tabs.map((t) => (t.id === id ? { ...t, connected: false } : t))
-      );
-      try {
-        attachRefMap.current.get(id)?.dispose();
-      } catch {}
-      attachRefMap.current.delete(id);
-      scheduleReconnect(id);
-    };
+    }
   }
 
   React.useEffect(() => {
@@ -1185,217 +996,6 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
       setMessage(`Failed to copy ${which} key: ${e?.message ?? e}`);
     } finally {
       setCopyingWhich(null);
-    }
-  }
-
-  // Persona Settings: System Prompts state and handlers
-  type Prompt = {
-    id: number;
-    name: string;
-    content: string;
-    preferred_llms: string[];
-    active: boolean;
-    default: boolean;
-    created_at?: string;
-    updated_at?: string;
-  };
-  const [prompts, setPrompts] = React.useState<Prompt[]>([]);
-  const [selectedPromptId, setSelectedPromptId] = React.useState<number | null>(
-    null
-  );
-  const [pName, setPName] = React.useState("");
-  const [pContent, setPContent] = React.useState("");
-  const [pLLMs, setPLLMs] = React.useState("");
-  const [pActive, setPActive] = React.useState(false);
-  const [pDefault, setPDefault] = React.useState(false);
-  const [pLoading, setPLoading] = React.useState(false);
-  const [pSaving, setPSaving] = React.useState(false);
-
-  React.useEffect(() => {
-    if (tab !== "personal") return;
-    let aborted = false;
-    setPLoading(true);
-    (async () => {
-      try {
-        const res = await fetch("/api/settings/prompts");
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        const list: Prompt[] = Array.isArray(data?.prompts) ? data.prompts : [];
-        if (!aborted) {
-          setPrompts(list);
-          if (list.length > 0) {
-            const first = list[0];
-            setSelectedPromptId(first.id);
-            setPName(first.name || "");
-            setPContent(first.content || "");
-            setPLLMs((first.preferred_llms || []).join(", "));
-            setPActive(!!first.active);
-            setPDefault(!!first.default);
-          } else {
-            setSelectedPromptId(null);
-            setPName("");
-            setPContent("");
-            setPLLMs("");
-            setPActive(false);
-            setPDefault(false);
-          }
-        }
-      } catch (e: any) {
-        if (!aborted)
-          setMessage(`Failed to load System Prompts: ${e?.message ?? e}`);
-      } finally {
-        if (!aborted) setPLoading(false);
-      }
-    })();
-    return () => {
-      aborted = true;
-    };
-  }, [tab]);
-
-  function onSelectPrompt(p: Prompt) {
-    setSelectedPromptId(p.id);
-    setPName(p.name || "");
-    setPContent(p.content || "");
-    setPLLMs((p.preferred_llms || []).join(", "));
-    setPActive(!!p.active);
-    setPDefault(!!p.default);
-    setMessage(null);
-  }
-
-  function newPrompt() {
-    setSelectedPromptId(null);
-    setPName("");
-    setPContent("");
-    setPLLMs("");
-    setPActive(false);
-    setPDefault(false);
-    setMessage(null);
-  }
-
-  async function errorMessageFromResponse(res: Response): Promise<string> {
-    try {
-      const text = await res.text();
-      if (!text) return `HTTP ${res.status}`;
-      try {
-        const json = JSON.parse(text);
-        if (json && typeof json.error === "string") return json.error;
-      } catch (_) {}
-      return text;
-    } catch (_) {
-      return `HTTP ${res.status}`;
-    }
-  }
-
-  async function savePrompt() {
-    try {
-      setPSaving(true);
-      setMessage(null);
-      const name = pName.trim();
-      if (!name || !pContent.trim()) {
-        setMessage("Name and content are required");
-        return;
-      }
-      const preferred_llms = pLLMs
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const token = await fetchCSRFToken();
-      if (selectedPromptId == null) {
-        const res = await fetch("/api/settings/prompts", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-CSRF-Token": token,
-          },
-          body: JSON.stringify({
-            name,
-            content: pContent,
-            preferred_llms,
-            active: !!pActive,
-            default: !!pDefault,
-          }),
-        });
-        if (!res.ok) throw new Error(await errorMessageFromResponse(res));
-        const payload = await res.json();
-        const created: Prompt | null = payload?.prompt || null;
-        if (!created) throw new Error("Malformed response");
-        // Update local state without refetch; if default, clear others
-        setPrompts((prev) => {
-          const cleared = created.default
-            ? prev.map((p) => ({ ...p, default: false }))
-            : prev;
-          return [created, ...cleared.filter((p) => p.id !== created.id)];
-        });
-        // Select created prompt
-        onSelectPrompt(created);
-        setMessage("Prompt created");
-      } else {
-        const res = await fetch(`/api/settings/prompts/${selectedPromptId}`, {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            "X-CSRF-Token": token,
-          },
-          body: JSON.stringify({
-            name,
-            content: pContent,
-            preferred_llms,
-            active: !!pActive,
-            default: !!pDefault,
-          }),
-        });
-        if (!res.ok) throw new Error(await errorMessageFromResponse(res));
-        const payload = await res.json();
-        const updated: Prompt | null = payload?.prompt || null;
-        if (!updated) throw new Error("Malformed response");
-        // Update local state: replace the item; if default true, clear others
-        setPrompts((prev) => {
-          let next = prev.map((p) => (p.id === updated.id ? updated : p));
-          if (updated.default) {
-            next = next.map((p) =>
-              p.id === updated.id ? p : { ...p, default: false }
-            );
-          }
-          // Move updated to front to roughly mimic updated_at DESC
-          return [updated, ...next.filter((p) => p.id !== updated.id)];
-        });
-        onSelectPrompt(updated);
-        setMessage("Prompt saved");
-      }
-    } catch (e: any) {
-      setMessage(typeof e?.message === "string" ? e.message : "Failed to save");
-    } finally {
-      setPSaving(false);
-    }
-  }
-
-  async function deletePrompt() {
-    if (selectedPromptId == null) return;
-    try {
-      setMessage(null);
-      const token = await fetchCSRFToken();
-      const res = await fetch(`/api/settings/prompts/${selectedPromptId}`, {
-        method: "DELETE",
-        headers: { "X-CSRF-Token": token },
-      });
-      if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
-      }
-      // Update local state instead of reloading
-      setPrompts((prev) => {
-        const next = prev.filter((p) => p.id !== selectedPromptId);
-        if (next.length > 0) {
-          onSelectPrompt(next[0]);
-        } else {
-          newPrompt();
-        }
-        return next;
-      });
-      setMessage("Prompt deleted");
-    } catch (e: any) {
-      setMessage(
-        typeof e?.message === "string" ? e.message : "Failed to delete"
-      );
     }
   }
 
