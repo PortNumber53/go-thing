@@ -5,27 +5,50 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
+
+	"go-thing/db"
+	"go-thing/utility"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
-	"go-thing/db"
-	"go-thing/utility"
 )
+
+// getUserID fetches the authenticated user ID from Gin context and writes an error response on failure.
+func getUserID(c *gin.Context) (int64, bool) {
+	v, ok := c.Get("userID")
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+		return 0, false
+	}
+	uid, ok := v.(int64)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+		return 0, false
+	}
+	return uid, true
+}
+
+// promptResp is a minimal shape for returning a system_prompt object in JSON
+type promptResp struct {
+	ID            int64    `json:"id"`
+	Name          string   `json:"name"`
+	Content       string   `json:"content"`
+	PreferredLLMs []string `json:"preferred_llms"`
+	Active        bool     `json:"active"`
+	IsDefault     bool     `json:"default"`
+	CreatedAt     string   `json:"created_at"`
+	UpdatedAt     string   `json:"updated_at"`
+}
 
 // RegisterAPISettingsRoutes registers authenticated settings-related endpoints under the provided auth group.
 // Expects the group to already include requireAuth() middleware.
 func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 	// Read current settings
 	auth.GET("/api/settings", func(c *gin.Context) {
-		v, ok := c.Get("userID")
+		uid, ok := getUserID(c)
 		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
-			return
-		}
-		uid, ok := v.(int64)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
 			return
 		}
 		dbc := db.Get()
@@ -65,14 +88,8 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 			return
 		}
-		v, ok := c.Get("userID")
+		uid, ok := getUserID(c)
 		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
-			return
-		}
-		uid, ok := v.(int64)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
 			return
 		}
 		dbc := db.Get()
@@ -110,14 +127,8 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "password must be 12+ chars and include upper, lower, digit, and special character"})
 			return
 		}
-		v, ok := c.Get("userID")
+		uid, ok := getUserID(c)
 		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
-			return
-		}
-		uid, ok := v.(int64)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
 			return
 		}
 		dbc := db.Get()
@@ -156,14 +167,8 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 
 	// Docker settings: GET current and POST to update
 	auth.GET("/api/settings/docker", func(c *gin.Context) {
-		v, ok := c.Get("userID")
+		uid, ok := getUserID(c)
 		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
-			return
-		}
-		uid, ok := v.(int64)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
 			return
 		}
 		dbc := db.Get()
@@ -201,14 +206,8 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
-		v, ok := c.Get("userID")
+		uid, ok := getUserID(c)
 		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
-			return
-		}
-		uid, ok := v.(int64)
-		if !ok {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
 			return
 		}
 		var req struct {
@@ -249,6 +248,301 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 		if _, err := dbc.Exec(upd, string(b), uid); err != nil {
 			log.Printf("[DockerSettings] update err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	// System Prompts CRUD
+	// List prompts for current user
+	auth.GET("/api/settings/prompts", func(c *gin.Context) {
+		uid, ok := getUserID(c)
+		if !ok {
+			return
+		}
+		dbc := db.Get()
+		if dbc == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+			return
+		}
+		rows, err := dbc.Query(`SELECT id, name, content, preferred_llms, active, is_default, created_at::text, updated_at::text FROM system_prompts WHERE user_id=$1 ORDER BY updated_at DESC`, uid)
+		if err != nil {
+			log.Printf("[Prompts] list err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+			return
+		}
+		defer rows.Close()
+		prompts := []promptResp{}
+		for rows.Next() {
+			var p promptResp
+			if err := rows.Scan(&p.ID, &p.Name, &p.Content, &p.PreferredLLMs, &p.Active, &p.IsDefault, &p.CreatedAt, &p.UpdatedAt); err != nil {
+				log.Printf("[Prompts] scan err: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+				return
+			}
+			if p.PreferredLLMs == nil {
+				p.PreferredLLMs = []string{}
+			}
+			prompts = append(prompts, p)
+		}
+		c.JSON(http.StatusOK, gin.H{"prompts": prompts})
+	})
+
+	// Create prompt
+	auth.POST("/api/settings/prompts", func(c *gin.Context) {
+		if !utility.ValidateCSRF(c) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+			return
+		}
+		uid, ok := getUserID(c)
+		if !ok {
+			return
+		}
+		var req struct {
+			Name          string   `json:"name"`
+			Content       string   `json:"content"`
+			PreferredLLMs []string `json:"preferred_llms"`
+			Active        *bool    `json:"active"`
+			IsDefault     *bool    `json:"default"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+			return
+		}
+		name := strings.TrimSpace(req.Name)
+		content := req.Content
+		if name == "" || strings.TrimSpace(content) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name and content are required"})
+			return
+		}
+		active := false
+		if req.Active != nil {
+			active = *req.Active
+		}
+		isDefault := false
+		if req.IsDefault != nil {
+			isDefault = *req.IsDefault
+		}
+		if isDefault {
+			active = true
+		}
+		dbc := db.Get()
+		if dbc == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+			return
+		}
+		tx, err := dbc.Begin()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+			return
+		}
+		defer func() { _ = tx.Rollback() }()
+		if isDefault {
+			if _, err := tx.Exec(`UPDATE system_prompts SET is_default=FALSE WHERE user_id=$1 AND is_default=TRUE`, uid); err != nil {
+				log.Printf("[Prompts] clear defaults err: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+				return
+			}
+		}
+		var pr promptResp
+		err = tx.QueryRow(
+			`INSERT INTO system_prompts(user_id, name, content, preferred_llms, active, is_default)
+			 VALUES($1,$2,$3,$4,$5,$6)
+			 RETURNING id, name, content, preferred_llms, active, is_default, created_at::text, updated_at::text`,
+			uid, name, content, req.PreferredLLMs, active, isDefault,
+		).Scan(&pr.ID, &pr.Name, &pr.Content, &pr.PreferredLLMs, &pr.Active, &pr.IsDefault, &pr.CreatedAt, &pr.UpdatedAt)
+		if err != nil {
+			log.Printf("[Prompts] insert err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to insert"})
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"prompt": pr})
+	})
+
+	// Update prompt
+	auth.PUT("/api/settings/prompts/:id", func(c *gin.Context) {
+		if !utility.ValidateCSRF(c) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+			return
+		}
+		uid, ok := getUserID(c)
+		if !ok {
+			return
+		}
+		pidStr := c.Param("id")
+		pid, err := strconv.ParseInt(pidStr, 10, 64)
+		if err != nil || pid <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+			return
+		}
+		var req struct {
+			Name          *string  `json:"name"`
+			Content       *string  `json:"content"`
+			PreferredLLMs []string `json:"preferred_llms"`
+			Active        *bool    `json:"active"`
+			IsDefault     *bool    `json:"default"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+			return
+		}
+		dbc := db.Get()
+		if dbc == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+			return
+		}
+		tx, err := dbc.Begin()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+			return
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		// Load current values to enforce rules
+		var curIsDefault bool
+		if err := tx.QueryRow(`SELECT is_default FROM system_prompts WHERE id=$1 AND user_id=$2`, pid, uid).Scan(&curIsDefault); err != nil {
+			if err == sql.ErrNoRows {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+			return
+		}
+
+		// Enforce: default cannot be disabled
+		if req.Active != nil && !*req.Active {
+			// If currently default or becoming default, reject
+			nextIsDefault := curIsDefault
+			if req.IsDefault != nil {
+				nextIsDefault = *req.IsDefault
+			}
+			if nextIsDefault {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "default prompt cannot be disabled"})
+				return
+			}
+		}
+
+		// If setting default true, clear others
+		if req.IsDefault != nil && *req.IsDefault {
+			if _, err := tx.Exec(`UPDATE system_prompts SET is_default=FALSE WHERE user_id=$1 AND is_default=TRUE AND id<>$2`, uid, pid); err != nil {
+				log.Printf("[Prompts] clear defaults err: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+				return
+			}
+		}
+
+		// Build dynamic update
+		setParts := []string{}
+		args := []interface{}{}
+		idx := 1
+		if req.Name != nil {
+			name := strings.TrimSpace(*req.Name)
+			if name == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "name cannot be empty"})
+				return
+			}
+			setParts = append(setParts, "name=$"+strconv.Itoa(idx))
+			args = append(args, name)
+			idx++
+		}
+		if req.Content != nil {
+			content := strings.TrimSpace(*req.Content)
+			if content == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "content cannot be empty"})
+				return
+			}
+			setParts = append(setParts, "content=$"+strconv.Itoa(idx))
+			args = append(args, content)
+			idx++
+		}
+		if req.IsDefault != nil {
+			setParts = append(setParts, "is_default=$"+strconv.Itoa(idx))
+			// If making default, also ensure active=true implicitly
+			args = append(args, *req.IsDefault)
+			idx++
+			if *req.IsDefault {
+				setParts = append(setParts, "active=TRUE")
+			}
+		}
+		// Only add active assignment if not already forced by default=true above
+		if (req.IsDefault == nil || !*req.IsDefault) && req.Active != nil {
+			setParts = append(setParts, "active=$"+strconv.Itoa(idx))
+			args = append(args, *req.Active)
+			idx++
+		}
+		if req.PreferredLLMs != nil {
+			setParts = append(setParts, "preferred_llms=$"+strconv.Itoa(idx))
+			args = append(args, req.PreferredLLMs)
+			idx++
+		}
+		if len(setParts) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
+			return
+		}
+		// updated_at is bumped by trigger; return updated row
+		q := "UPDATE system_prompts SET " + strings.Join(setParts, ", ") + " WHERE id=$" + strconv.Itoa(idx) + " AND user_id=$" + strconv.Itoa(idx+1) + " RETURNING id, name, content, preferred_llms, active, is_default, created_at::text, updated_at::text"
+		args = append(args, pid, uid)
+		var upr promptResp
+		if err := tx.QueryRow(q, args...).Scan(&upr.ID, &upr.Name, &upr.Content, &upr.PreferredLLMs, &upr.Active, &upr.IsDefault, &upr.CreatedAt, &upr.UpdatedAt); err != nil {
+			log.Printf("[Prompts] update err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update"})
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"prompt": upr})
+	})
+
+	// Delete prompt
+	auth.DELETE("/api/settings/prompts/:id", func(c *gin.Context) {
+		if !utility.ValidateCSRF(c) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
+			return
+		}
+		uid, ok := getUserID(c)
+		if !ok {
+			return
+		}
+		pidStr := c.Param("id")
+		pid, err := strconv.ParseInt(pidStr, 10, 64)
+		if err != nil || pid <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+			return
+		}
+		dbc := db.Get()
+		if dbc == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
+			return
+		}
+		// Prevent deleting the default prompt; also 404 if not found
+		var isDefault bool
+		if err := dbc.QueryRow(`SELECT is_default FROM system_prompts WHERE id=$1 AND user_id=$2`, pid, uid).Scan(&isDefault); err != nil {
+			if err == sql.ErrNoRows {
+				c.JSON(http.StatusNotFound, gin.H{"error": "prompt not found"})
+				return
+			}
+			log.Printf("[Prompts] delete check err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check prompt"})
+			return
+		}
+		if isDefault {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "cannot delete the default prompt"})
+			return
+		}
+		res, err := dbc.Exec(`DELETE FROM system_prompts WHERE id=$1 AND user_id=$2`, pid, uid)
+		if err != nil {
+			log.Printf("[Prompts] delete err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete"})
+			return
+		}
+		if rows, _ := res.RowsAffected(); rows == 0 {
+			c.JSON(http.StatusNotFound, gin.H{"error": "prompt not found"})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
