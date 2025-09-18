@@ -140,11 +140,11 @@ func RegisterAPIDockerRoutes(r *gin.Engine, requireAuth gin.HandlerFunc, deps AP
 		}
 		var settings map[string]interface{}
 		if settingsRaw.Valid && strings.TrimSpace(settingsRaw.String) != "" {
-if err := json.Unmarshal([]byte(settingsRaw.String), &settings); err != nil {
-	log.Printf("[DockerBuild] unmarshal settings err: %v", err)
-	c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse settings"})
-	return
-}
+			if err := json.Unmarshal([]byte(settingsRaw.String), &settings); err != nil {
+				log.Printf("[DockerBuild] unmarshal settings err: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse settings"})
+				return
+			}
 		}
 		dockerVal, _ := settings["docker"].(map[string]interface{})
 		if dockerVal == nil {
