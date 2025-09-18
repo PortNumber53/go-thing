@@ -265,7 +265,7 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
 			return
 		}
-rows, err := dbc.Query(`SELECT id, name, content, preferred_llms, active, is_default, created_at::text, updated_at::text FROM system_prompts WHERE user_id=$1 ORDER BY updated_at DESC`, uid)
+		rows, err := dbc.Query(`SELECT id, name, content, preferred_llms, active, is_default, created_at::text, updated_at::text FROM system_prompts WHERE user_id=$1 ORDER BY updated_at DESC`, uid)
 		if err != nil {
 			log.Printf("[Prompts] list err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
@@ -439,7 +439,7 @@ rows, err := dbc.Query(`SELECT id, name, content, preferred_llms, active, is_def
 		setParts := []string{}
 		args := []interface{}{}
 		idx := 1
-if req.Name != nil {
+		if req.Name != nil {
 			name := strings.TrimSpace(*req.Name)
 			if name == "" {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "name cannot be empty"})
@@ -449,11 +449,16 @@ if req.Name != nil {
 			args = append(args, name)
 			idx++
 		}
-		if req.Content != nil {
-			setParts = append(setParts, "content=$"+strconv.Itoa(idx))
-			args = append(args, *req.Content)
-			idx++
-		}
+        if req.Content != nil {
+            content := strings.TrimSpace(*req.Content)
+            if content == "" {
+                c.JSON(http.StatusBadRequest, gin.H{"error": "content cannot be empty"})
+                return
+            }
+            setParts = append(setParts, "content=$"+strconv.Itoa(idx))
+            args = append(args, content)
+            idx++
+        }
 		if req.IsDefault != nil {
 			setParts = append(setParts, "is_default=$"+strconv.Itoa(idx))
 			// If making default, also ensure active=true implicitly
