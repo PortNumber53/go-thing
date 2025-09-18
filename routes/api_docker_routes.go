@@ -330,6 +330,12 @@ if err := json.Unmarshal([]byte(settingsRaw.String), &settings); err != nil {
 		}
 		var settingsRaw sql.NullString
 		if err := dbc.QueryRow(`SELECT settings::text FROM users WHERE id=$1`, uid).Scan(&settingsRaw); err != nil {
+			if err == sql.ErrNoRows {
+				utility.ClearSessionCookie(c)
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "not logged in"})
+				return
+			}
+			log.Printf("[DockerStop] select err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
 			return
 		}
