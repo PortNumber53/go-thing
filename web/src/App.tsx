@@ -587,6 +587,128 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
     setMessage(null);
   }
 
+  async function errorMessageFromResponse(res: Response): Promise<string> {
+    try {
+      const text = await res.text();
+      if (!text) return `HTTP ${res.status}`;
+      try {
+        const json = JSON.parse(text);
+        if (json && typeof json.error === "string") return json.error;
+      } catch (_) {}
+      return text;
+    } catch (_) {
+      return `HTTP ${res.status}`;
+    }
+  }
+
+  async function savePrompt() {
+    try {
+      setPSaving(true);
+      setMessage(null);
+      const name = pName.trim();
+      if (!name || !pContent.trim()) {
+        setMessage("Name and content are required");
+        return;
+      }
+      const preferred_llms = pLLMs
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const token = await fetchCSRFToken();
+      if (selectedPromptId == null) {
+        const res = await fetch("/api/settings/prompts", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": token,
+          },
+          body: JSON.stringify({
+            name,
+            content: pContent,
+            preferred_llms,
+            active: !!pActive,
+            default: !!pDefault,
+          }),
+        });
+        if (!res.ok) throw new Error(await errorMessageFromResponse(res));
+        const payload = await res.json();
+        const created: Prompt | null = payload?.prompt || null;
+        if (!created) throw new Error("Malformed response");
+        setPrompts((prev) => {
+          const cleared = created.default
+            ? prev.map((p) => ({ ...p, default: false }))
+            : prev;
+          return [created, ...cleared.filter((p) => p.id !== created.id)];
+        });
+        onSelectPrompt(created);
+        setMessage("Prompt created");
+      } else {
+        const res = await fetch(`/api/settings/prompts/${selectedPromptId}`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": token,
+          },
+          body: JSON.stringify({
+            name,
+            content: pContent,
+            preferred_llms,
+            active: !!pActive,
+            default: !!pDefault,
+          }),
+        });
+        if (!res.ok) throw new Error(await errorMessageFromResponse(res));
+        const payload = await res.json();
+        const updated: Prompt | null = payload?.prompt || null;
+        if (!updated) throw new Error("Malformed response");
+        setPrompts((prev) => {
+          let next = prev.map((p) => (p.id === updated.id ? updated : p));
+          if (updated.default) {
+            next = next.map((p) =>
+              p.id === updated.id ? p : { ...p, default: false }
+            );
+          }
+          return [updated, ...next.filter((p) => p.id !== updated.id)];
+        });
+        onSelectPrompt(updated);
+        setMessage("Prompt saved");
+      }
+    } catch (e: any) {
+      setMessage(typeof e?.message === "string" ? e.message : "Failed to save");
+    } finally {
+      setPSaving(false);
+    }
+  }
+
+  async function deletePrompt() {
+    if (selectedPromptId == null) return;
+    try {
+      setMessage(null);
+      const token = await fetchCSRFToken();
+      const res = await fetch(`/api/settings/prompts/${selectedPromptId}`, {
+        method: "DELETE",
+        headers: { "X-CSRF-Token": token },
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      setPrompts((prev) => {
+        const next = prev.filter((p) => p.id !== selectedPromptId);
+        if (next.length > 0) {
+          onSelectPrompt(next[0]);
+        } else {
+          newPrompt();
+        }
+        return next;
+      });
+      setMessage("Prompt deleted");
+    } catch (e: any) {
+      setMessage(
+        typeof e?.message === "string" ? e.message : "Failed to delete"
+      );
+    }
+  }
+
   type ShellTab = {
     id: string;
     title: string;
