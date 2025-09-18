@@ -642,7 +642,9 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
         setPrompts((prev) => {
           let next = prev.map((p) => (p.id === updated.id ? updated : p));
           if (updated.default) {
-            next = next.map((p) => (p.id === updated.id ? p : { ...p, default: false }));
+            next = next.map((p) =>
+              p.id === updated.id ? p : { ...p, default: false }
+            );
           }
           // Move updated to front to roughly mimic updated_at DESC
           return [updated, ...next.filter((p) => p.id !== updated.id)];
