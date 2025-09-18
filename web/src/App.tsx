@@ -1221,11 +1221,16 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
                     >
                       {pSaving ? "Saving…" : "Save"}
                     </button>
-                    {selectedPromptId != null && (
-                      <button type="button" onClick={deletePrompt}>
-                        Delete
-                      </button>
-                    )}
+                  {selectedPromptId != null && (
+                    <button
+                      type="button"
+                      onClick={deletePrompt}
+                      disabled={pDefault}
+                      title={pDefault ? "Cannot delete the default prompt" : ""}
+                    >
+                      Delete
+                    </button>
+                  )}
                   </div>
                 </div>
               </div>
