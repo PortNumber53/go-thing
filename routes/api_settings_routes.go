@@ -439,9 +439,14 @@ rows, err := dbc.Query(`SELECT id, name, content, preferred_llms, active, is_def
 		setParts := []string{}
 		args := []interface{}{}
 		idx := 1
-		if req.Name != nil {
+if req.Name != nil {
+			name := strings.TrimSpace(*req.Name)
+			if name == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "name cannot be empty"})
+				return
+			}
 			setParts = append(setParts, "name=$"+strconv.Itoa(idx))
-			args = append(args, strings.TrimSpace(*req.Name))
+			args = append(args, name)
 			idx++
 		}
 		if req.Content != nil {
