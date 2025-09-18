@@ -272,19 +272,9 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			return
 		}
 		defer rows.Close()
-		type Prompt struct {
-			ID            int64    `json:"id"`
-			Name          string   `json:"name"`
-			Content       string   `json:"content"`
-			PreferredLLMs []string `json:"preferred_llms"`
-			Active        bool     `json:"active"`
-			IsDefault     bool     `json:"default"`
-			CreatedAt     string   `json:"created_at"`
-			UpdatedAt     string   `json:"updated_at"`
-		}
-		prompts := []Prompt{}
+		prompts := []promptResp{}
 		for rows.Next() {
-			var p Prompt
+			var p promptResp
 			if err := rows.Scan(&p.ID, &p.Name, &p.Content, &p.PreferredLLMs, &p.Active, &p.IsDefault, &p.CreatedAt, &p.UpdatedAt); err != nil {
 				log.Printf("[Prompts] scan err: %v", err)
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
@@ -353,16 +343,6 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
 				return
 			}
-		}
-		type promptResp struct {
-			ID            int64    `json:"id"`
-			Name          string   `json:"name"`
-			Content       string   `json:"content"`
-			PreferredLLMs []string `json:"preferred_llms"`
-			Active        bool     `json:"active"`
-			IsDefault     bool     `json:"default"`
-			CreatedAt     string   `json:"created_at"`
-			UpdatedAt     string   `json:"updated_at"`
 		}
 		var pr promptResp
 		err = tx.QueryRow(
