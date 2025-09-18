@@ -795,9 +795,11 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
     const url = `${wsBase()}/shell/ws/${encodeURIComponent(
       id
     )}?cols=${cols}&rows=${rows}`;
-    try {
-      console.debug("[shell] connecting", { id, url, cols, rows });
-    } catch {}
+    if ((import.meta as any)?.env?.DEV) {
+      try {
+        console.debug("[shell] connecting", { id, url, cols, rows });
+      } catch {}
+    }
     const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
     setShellTabs((tabs) => tabs.map((t) => (t.id === id ? { ...t, ws } : t)));
@@ -1215,7 +1217,9 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
           try {
             (term as any).resize(cols, rows);
           } catch (e) {
-            try { console.error("[shell] term.resize failed", e); } catch {}
+            try {
+              console.error("[shell] term.resize failed", e);
+            } catch {}
           }
           lastSizeRef.current.set(id, { cols, rows });
         }
@@ -1225,7 +1229,9 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
       try {
         t.ws.send(JSON.stringify({ type: "resize", cols, rows }));
       } catch (e) {
-        try { console.error("[shell] failed to send resize message", e); } catch {}
+        try {
+          console.error("[shell] failed to send resize message", e);
+        } catch {}
       }
     }
   }
