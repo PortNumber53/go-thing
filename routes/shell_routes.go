@@ -3,9 +3,9 @@ package routes
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,13 +19,10 @@ import (
 
 // parseInt returns int or 0
 func parseInt(s string) int {
-	var n int
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return 0
-		}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
 	}
-	_, _ = fmt.Sscanf(s, "%d", &n)
 	return n
 }
 
@@ -94,14 +91,14 @@ func RegisterShellRoutes(r *gin.Engine, requireAuth gin.HandlerFunc, upgrader *w
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load settings"})
 			return
 		}
-        var settings map[string]interface{}
-        if settingsRaw.Valid && strings.TrimSpace(settingsRaw.String) != "" {
-            if err := json.Unmarshal([]byte(settingsRaw.String), &settings); err != nil {
-                log.Printf("[ShellWS] unmarshal settings err: %v", err)
-                c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse settings"})
-                return
-            }
-        }
+		var settings map[string]interface{}
+		if settingsRaw.Valid && strings.TrimSpace(settingsRaw.String) != "" {
+			if err := json.Unmarshal([]byte(settingsRaw.String), &settings); err != nil {
+				log.Printf("[ShellWS] unmarshal settings err: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse settings"})
+				return
+			}
+		}
 		dockerVal, _ := settings["docker"].(map[string]interface{})
 		container, _ := dockerVal["container"].(string)
 		image, _ := dockerVal["image"].(string)
