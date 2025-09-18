@@ -32,14 +32,14 @@ func getUserID(c *gin.Context) (int64, bool) {
 
 // promptResp is a minimal shape for returning a system_prompt object in JSON
 type promptResp struct {
-    ID            int64    `json:"id"`
-    Name          string   `json:"name"`
-    Content       string   `json:"content"`
-    PreferredLLMs []string `json:"preferred_llms"`
-    Active        bool     `json:"active"`
-    IsDefault     bool     `json:"default"`
-    CreatedAt     string   `json:"created_at"`
-    UpdatedAt     string   `json:"updated_at"`
+	ID            int64    `json:"id"`
+	Name          string   `json:"name"`
+	Content       string   `json:"content"`
+	PreferredLLMs []string `json:"preferred_llms"`
+	Active        bool     `json:"active"`
+	IsDefault     bool     `json:"default"`
+	CreatedAt     string   `json:"created_at"`
+	UpdatedAt     string   `json:"updated_at"`
 }
 
 // RegisterAPISettingsRoutes registers authenticated settings-related endpoints under the provided auth group.
@@ -469,20 +469,21 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			args = append(args, *req.Content)
 			idx++
 		}
-		if req.Active != nil {
-			setParts = append(setParts, "active=$"+strconv.Itoa(idx))
-			args = append(args, *req.Active)
-			idx++
-		}
-		if req.IsDefault != nil {
+        if req.IsDefault != nil {
 			setParts = append(setParts, "is_default=$"+strconv.Itoa(idx))
 			// If making default, also ensure active=true implicitly
 			args = append(args, *req.IsDefault)
 			idx++
 			if *req.IsDefault {
-				setParts = append(setParts, "active=TRUE")
+                setParts = append(setParts, "active=TRUE")
 			}
 		}
+        // Only add active assignment if not already forced by default=true above
+        if (req.IsDefault == nil || !*req.IsDefault) && req.Active != nil {
+            setParts = append(setParts, "active=$"+strconv.Itoa(idx))
+            args = append(args, *req.Active)
+            idx++
+        }
 		if req.PreferredLLMs != nil {
 			setParts = append(setParts, "preferred_llms=$"+strconv.Itoa(idx))
 			args = append(args, req.PreferredLLMs)
