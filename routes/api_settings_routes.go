@@ -515,6 +515,21 @@ if req.Name != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
 			return
 		}
+		// Prevent deleting the default prompt; also 404 if not found
+		var isDefault bool
+		if err := dbc.QueryRow(`SELECT is_default FROM system_prompts WHERE id=$1 AND user_id=$2`, pid, uid).Scan(&isDefault); err != nil {
+			if err == sql.ErrNoRows {
+				c.JSON(http.StatusNotFound, gin.H{"error": "prompt not found"})
+				return
+			}
+			log.Printf("[Prompts] delete check err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check prompt"})
+			return
+		}
+		if isDefault {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "cannot delete the default prompt"})
+			return
+		}
 		res, err := dbc.Exec(`DELETE FROM system_prompts WHERE id=$1 AND user_id=$2`, pid, uid)
 		if err != nil {
 			log.Printf("[Prompts] delete err: %v", err)
