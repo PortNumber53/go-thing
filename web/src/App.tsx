@@ -605,16 +605,18 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
           }),
         });
         if (!res.ok) throw new Error(await res.text());
-        const created = await res.json();
-        // reload list
-        const listRes = await fetch("/api/settings/prompts");
-        const data = await listRes.json();
-        const list: Prompt[] = Array.isArray(data?.prompts) ? data.prompts : [];
-        setPrompts(list);
-        if (created?.id) {
-          const found = list.find((x) => x.id === created.id);
-          if (found) onSelectPrompt(found);
-        }
+        const payload = await res.json();
+        const created: Prompt | null = payload?.prompt || null;
+        if (!created) throw new Error("Malformed response");
+        // Update local state without refetch; if default, clear others
+        setPrompts((prev) => {
+          const cleared = created.default
+            ? prev.map((p) => ({ ...p, default: false }))
+            : prev;
+          return [created, ...cleared.filter((p) => p.id !== created.id)];
+        });
+        // Select created prompt
+        onSelectPrompt(created);
         setMessage("Prompt created");
       } else {
         const res = await fetch(`/api/settings/prompts/${selectedPromptId}`, {
@@ -633,13 +635,19 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
         });
         const txt = await res.text();
         if (!res.ok) throw new Error(txt || `HTTP ${res.status}`);
-        // reload list to reflect changes
-        const listRes = await fetch("/api/settings/prompts");
-        const data = await listRes.json();
-        const list: Prompt[] = Array.isArray(data?.prompts) ? data.prompts : [];
-        setPrompts(list);
-        const found = list.find((x) => x.id === selectedPromptId);
-        if (found) onSelectPrompt(found);
+        const payload = JSON.parse(txt);
+        const updated: Prompt | null = payload?.prompt || null;
+        if (!updated) throw new Error("Malformed response");
+        // Update local state: replace the item; if default true, clear others
+        setPrompts((prev) => {
+          let next = prev.map((p) => (p.id === updated.id ? updated : p));
+          if (updated.default) {
+            next = next.map((p) => (p.id === updated.id ? p : { ...p, default: false }));
+          }
+          // Move updated to front to roughly mimic updated_at DESC
+          return [updated, ...next.filter((p) => p.id !== updated.id)];
+        });
+        onSelectPrompt(updated);
         setMessage("Prompt saved");
       }
     } catch (e: any) {

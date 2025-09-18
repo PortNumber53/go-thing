@@ -17,26 +17,40 @@ import (
 
 // getUserID fetches the authenticated user ID from Gin context and writes an error response on failure.
 func getUserID(c *gin.Context) (int64, bool) {
-    v, ok := c.Get("userID")
-    if !ok {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
-        return 0, false
-    }
-    uid, ok := v.(int64)
-    if !ok {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
-        return 0, false
-    }
-    return uid, true
+	v, ok := c.Get("userID")
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "user ID not found in context"})
+		return 0, false
+	}
+	uid, ok := v.(int64)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user ID type in context"})
+		return 0, false
+	}
+	return uid, true
+}
+
+// promptResp is a minimal shape for returning a system_prompt object in JSON
+type promptResp struct {
+    ID            int64    `json:"id"`
+    Name          string   `json:"name"`
+    Content       string   `json:"content"`
+    PreferredLLMs []string `json:"preferred_llms"`
+    Active        bool     `json:"active"`
+    IsDefault     bool     `json:"default"`
+    CreatedAt     string   `json:"created_at"`
+    UpdatedAt     string   `json:"updated_at"`
 }
 
 // RegisterAPISettingsRoutes registers authenticated settings-related endpoints under the provided auth group.
 // Expects the group to already include requireAuth() middleware.
 func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 	// Read current settings
-		auth.GET("/api/settings", func(c *gin.Context) {
-			uid, ok := getUserID(c)
-			if !ok { return }
+	auth.GET("/api/settings", func(c *gin.Context) {
+		uid, ok := getUserID(c)
+		if !ok {
+			return
+		}
 		dbc := db.Get()
 		if dbc == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
@@ -57,7 +71,7 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 	})
 
 	// Update profile (name)
-		auth.POST("/api/settings", func(c *gin.Context) {
+	auth.POST("/api/settings", func(c *gin.Context) {
 		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
@@ -74,8 +88,10 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 			return
 		}
-			uid, ok := getUserID(c)
-			if !ok { return }
+		uid, ok := getUserID(c)
+		if !ok {
+			return
+		}
 		dbc := db.Get()
 		if dbc == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
@@ -90,7 +106,7 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 	})
 
 	// Change password
-		auth.POST("/api/settings/password", func(c *gin.Context) {
+	auth.POST("/api/settings/password", func(c *gin.Context) {
 		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
@@ -111,8 +127,10 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "password must be 12+ chars and include upper, lower, digit, and special character"})
 			return
 		}
-			uid, ok := getUserID(c)
-			if !ok { return }
+		uid, ok := getUserID(c)
+		if !ok {
+			return
+		}
 		dbc := db.Get()
 		if dbc == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
@@ -148,9 +166,11 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 	})
 
 	// Docker settings: GET current and POST to update
-		auth.GET("/api/settings/docker", func(c *gin.Context) {
-			uid, ok := getUserID(c)
-			if !ok { return }
+	auth.GET("/api/settings/docker", func(c *gin.Context) {
+		uid, ok := getUserID(c)
+		if !ok {
+			return
+		}
 		dbc := db.Get()
 		if dbc == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
@@ -181,13 +201,15 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 		c.JSON(http.StatusOK, gin.H{"docker": dockerVal})
 	})
 
-		auth.POST("/api/settings/docker", func(c *gin.Context) {
+	auth.POST("/api/settings/docker", func(c *gin.Context) {
 		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
-			uid, ok := getUserID(c)
-			if !ok { return }
+		uid, ok := getUserID(c)
+		if !ok {
+			return
+		}
 		var req struct {
 			Container  string `json:"container"`
 			Image      string `json:"image"`
@@ -233,9 +255,11 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 
 	// System Prompts CRUD
 	// List prompts for current user
-		auth.GET("/api/settings/prompts", func(c *gin.Context) {
-			uid, ok := getUserID(c)
-			if !ok { return }
+	auth.GET("/api/settings/prompts", func(c *gin.Context) {
+		uid, ok := getUserID(c)
+		if !ok {
+			return
+		}
 		dbc := db.Get()
 		if dbc == nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
@@ -275,13 +299,15 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 	})
 
 	// Create prompt
-		auth.POST("/api/settings/prompts", func(c *gin.Context) {
+	auth.POST("/api/settings/prompts", func(c *gin.Context) {
 		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
-			uid, ok := getUserID(c)
-			if !ok { return }
+		uid, ok := getUserID(c)
+		if !ok {
+			return
+		}
 		var req struct {
 			Name          string   `json:"name"`
 			Content       string   `json:"content"`
@@ -328,11 +354,23 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 				return
 			}
 		}
-		var id int64
+		type promptResp struct {
+			ID            int64    `json:"id"`
+			Name          string   `json:"name"`
+			Content       string   `json:"content"`
+			PreferredLLMs []string `json:"preferred_llms"`
+			Active        bool     `json:"active"`
+			IsDefault     bool     `json:"default"`
+			CreatedAt     string   `json:"created_at"`
+			UpdatedAt     string   `json:"updated_at"`
+		}
+		var pr promptResp
 		err = tx.QueryRow(
-			`INSERT INTO system_prompts(user_id, name, content, preferred_llms, active, is_default) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,
+			`INSERT INTO system_prompts(user_id, name, content, preferred_llms, active, is_default)
+			 VALUES($1,$2,$3,$4,$5,$6)
+			 RETURNING id, name, content, preferred_llms, active, is_default, created_at::text, updated_at::text`,
 			uid, name, content, req.PreferredLLMs, active, isDefault,
-		).Scan(&id)
+		).Scan(&pr.ID, &pr.Name, &pr.Content, &pr.PreferredLLMs, &pr.Active, &pr.IsDefault, &pr.CreatedAt, &pr.UpdatedAt)
 		if err != nil {
 			log.Printf("[Prompts] insert err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to insert"})
@@ -342,17 +380,19 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"id": id})
+		c.JSON(http.StatusOK, gin.H{"prompt": pr})
 	})
 
 	// Update prompt
-		auth.PUT("/api/settings/prompts/:id", func(c *gin.Context) {
+	auth.PUT("/api/settings/prompts/:id", func(c *gin.Context) {
 		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
-			uid, ok := getUserID(c)
-			if !ok { return }
+		uid, ok := getUserID(c)
+		if !ok {
+			return
+		}
 		pidStr := c.Param("id")
 		pid, err := strconv.ParseInt(pidStr, 10, 64)
 		if err != nil || pid <= 0 {
@@ -452,10 +492,11 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
 			return
 		}
-		// updated_at is bumped by trigger
-		q := "UPDATE system_prompts SET " + strings.Join(setParts, ", ") + " WHERE id=$" + strconv.Itoa(idx) + " AND user_id=$" + strconv.Itoa(idx+1)
+		// updated_at is bumped by trigger; return updated row
+		q := "UPDATE system_prompts SET " + strings.Join(setParts, ", ") + " WHERE id=$" + strconv.Itoa(idx) + " AND user_id=$" + strconv.Itoa(idx+1) + " RETURNING id, name, content, preferred_llms, active, is_default, created_at::text, updated_at::text"
 		args = append(args, pid, uid)
-		if _, err := tx.Exec(q, args...); err != nil {
+		var upr promptResp
+		if err := tx.QueryRow(q, args...).Scan(&upr.ID, &upr.Name, &upr.Content, &upr.PreferredLLMs, &upr.Active, &upr.IsDefault, &upr.CreatedAt, &upr.UpdatedAt); err != nil {
 			log.Printf("[Prompts] update err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update"})
 			return
@@ -464,17 +505,19 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"ok": true})
+		c.JSON(http.StatusOK, gin.H{"prompt": upr})
 	})
 
 	// Delete prompt
-		auth.DELETE("/api/settings/prompts/:id", func(c *gin.Context) {
+	auth.DELETE("/api/settings/prompts/:id", func(c *gin.Context) {
 		if !utility.ValidateCSRF(c) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "csrf invalid"})
 			return
 		}
-			uid, ok := getUserID(c)
-			if !ok { return }
+		uid, ok := getUserID(c)
+		if !ok {
+			return
+		}
 		pidStr := c.Param("id")
 		pid, err := strconv.ParseInt(pidStr, 10, 64)
 		if err != nil || pid <= 0 {
