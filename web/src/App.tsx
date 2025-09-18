@@ -669,13 +669,16 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
       });
       const txt = await res.text();
       if (!res.ok) throw new Error(txt || `HTTP ${res.status}`);
-      // reload
-      const listRes = await fetch("/api/settings/prompts");
-      const data = await listRes.json();
-      const list: Prompt[] = Array.isArray(data?.prompts) ? data.prompts : [];
-      setPrompts(list);
-      if (list.length) onSelectPrompt(list[0]);
-      else newPrompt();
+      // Update local state instead of reloading
+      setPrompts((prev) => {
+        const next = prev.filter((p) => p.id !== selectedPromptId);
+        if (next.length > 0) {
+          onSelectPrompt(next[0]);
+        } else {
+          newPrompt();
+        }
+        return next;
+      });
       setMessage("Prompt deleted");
     } catch (e: any) {
       setMessage(
