@@ -575,6 +575,20 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
     setMessage(null);
   }
 
+  async function errorMessageFromResponse(res: Response): Promise<string> {
+    try {
+      const text = await res.text();
+      if (!text) return `HTTP ${res.status}`;
+      try {
+        const json = JSON.parse(text);
+        if (json && typeof json.error === "string") return json.error;
+      } catch (_) {}
+      return text;
+    } catch (_) {
+      return `HTTP ${res.status}`;
+    }
+  }
+
   async function savePrompt() {
     try {
       setPSaving(true);
@@ -604,7 +618,7 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
             default: !!pDefault,
           }),
         });
-        if (!res.ok) throw new Error(await res.text());
+        if (!res.ok) throw new Error(await errorMessageFromResponse(res));
         const payload = await res.json();
         const created: Prompt | null = payload?.prompt || null;
         if (!created) throw new Error("Malformed response");
@@ -633,7 +647,7 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
             default: !!pDefault,
           }),
         });
-        if (!res.ok) throw new Error(await res.text());
+        if (!res.ok) throw new Error(await errorMessageFromResponse(res));
         const payload = await res.json();
         const updated: Prompt | null = payload?.prompt || null;
         if (!updated) throw new Error("Malformed response");
@@ -668,7 +682,14 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
         headers: { "X-CSRF-Token": token },
       });
       const txt = await res.text();
-      if (!res.ok) throw new Error(txt || `HTTP ${res.status}`);
+      if (!res.ok) {
+        let err = txt || `HTTP ${res.status}`;
+        try {
+          const j = JSON.parse(txt);
+          if (j && typeof j.error === "string") err = j.error;
+        } catch (_) {}
+        throw new Error(err);
+      }
       // Update local state instead of reloading
       setPrompts((prev) => {
         const next = prev.filter((p) => p.id !== selectedPromptId);
