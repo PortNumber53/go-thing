@@ -94,10 +94,14 @@ func RegisterShellRoutes(r *gin.Engine, requireAuth gin.HandlerFunc, upgrader *w
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load settings"})
 			return
 		}
-		var settings map[string]interface{}
-		if settingsRaw.Valid && strings.TrimSpace(settingsRaw.String) != "" {
-			_ = json.Unmarshal([]byte(settingsRaw.String), &settings)
-		}
+        var settings map[string]interface{}
+        if settingsRaw.Valid && strings.TrimSpace(settingsRaw.String) != "" {
+            if err := json.Unmarshal([]byte(settingsRaw.String), &settings); err != nil {
+                log.Printf("[ShellWS] unmarshal settings err: %v", err)
+                c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse settings"})
+                return
+            }
+        }
 		dockerVal, _ := settings["docker"].(map[string]interface{})
 		container, _ := dockerVal["container"].(string)
 		image, _ := dockerVal["image"].(string)
