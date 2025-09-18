@@ -400,7 +400,9 @@ if err := json.Unmarshal([]byte(settingsRaw.String), &settings); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "container/image missing"})
 			return
 		}
-		_ = toolsrv.StopContainerByName(container)
+		if err := toolsrv.StopContainerByName(container); err != nil {
+			log.Printf("[DockerRestart] failed to stop container before restart (continuing anyway): %v", err)
+		}
 		if _, err := toolsrv.StartContainerWithSettings(container, image, args); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 			return
