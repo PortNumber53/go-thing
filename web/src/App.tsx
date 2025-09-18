@@ -681,14 +681,8 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
         method: "DELETE",
         headers: { "X-CSRF-Token": token },
       });
-      const txt = await res.text();
       if (!res.ok) {
-        let err = txt || `HTTP ${res.status}`;
-        try {
-          const j = JSON.parse(txt);
-          if (j && typeof j.error === "string") err = j.error;
-        } catch (_) {}
-        throw new Error(err);
+        throw new Error(await errorMessageFromResponse(res));
       }
       // Update local state instead of reloading
       setPrompts((prev) => {
