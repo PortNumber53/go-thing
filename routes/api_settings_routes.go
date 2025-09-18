@@ -265,7 +265,7 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
 			return
 		}
-		rows, err := dbc.Query(`SELECT id, name, content, preferred_llms, active, is_default, created_at, updated_at FROM system_prompts WHERE user_id=$1 ORDER BY updated_at DESC`, uid)
+rows, err := dbc.Query(`SELECT id, name, content, preferred_llms, active, is_default, created_at::text, updated_at::text FROM system_prompts WHERE user_id=$1 ORDER BY updated_at DESC`, uid)
 		if err != nil {
 			log.Printf("[Prompts] list err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
