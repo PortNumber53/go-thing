@@ -503,6 +503,270 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
     "public" | "private" | null
   >(null);
 
+  // --- Docker Shell: state, refs, and helpers (restored after merge) ---
+  type ShellTab = {
+    id: string;
+    title: string;
+    ws: WebSocket | null;
+    output: string;
+    input: string;
+    connected: boolean;
+    renaming?: boolean;
+    ready?: boolean;
+  };
+
+  const [shellTabs, setShellTabs] = React.useState<ShellTab[]>([]);
+  const [activeShellId, setActiveShellId] = React.useState<string | null>(null);
+  const shellAreaRef = React.useRef<HTMLDivElement | null>(null);
+  const [shellAreaHeight, setShellAreaHeight] = React.useState<number | null>(
+    null
+  );
+  const [creatingShell, setCreatingShell] = React.useState(false);
+
+  // Terminal instances and helpers per tab
+  const termRefMap = React.useRef<Map<string, Terminal>>(new Map());
+  const fitRefMap = React.useRef<Map<string, FitAddon>>(new Map());
+  const attachRefMap = React.useRef<Map<string, any>>(new Map());
+  const containerRefMap = React.useRef<Map<string, HTMLDivElement>>(new Map());
+  const openedRef = React.useRef<Set<string>>(new Set());
+  const lastSizeRef = React.useRef<Map<string, { cols: number; rows: number }>>(
+    new Map()
+  );
+  const reconnectTimersRef = React.useRef<Map<string, number>>(new Map());
+  const connectingRef = React.useRef<Set<string>>(new Set());
+
+  // Compute shell area height based on viewport and element position
+  const measureShellArea = React.useCallback(() => {
+    try {
+      const host = shellAreaRef.current;
+      if (!host) return;
+      const rect = host.getBoundingClientRect();
+      const TOOLBAR_H = 56; // fixed bottom toolbar height
+      const STATUS_H = message ? 56 : 0; // optional status bar height
+      const reserved = TOOLBAR_H + STATUS_H + 8; // add a small gap
+      const available = Math.floor(window.innerHeight - rect.top - reserved);
+      const next = Math.max(200, available);
+      setShellAreaHeight((prev) => (prev === next ? prev : next));
+    } catch {}
+  }, [message]);
+
+  React.useEffect(() => {
+    let raf = 0 as number | undefined;
+    const onResizeOrScroll = () => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() =>
+        measureShellArea()
+      ) as unknown as number;
+    };
+    measureShellArea();
+    window.addEventListener("resize", onResizeOrScroll);
+    window.addEventListener("scroll", onResizeOrScroll, {
+      passive: true,
+    } as any);
+    return () => {
+      window.removeEventListener("resize", onResizeOrScroll);
+      window.removeEventListener("scroll", onResizeOrScroll as any);
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [measureShellArea, tab, shellTabs.length, activeShellId]);
+
+  // Debounced fit+resize for the active terminal
+  const resizeTimersRef = React.useRef<Map<string, number>>(new Map());
+  function scheduleFitAndResize(id: string) {
+    try {
+      const prev = resizeTimersRef.current.get(id);
+      if (prev) window.clearTimeout(prev);
+    } catch {}
+    const tmr = window.setTimeout(() => {
+      try {
+        const fit = fitRefMap.current.get(id);
+        const el = containerRefMap.current.get(id);
+        const isVisible =
+          !!el &&
+          el.offsetParent !== null &&
+          el.clientWidth > 0 &&
+          el.clientHeight > 0;
+        if (!isVisible) return;
+        fit?.fit?.();
+        try {
+          sendResize(id);
+        } catch {}
+      } catch {}
+    }, 80);
+    resizeTimersRef.current.set(id, tmr);
+  }
+
+  // Refit active terminal when height changes or tab switches (debounced)
+  React.useEffect(() => {
+    try {
+      if (!activeShellId) return;
+      // Ensure connection when becoming visible
+      try {
+        const t = shellTabs.find((x) => x.id === activeShellId);
+        if (!t?.ws || t.ws.readyState === WebSocket.CLOSED) {
+          connectWS(activeShellId);
+        }
+      } catch {}
+      scheduleFitAndResize(activeShellId);
+    } catch {}
+  }, [shellAreaHeight, activeShellId]);
+
+  // Fit only the active terminal on window resize (debounced)
+  React.useEffect(() => {
+    const onResize = () => {
+      try {
+        if (!activeShellId) return;
+        scheduleFitAndResize(activeShellId);
+      } catch {}
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [activeShellId]);
+
+  // Mount xterm into container
+  function registerTermContainer(id: string, el: HTMLDivElement | null) {
+    if (!el) return;
+    // Track container element and avoid re-opening on the same element
+    const prevEl = containerRefMap.current.get(id);
+    const isSameEl = prevEl === el;
+    if (!isSameEl) {
+      containerRefMap.current.set(id, el);
+    }
+    let term = termRefMap.current.get(id);
+    if (!term) {
+      term = new Terminal({
+        convertEol: true,
+        cursorBlink: true,
+        scrollback: 2000,
+        fontFamily:
+          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+        theme: { background: "#0B1220", foreground: "#E5E7EB" },
+      });
+      const fit = new FitAddon();
+      (term as any).loadAddon(fit as any);
+      termRefMap.current.set(id, term);
+      fitRefMap.current.set(id, fit);
+    }
+    try {
+      // Only open once per tab id
+      if (!openedRef.current.has(id)) {
+        (term as Terminal).open(el);
+        openedRef.current.add(id);
+      }
+      try {
+        sendResize(id);
+      } catch {}
+      setTimeout(() => {
+        try {
+          sendResize(id);
+        } catch {}
+      }, 0);
+    } catch {}
+    // Ensure websocket is connected after mount & initial fit, but only for the active tab
+    try {
+      if (activeShellId === id) {
+        const t = shellTabs.find((x) => x.id === id);
+        const ws = t?.ws;
+        if (!ws || ws.readyState === WebSocket.CLOSED) {
+          connectWS(id);
+        }
+      }
+    } catch {}
+  }
+
+  // Connect WebSocket for a tab and attach to xterm
+  function connectWS(id: string) {
+    try {
+      // Prevent duplicate concurrent connections
+      if (connectingRef.current.has(id)) return;
+      const existing = shellTabs.find((x) => x.id === id)?.ws;
+      if (
+        existing &&
+        (existing.readyState === WebSocket.CONNECTING ||
+          existing.readyState === WebSocket.OPEN)
+      ) {
+        return;
+      }
+      connectingRef.current.add(id);
+      const fit = fitRefMap.current.get(id) as any;
+      const dims = fit?.proposeDimensions?.();
+      const cols = dims?.cols ? Math.max(20, Math.min(240, dims.cols | 0)) : 80;
+      const rows = dims?.rows ? Math.max(5, Math.min(120, dims.rows | 0)) : 24;
+      const url = `${wsBase()}/shell/ws/${encodeURIComponent(
+        id
+      )}?cols=${cols}&rows=${rows}`;
+      const ws = new WebSocket(url);
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => {
+        try {
+          setShellTabs((tabs) =>
+            tabs.map((t) => (t.id === id ? { ...t, ws, connected: true } : t))
+          );
+          setTimeout(() => {
+            try {
+              sendResize(id);
+            } catch {}
+          }, 0);
+        } catch {}
+      };
+
+      ws.onclose = () => {
+        try {
+          setShellTabs((tabs) =>
+            tabs.map((t) => (t.id === id ? { ...t, connected: false } : t))
+          );
+        } catch {}
+        connectingRef.current.delete(id);
+        // Reconnect after delay if tab still exists
+        try {
+          const exists = shellTabs.some((t) => t.id === id);
+          if (exists) {
+            const tmr = window.setTimeout(() => connectWS(id), 2000);
+            reconnectTimersRef.current.set(id, tmr);
+          }
+        } catch {}
+      };
+
+      ws.onerror = () => {
+        // swallow; onclose will handle reconnect
+      };
+
+      // Stream via AttachAddon for convenience
+      try {
+        const term = termRefMap.current.get(id);
+        if (term) {
+          // Dispose prior attach to avoid duplicates
+          const prior = attachRefMap.current.get(id);
+          try {
+            prior?.dispose?.();
+          } catch {}
+          const attach = new AttachAddon(
+            ws as any,
+            { bidirectional: true } as any
+          );
+          (term as any).loadAddon(attach as any);
+          attachRefMap.current.set(id, attach);
+        }
+      } catch {}
+
+      // Ready after first message
+      const onFirst = () => {
+        try {
+          setShellTabs((tabs) =>
+            tabs.map((t) => (t.id === id ? { ...t, ready: true } : t))
+          );
+        } catch {}
+        setCreatingShell(false);
+        try {
+          ws.removeEventListener("message", onFirst as any);
+        } catch {}
+        connectingRef.current.delete(id);
+      };
+      ws.addEventListener("message", onFirst as any, { once: true } as any);
+    } catch {}
+  }
+
   // Personal Settings: System Prompts state
   type Prompt = {
     id: number;
@@ -708,7 +972,6 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
       );
     }
   }
-
 
   React.useEffect(() => {
     let aborted = false;
@@ -1023,14 +1286,14 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
       output: "",
       input: "",
       connected: false,
+      ready: false,
     };
+    if (creatingShell) return;
+    setCreatingShell(true);
     setShellTabs((tabs) => [...tabs, newTab]);
     setActiveShellId(id);
 
-    // Defer until container is rendered then connect WS
-    setTimeout(() => {
-      connectWS(id);
-    }, 0);
+    // WebSocket will be connected after terminal mounts in registerTermContainer
   }
 
   function sendResize(id: string) {
@@ -1239,7 +1502,13 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
       aria-atomic="false"
       style={{
         padding: "1rem",
-        paddingBottom: tab === "docker" || tab === "personal" ? "8rem" : "1rem",
+        paddingBottom:
+          tab === "docker" ||
+          tab === "personal" ||
+          tab === "profile" ||
+          tab === "password"
+            ? "8rem"
+            : "1rem",
       }}
     >
       <h1 style={{ margin: "0 0 1rem 0" }}>User Settings</h1>
@@ -1261,7 +1530,7 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
           {tab === "profile" && (
             <section style={{ marginBottom: "2rem" }}>
               <h2 style={{ margin: "0 0 0.75rem 0" }}>Profile</h2>
-              <form onSubmit={saveProfile}>
+              <form id="profileForm" onSubmit={saveProfile}>
                 <div
                   className="row"
                   style={{ gap: "0.5rem", alignItems: "baseline" }}
@@ -1284,12 +1553,52 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
                     onChange={(e) => setName(e.target.value)}
                   />
                 </div>
-                <div style={{ marginTop: "0.75rem" }}>
-                  <button type="submit" disabled={saving}>
+              </form>
+              {/* Bottom status bar above the action bar (Profile tab only) */}
+              {message && (
+                <div
+                  role="status"
+                  className="system-msg"
+                  style={{
+                    position: "fixed",
+                    left: 0,
+                    right: 0,
+                    bottom: "56px",
+                    background: "#0B1220",
+                    borderTop: "1px solid #1F2937",
+                    borderBottom: "1px solid #1F2937",
+                    padding: "0.5rem 1rem",
+                    color: "#F9FAFB",
+                    zIndex: 2,
+                  }}
+                >
+                  {message}
+                </div>
+              )}
+              {/* Fixed action bar at the bottom */}
+              <div
+                style={{
+                  position: "fixed",
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  background: "#111827",
+                  borderTop: "1px solid #1F2937",
+                  padding: "0.75rem 1rem",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  zIndex: 2,
+                }}
+              >
+                <div style={{ display: "flex", gap: "0.5rem" }} />
+                <div style={{ display: "flex", gap: "0.5rem" }}>
+                  <button type="submit" form="profileForm" disabled={saving}>
                     Save
                   </button>
                 </div>
-              </form>
+              </div>
             </section>
           )}
 
@@ -1490,7 +1799,7 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
           {tab === "password" && (
             <section>
               <h2 style={{ margin: "0 0 0.75rem 0" }}>Change Password</h2>
-              <form onSubmit={changePassword}>
+              <form id="passwordForm" onSubmit={changePassword}>
                 <div
                   className="row"
                   style={{ gap: "0.5rem", alignItems: "baseline" }}
@@ -1535,12 +1844,48 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
                     autoComplete="new-password"
                   />
                 </div>
-                <div style={{ marginTop: "0.75rem" }}>
-                  <button type="submit" disabled={changing}>
-                    Change password
-                  </button>
-                </div>
               </form>
+              {/* Bottom status bar above the action bar (Password tab only) */}
+              {message && (
+                <div
+                  role="status"
+                  className="system-msg"
+                  style={{
+                    position: "fixed",
+                    left: 0,
+                    right: 0,
+                    bottom: "56px",
+                    background: "#0B1220",
+                    borderTop: "1px solid #1F2937",
+                    borderBottom: "1px solid #1F2937",
+                    padding: "0.5rem 1rem",
+                    color: "#F9FAFB",
+                    zIndex: 2,
+                  }}
+                >
+                  {message}
+                </div>
+              )}
+              {/* Fixed action bar at the bottom */}
+              <div
+                style={{
+                  position: "fixed",
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  background: "#111827",
+                  borderTop: "1px solid #1F2937",
+                  padding: "0.75rem 1rem",
+                  display: "flex",
+                  justifyContent: "flex-end",
+                  gap: "0.5rem",
+                  zIndex: 2,
+                }}
+              >
+                <button type="submit" form="passwordForm" disabled={changing}>
+                  {changing ? "Changing…" : "Change password"}
+                </button>
+              </div>
             </section>
           )}
 
@@ -1792,7 +2137,11 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
                     >
                       {dockerRemoving ? "Removing…" : "Remove"}
                     </button>
-                    <button type="button" onClick={openShellTab}>
+                    <button
+                      type="button"
+                      onClick={openShellTab}
+                      disabled={creatingShell}
+                    >
                       Shell into
                     </button>
                   </div>
@@ -1936,6 +2285,7 @@ function SettingsPage({ me, tab, onChangeTab, onNameUpdated }: SettingsProps) {
                     type="button"
                     onClick={openShellTab}
                     style={{ marginLeft: "auto" }}
+                    disabled={creatingShell}
                   >
                     + New Tab
                   </button>

@@ -42,6 +42,21 @@ type promptResp struct {
 	UpdatedAt     string   `json:"updated_at"`
 }
 
+// parseStringSliceJSON unmarshals a JSON array string into []string, returning an empty slice on error.
+func parseStringSliceJSON(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return []string{}
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return []string{}
+	}
+	if out == nil {
+		return []string{}
+	}
+	return out
+}
+
 // RegisterAPISettingsRoutes registers authenticated settings-related endpoints under the provided auth group.
 // Expects the group to already include requireAuth() middleware.
 func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
@@ -265,7 +280,7 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database not initialized"})
 			return
 		}
-		rows, err := dbc.Query(`SELECT id, name, content, preferred_llms, active, is_default, created_at::text, updated_at::text FROM system_prompts WHERE user_id=$1 ORDER BY updated_at DESC`, uid)
+		rows, err := dbc.Query(`SELECT id, name, content, to_json(COALESCE(preferred_llms,'{}'))::text, active, is_default, created_at::text, updated_at::text FROM system_prompts WHERE user_id=$1 ORDER BY updated_at DESC`, uid)
 		if err != nil {
 			log.Printf("[Prompts] list err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
@@ -275,14 +290,13 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 		prompts := []promptResp{}
 		for rows.Next() {
 			var p promptResp
-			if err := rows.Scan(&p.ID, &p.Name, &p.Content, &p.PreferredLLMs, &p.Active, &p.IsDefault, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			var llmsJSON string
+			if err := rows.Scan(&p.ID, &p.Name, &p.Content, &llmsJSON, &p.Active, &p.IsDefault, &p.CreatedAt, &p.UpdatedAt); err != nil {
 				log.Printf("[Prompts] scan err: %v", err)
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
 				return
 			}
-			if p.PreferredLLMs == nil {
-				p.PreferredLLMs = []string{}
-			}
+			p.PreferredLLMs = parseStringSliceJSON(llmsJSON)
 			prompts = append(prompts, p)
 		}
 		c.JSON(http.StatusOK, gin.H{"prompts": prompts})
@@ -345,17 +359,19 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			}
 		}
 		var pr promptResp
+		var llmsJSON string
 		err = tx.QueryRow(
 			`INSERT INTO system_prompts(user_id, name, content, preferred_llms, active, is_default)
-			 VALUES($1,$2,$3,$4,$5,$6)
-			 RETURNING id, name, content, preferred_llms, active, is_default, created_at::text, updated_at::text`,
+             VALUES($1,$2,$3,$4,$5,$6)
+             RETURNING id, name, content, to_json(COALESCE(preferred_llms,'{}'))::text, active, is_default, created_at::text, updated_at::text`,
 			uid, name, content, req.PreferredLLMs, active, isDefault,
-		).Scan(&pr.ID, &pr.Name, &pr.Content, &pr.PreferredLLMs, &pr.Active, &pr.IsDefault, &pr.CreatedAt, &pr.UpdatedAt)
+		).Scan(&pr.ID, &pr.Name, &pr.Content, &llmsJSON, &pr.Active, &pr.IsDefault, &pr.CreatedAt, &pr.UpdatedAt)
 		if err != nil {
 			log.Printf("[Prompts] insert err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to insert"})
 			return
 		}
+		pr.PreferredLLMs = parseStringSliceJSON(llmsJSON)
 		if err := tx.Commit(); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
 			return
@@ -484,14 +500,16 @@ func RegisterAPISettingsRoutes(auth *gin.RouterGroup) {
 			return
 		}
 		// updated_at is bumped by trigger; return updated row
-		q := "UPDATE system_prompts SET " + strings.Join(setParts, ", ") + " WHERE id=$" + strconv.Itoa(idx) + " AND user_id=$" + strconv.Itoa(idx+1) + " RETURNING id, name, content, preferred_llms, active, is_default, created_at::text, updated_at::text"
+		q := "UPDATE system_prompts SET " + strings.Join(setParts, ", ") + " WHERE id=$" + strconv.Itoa(idx) + " AND user_id=$" + strconv.Itoa(idx+1) + " RETURNING id, name, content, to_json(COALESCE(preferred_llms,'{}'))::text, active, is_default, created_at::text, updated_at::text"
 		args = append(args, pid, uid)
 		var upr promptResp
-		if err := tx.QueryRow(q, args...).Scan(&upr.ID, &upr.Name, &upr.Content, &upr.PreferredLLMs, &upr.Active, &upr.IsDefault, &upr.CreatedAt, &upr.UpdatedAt); err != nil {
+		var uLLMsJSON string
+		if err := tx.QueryRow(q, args...).Scan(&upr.ID, &upr.Name, &upr.Content, &uLLMsJSON, &upr.Active, &upr.IsDefault, &upr.CreatedAt, &upr.UpdatedAt); err != nil {
 			log.Printf("[Prompts] update err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update"})
 			return
 		}
+		upr.PreferredLLMs = parseStringSliceJSON(uLLMsJSON)
 		if err := tx.Commit(); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed"})
 			return
